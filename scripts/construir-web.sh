@@ -41,13 +41,13 @@ done
 rustup target add wasm32-unknown-unknown >/dev/null
 
 echo "→ wasm-pack build (perfil release-web)"
-# `--profile` do wasm-pack não conhece perfis custom; passa-se pelo cargo.
+# `--profile` é o do cargo (`[profile.release-web]` no Cargo.toml do workspace);
+# não se passa `--release` junto, o wasm-pack recusa os dois.
 wasm-pack build crates/revelacao-web \
     --target web \
-    --release \
+    --profile release-web \
     --out-dir "../../$SAIDA" \
-    --out-name revelacao_web \
-    -- --profile release-web
+    --out-name revelacao_web
 
 echo "→ wasm-opt -Oz"
 mkdir -p "$PUBLICO" "$FONTE"
