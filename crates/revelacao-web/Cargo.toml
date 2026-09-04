@@ -1,0 +1,23 @@
+[package]
+name = "revelacao-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "O motor de revelação compilado para o navegador: wasm-bindgen sobre o revelacao-core, com WebGPU e WebGL2"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# O `webgl` é para o navegador sem WebGPU (Safari e Firefox antigos, Android).
+revelacao-core = { path = "../revelacao-core", features = ["webgl"] }
+wgpu = "23.0"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "console"] }
+# Um `panic` vira mensagem legível no console em vez de `unreachable executed`.
+console_error_panic_hook = "0.1"
+serde_json.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
