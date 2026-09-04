@@ -1,0 +1,43 @@
+[package]
+name = "revelacao-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "O motor de revelação do VintageLightbox: os 46 ajustes em WGSL, o enquadramento e o JPEG — sem janela, sem banco, sem rede"
+
+[lib]
+name = "revelacao_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nomes-dos-ajustes"
+path = "src/bin/nomes-dos-ajustes.rs"
+
+[features]
+# O backend WebGL2 do wgpu, para o navegador sem WebGPU. Só o crate wasm liga.
+webgl = ["wgpu/webgl"]
+
+[dependencies]
+# 🚨 A mesma versão do resto do workspace: o wgpu é quem compila o WGSL, e
+# versão diferente é compilador diferente para o mesmo shader.
+wgpu = "23.0"
+bytemuck = { version = "1.14", features = ["derive"] }
+# Só o JPEG: é o que o site recebe e o que a exportação grava. O desktop liga o
+# resto das features pelo `infrastructure`, e a unificação do cargo faz o resto.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+lru = "0.16.2"
+# O `map_async` avisa por callback; o canal transforma isso num `await` que
+# funciona igual na thread de fundo do desktop e no laço de eventos do navegador.
+futures-channel = "0.3"
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Bloquear numa thread é privilégio do desktop: o navegador não tem como.
+pollster = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Ceder a vez ao navegador entre um `poll` e outro: o WebGL2 só atualiza o
+# estado dos fences entre tarefas do laço de eventos.
+gloo-timers = { version = "0.3", features = ["futures"] }
