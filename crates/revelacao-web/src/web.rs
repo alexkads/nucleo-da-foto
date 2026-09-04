@@ -110,34 +110,71 @@ pub fn enquadramento(corte: &[f32], largura: u32, altura: u32) -> Result<Vec<f32
 
 /// Abre o motor sobre o canvas: WebGPU se houver, senão WebGL2.
 ///
-/// Rejeita quando nenhum dos dois dá adaptador — a tela do site mostra "este
-/// navegador não tem GPU disponível".
+/// # 🚨 Por que o backend é escolhido **antes** de tocar no canvas
+///
+/// Um canvas só aceita **um** tipo de contexto: pedir `webgpu` nele o impede
+/// de dar `webgl2` depois. Uma instância com os dois backends resolve a
+/// surface pelo primeiro que responder — e num navegador onde `navigator.gpu`
+/// **existe mas não devolve adaptador** (Chrome sem GPU compatível, WebGPU
+/// desligado por política, headless) o canvas era consumido pela tentativa
+/// WebGPU e o WebGL2 já não podia mais entrar. O editor dizia "este navegador
+/// não tem GPU" numa máquina com WebGL2 perfeito.
+///
+/// 🔑 Isso **não aparece em HTTP**: `navigator.gpu` só existe em contexto
+/// seguro, então em `http://` o caminho WebGPU nem é tentado. Foi encontrado
+/// em produção, em 2026-09-04, com a pilha local passando.
+///
+/// O conserto é perguntar primeiro: `request_adapter` **sem**
+/// `compatible_surface` não toca no canvas. Só depois de saber quem responde é
+/// que a surface é criada, com uma instância de um backend só.
 #[wasm_bindgen]
 pub async fn abrir(canvas: web_sys::HtmlCanvasElement) -> Result<Motor, JsValue> {
     console_error_panic_hook::set_once();
 
+    let sem_superficie = wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    };
+
+    // 1. WebGPU: a pergunta **não** toca no canvas, e por isso pode vir antes.
     let instancia = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+        backends: wgpu::Backends::BROWSER_WEBGPU,
         ..Default::default()
     });
-    let superficie = instancia
-        .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
-        .map_err(|e| erro(format!("o canvas não virou superfície: {e}")))?;
+    let webgpu = instancia.request_adapter(&sem_superficie).await;
 
-    let adaptador = instancia
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&superficie),
-            force_fallback_adapter: false,
-        })
-        .await
-        .ok_or_else(|| erro("nenhum adaptador de GPU: nem WebGPU nem WebGL2"))?;
+    let (adaptador, superficie, backend) = match webgpu {
+        Some(adaptador) => {
+            let superficie = instancia
+                .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+                .map_err(|e| erro(format!("o canvas não virou superfície (webgpu): {e}")))?;
+            (adaptador, superficie, "webgpu")
+        }
+        // 2. Não respondeu: instância nova, só GL — e aqui a surface vem
+        //    **antes**, porque o backend WebGL2 nasce de um canvas: sem ele
+        //    não há contexto, e `request_adapter` devolveria `None` mesmo num
+        //    navegador que tem WebGL2 de sobra.
+        None => {
+            let instancia = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::GL,
+                ..Default::default()
+            });
+            let superficie = instancia
+                .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+                .map_err(|e| erro(format!("o canvas não virou superfície (webgl): {e}")))?;
+            let adaptador = instancia
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    compatible_surface: Some(&superficie),
+                    ..sem_superficie
+                })
+                .await
+                .ok_or_else(|| erro("nenhum adaptador de GPU: nem WebGPU nem WebGL2"))?;
+            (adaptador, superficie, "webgl")
+        }
+    };
 
     let info = adaptador.get_info();
-    let backend = match info.backend {
-        wgpu::Backend::Gl => "webgl",
-        _ => "webgpu",
-    };
     web_sys::console::log_1(&JsValue::from_str(&format!(
         "[Revelação] adaptador: {} ({backend}, {:?})",
         info.name, info.device_type
@@ -158,9 +195,8 @@ pub async fn abrir(canvas: web_sys::HtmlCanvasElement) -> Result<Motor, JsValue>
             ))
         })?;
 
-    // O formato do canvas — o primeiro que **não** é sRGB, para o byte na tela
-    // ser o byte do desktop e do arquivo. `Bgra8Unorm` no WebGPU, `Rgba8Unorm`
-    // no WebGL2.
+    // O formato do canvas é o primeiro que **não** é sRGB (Bgra8Unorm no
+    // WebGPU, Rgba8Unorm no WebGL2): o byte na tela é o byte do arquivo.
     let capacidades = superficie.get_capabilities(&adaptador);
     let formato = capacidades
         .formats
