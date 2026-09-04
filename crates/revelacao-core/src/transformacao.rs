@@ -115,6 +115,64 @@ impl Corte {
     pub fn espelho_v(&self) -> bool {
         self.espelho_v
     }
+
+    /// O corte não muda nada? Ver [`e_identidade`], que é onde a folga mora.
+    pub fn e_inteiro(&self) -> bool {
+        e_identidade(self)
+    }
+
+    /// As dimensões depois dos espelhos e do giro de 90° — **o espaço em que o
+    /// retângulo mora**.
+    ///
+    /// Espelhar não muda tamanho; girar por um múltiplo ímpar de 90° troca os
+    /// lados. É a conversão que o preview precisa fazer para desenhar o
+    /// retângulo no lugar certo.
+    pub fn dimensoes_giradas(&self, largura: u32, altura: u32) -> (u32, u32) {
+        if self.giro_90.rem_euclid(4) % 2 == 1 {
+            (altura, largura)
+        } else {
+            (largura, altura)
+        }
+    }
+
+    /// O retângulo em pixels, **dentro do espaço já girado** — exatamente o que
+    /// [`recortar_reto`] copia.
+    ///
+    /// 🚨 **É a única conta.** Quem recorta e quem **desenha o preview** leem
+    /// daqui: dois arredondamentos diferentes fariam o operador enquadrar uma
+    /// coisa na tela e receber outra no arquivo, que é o pior desfecho possível
+    /// num estúdio de retrato.
+    pub fn retangulo(&self, largura_girada: u32, altura_girada: u32) -> (u32, u32, u32, u32) {
+        let x =
+            ((self.x * largura_girada as f32).round() as u32).min(largura_girada.saturating_sub(1));
+        let y =
+            ((self.y * altura_girada as f32).round() as u32).min(altura_girada.saturating_sub(1));
+        let w = ((self.largura * largura_girada as f32).round() as u32)
+            .max(1)
+            .min(largura_girada - x);
+        let h = ((self.altura * altura_girada as f32).round() as u32)
+            .max(1)
+            .min(altura_girada - y);
+        (x, y, w, h)
+    }
+
+    /// O tamanho do arquivo que sai, a partir das dimensões **de origem**.
+    ///
+    /// ⚠️ Com ângulo é diferente do retângulo: o endireitamento reamostra para
+    /// uma saída do tamanho pedido, sem o `min` da borda — o que cai fora da
+    /// foto vira borda, não corta o resultado.
+    pub fn dimensoes_de_saida(&self, largura: u32, altura: u32) -> (u32, u32) {
+        let (l, a) = self.dimensoes_giradas(largura, altura);
+        if self.angulo == 0.0 {
+            let (_, _, w, h) = self.retangulo(l, a);
+            (w, h)
+        } else {
+            (
+                ((self.largura * l as f32).round() as u32).max(1),
+                ((self.altura * a as f32).round() as u32).max(1),
+            )
+        }
+    }
 }
 
 /// A foto pronta para a tela.
@@ -201,20 +259,9 @@ fn espelhar_e_girar(imagem: &DynamicImage, corte: &Corte) -> DynamicImage {
 /// bordas, e o resultado é uma foto ligeiramente menos nítida do que a original —
 /// sem ninguém ter pedido nada.
 fn recortar_reto(base: &DynamicImage, corte: &Corte) -> DynamicImage {
+    // `base` já passou por espelhos e giro: as dimensões aqui são as giradas.
     let (largura, altura) = base.dimensions();
-
-    let x = (corte.x() * largura as f32).round() as u32;
-    let y = (corte.y() * altura as f32).round() as u32;
-    let x = x.min(largura.saturating_sub(1));
-    let y = y.min(altura.saturating_sub(1));
-
-    let w = ((corte.largura() * largura as f32).round() as u32)
-        .max(1)
-        .min(largura - x);
-    let h = ((corte.altura() * altura as f32).round() as u32)
-        .max(1)
-        .min(altura - y);
-
+    let (x, y, w, h) = corte.retangulo(largura, altura);
     base.crop_imm(x, y, w, h)
 }
 
@@ -230,8 +277,22 @@ fn endireitar_e_recortar(base: &DynamicImage, corte: &Corte) -> DynamicImage {
     let (largura, altura) = origem.dimensions();
     let (largura_f, altura_f) = (largura as f32, altura as f32);
 
-    let saida_w = ((corte.largura() * largura_f).round() as u32).max(1);
-    let saida_h = ((corte.altura() * altura_f).round() as u32).max(1);
+    // `base` já está girada, e `dimensoes_de_saida` volta a girar — por isso a
+    // chamada usa as dimensões **de origem** (as giradas, desgiradas de novo é
+    // o mesmo par quando o giro é o mesmo). Aqui basta a conta direta, que é a
+    // que aquele método faz no ramo com ângulo.
+    let (saida_w, saida_h) = corte.dimensoes_de_saida(
+        if corte.giro_90().rem_euclid(4) % 2 == 1 {
+            altura
+        } else {
+            largura
+        },
+        if corte.giro_90().rem_euclid(4) % 2 == 1 {
+            largura
+        } else {
+            altura
+        },
+    );
 
     // O aspecto entra na conta porque a rotação é geométrica, e o espaço
     // normalizado (0..1 nos dois eixos) não é. Sem esta correção, endireitar uma
@@ -305,6 +366,90 @@ fn amostrar(origem: &RgbaImage, u: f32, v: f32) -> Rgba<u8> {
 
 #[cfg(test)]
 mod testes {
+    /// 🚨 **O que o preview mostra é o que o arquivo recebe.**
+    ///
+    /// O editor do navegador não pode recalcular o enquadramento por conta
+    /// própria: ele desenha o retângulo a partir de [`Corte::retangulo`] e
+    /// dimensiona a área a partir de [`Corte::dimensoes_de_saida`]. Se um
+    /// desses métodos discordasse de [`aplicar`] por um arredondamento, o
+    /// operador enquadraria uma coisa na tela e o cliente receberia outra — e
+    /// nada falharia em lugar nenhum.
+    ///
+    /// Este teste amarra os três sobre uma grade de casos, com e sem ângulo.
+    #[test]
+    fn as_dimensoes_de_saida_sao_as_do_arquivo() {
+        let entrada = quadrantes(64);
+        let casos = [
+            ("inteiro", Corte::inteiro()),
+            (
+                "retangulo",
+                Corte::novo(0.1, 0.2, 0.5, 0.3, 0, 0.0, false, false),
+            ),
+            (
+                "girado 90",
+                Corte::novo(0.1, 0.2, 0.5, 0.3, 1, 0.0, false, false),
+            ),
+            (
+                "girado 180 com espelho",
+                Corte::novo(0.0, 0.25, 0.8, 0.5, 2, 0.0, true, false),
+            ),
+            (
+                "com angulo",
+                Corte::novo(0.1, 0.1, 0.6, 0.6, 0, 12.0, false, false),
+            ),
+            (
+                "girado com angulo",
+                Corte::novo(0.05, 0.15, 0.7, 0.4, 3, -8.0, false, true),
+            ),
+            (
+                "minusculo",
+                Corte::novo(0.9, 0.9, 0.01, 0.01, 0, 0.0, false, false),
+            ),
+        ];
+        for (rotulo, corte) in casos {
+            let saida = aplicar(&entrada, &corte, true);
+            assert_eq!(
+                corte.dimensoes_de_saida(64, 64),
+                saida.dimensions(),
+                "`{rotulo}`: o preview anunciaria um tamanho e o arquivo sairia com outro"
+            );
+        }
+    }
+
+    /// O retângulo mora no espaço já girado, e cabe dentro dele.
+    #[test]
+    fn o_retangulo_cabe_no_espaco_girado() {
+        // 90°: os lados trocam, e o retângulo é medido sobre os lados trocados.
+        let corte = Corte::novo(0.5, 0.0, 0.5, 1.0, 1, 0.0, false, false);
+        assert_eq!(corte.dimensoes_giradas(80, 40), (40, 80));
+        let (x, y, w, h) = corte.retangulo(40, 80);
+        assert_eq!((x, y, w, h), (20, 0, 20, 80));
+
+        // Sem giro, os mesmos números valem sobre os lados originais.
+        let reto = Corte::novo(0.5, 0.0, 0.5, 1.0, 0, 0.0, false, false);
+        assert_eq!(reto.dimensoes_giradas(80, 40), (80, 40));
+        assert_eq!(reto.retangulo(80, 40), (40, 0, 40, 40));
+
+        // Nunca sai da imagem, nem com o retângulo colado na borda.
+        let borda = Corte::novo(0.99, 0.99, 1.0, 1.0, 0, 0.0, false, false);
+        let (x, y, w, h) = borda.retangulo(100, 100);
+        assert!(x + w <= 100 && y + h <= 100, "{x},{y},{w},{h}");
+        assert!(w >= 1 && h >= 1);
+    }
+
+    /// `e_inteiro` é o `e_identidade`, exposto para quem está fora do módulo —
+    /// o editor pergunta "há enquadramento?" para saber se pode usar o caminho
+    /// rápido da GPU.
+    #[test]
+    fn e_inteiro_responde_o_mesmo_que_a_identidade() {
+        assert!(Corte::inteiro().e_inteiro());
+        assert!(Corte::novo(0.00001, 0.0, 0.99999, 1.0, 0, 0.0, false, false).e_inteiro());
+        assert!(!Corte::novo(0.1, 0.0, 0.8, 1.0, 0, 0.0, false, false).e_inteiro());
+        assert!(!Corte::novo(0.0, 0.0, 1.0, 1.0, 1, 0.0, false, false).e_inteiro());
+        assert!(!Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 3.0, false, false).e_inteiro());
+        assert!(!Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, true, false).e_inteiro());
+    }
+
     /// 🔑 **O caminho rápido devolve exatamente o que o lento devolveria.**
     ///
     /// Ele existe por desempenho — 8,6 ms por resultado da GPU numa foto de
@@ -523,6 +668,52 @@ mod testes {
             a.to_rgba8().into_raw(),
             b.to_rgba8().into_raw(),
             "30° tem de mudar alguma coisa"
+        );
+    }
+
+    /// 🚨 **O endireitamento inclina a linha do horizonte, e para que lado.**
+    ///
+    /// `o_sinal_do_angulo_importa` prova que +θ e −θ diferem; este prova o que
+    /// eles **fazem** — e é o que o preview do navegador precisa saber para
+    /// girar do mesmo lado. Um sinal trocado aqui passaria por todos os outros
+    /// testes e faria o operador endireitar o horizonte para o lado errado.
+    #[test]
+    fn o_endireitamento_inclina_a_linha_do_horizonte_no_sentido_horario() {
+        // Metade de cima branca, metade de baixo preta: uma linha reta no meio.
+        let lado = 200u32;
+        let mut img = RgbaImage::new(lado, lado);
+        for (_, y, p) in img.enumerate_pixels_mut() {
+            *p = if y < lado / 2 {
+                Rgba([255, 255, 255, 255])
+            } else {
+                Rgba([0, 0, 0, 255])
+            };
+        }
+        let entrada = DynamicImage::ImageRgba8(img);
+
+        // Recorte central, para os cantos não virem de fora da foto.
+        let reto = Corte::novo(0.25, 0.25, 0.5, 0.5, 0, 0.0, false, false);
+        let torto = Corte::novo(0.25, 0.25, 0.5, 0.5, 0, 20.0, false, false);
+
+        let transicao = |img: &DynamicImage, x: u32| -> u32 {
+            let rgba = img.to_rgba8();
+            (0..rgba.height())
+                .find(|&y| rgba.get_pixel(x, y).0[0] < 128)
+                .unwrap_or(rgba.height())
+        };
+
+        let a = aplicar(&entrada, &reto, true);
+        assert_eq!(
+            transicao(&a, 5),
+            transicao(&a, a.width() - 6),
+            "sem ângulo a linha é horizontal"
+        );
+
+        let b = aplicar(&entrada, &torto, true);
+        let (esquerda, direita) = (transicao(&b, 5), transicao(&b, b.width() - 6));
+        assert!(
+            direita > esquerda,
+            "girar +20° baixa o lado direito da linha: esquerda {esquerda}, direita {direita}"
         );
     }
 

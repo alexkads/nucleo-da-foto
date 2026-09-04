@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use revelacao_core::{Ajustes, Entrada};
+use revelacao_core::{Ajustes, Corte, Entrada};
 use wasm_bindgen::prelude::*;
 
 /// O motor aberto sobre um `<canvas>`.
@@ -49,6 +49,63 @@ pub struct Motor {
 
 fn erro(mensagem: impl Into<String>) -> JsValue {
     JsValue::from_str(&mensagem.into())
+}
+
+/// Quantos números o enquadramento carrega.
+const CAMPOS_DO_CORTE: usize = 8;
+
+/// O enquadramento vindo do JavaScript: `[x, y, largura, altura, giro_90,
+/// angulo, espelho_h, espelho_v]`, na ordem de `Corte::novo`.
+///
+/// Os dois espelhos viajam como 0 ou 1 e o giro como inteiro num `f32`: um
+/// vetor só, do mesmo tipo do dos ajustes, é o que o `wasm-bindgen` passa sem
+/// custo. `Corte::novo` limita tudo, então valor fora da faixa entra corrigido
+/// em vez de virar erro — o mesmo tratamento que o desktop dá.
+fn corte_de_vetor(v: &[f32]) -> Result<Corte, JsValue> {
+    if v.len() != CAMPOS_DO_CORTE {
+        return Err(erro(format!(
+            "esperava {CAMPOS_DO_CORTE} campos de corte, recebi {}",
+            v.len()
+        )));
+    }
+    Ok(Corte::novo(
+        v[0],
+        v[1],
+        v[2],
+        v[3],
+        v[4] as i32,
+        v[5],
+        v[6] != 0.0,
+        v[7] != 0.0,
+    ))
+}
+
+/// O enquadramento neutro: a foto inteira, sem giro, ângulo ou espelho.
+#[wasm_bindgen]
+pub fn corte_inteiro() -> Vec<f32> {
+    vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+}
+
+/// A geometria do enquadramento, para a tela desenhá-lo — **calculada aqui**.
+///
+/// 🚨 O editor não recalcula nada: ele desenha o retângulo com estes números e
+/// anuncia o tamanho de saída com estes números. Dois arredondamentos
+/// diferentes fariam o operador enquadrar uma coisa na tela e o cliente receber
+/// outra, sem erro em lugar nenhum. Ver `Corte::retangulo` e o teste
+/// `as_dimensoes_de_saida_sao_as_do_arquivo`.
+///
+/// Devolve, nesta ordem: largura e altura **do espaço girado** (onde o
+/// retângulo mora), o retângulo (`x, y, w, h`) nesse espaço, e as dimensões do
+/// arquivo que vai sair.
+#[wasm_bindgen]
+pub fn enquadramento(corte: &[f32], largura: u32, altura: u32) -> Result<Vec<f32>, JsValue> {
+    let corte = corte_de_vetor(corte)?;
+    let (lg, ag) = corte.dimensoes_giradas(largura, altura);
+    let (x, y, w, h) = corte.retangulo(lg, ag);
+    let (sw, sh) = corte.dimensoes_de_saida(largura, altura);
+    Ok(vec![
+        lg as f32, ag as f32, x as f32, y as f32, w as f32, h as f32, sw as f32, sh as f32,
+    ])
 }
 
 /// Abre o motor sobre o canvas: WebGPU se houver, senão WebGL2.
@@ -209,19 +266,27 @@ impl Motor {
         Ok(())
     }
 
-    /// Revela uma imagem **inteira** (não a cópia de trabalho) e devolve o JPEG.
+    /// Revela uma imagem **inteira** (não a cópia de trabalho), aplica o
+    /// enquadramento e devolve o JPEG.
     ///
     /// É a exportação: o site manda a foto na resolução de saída, os mesmos 46
-    /// ajustes e a qualidade (1–100). Lê de volta da GPU e codifica com o mesmo
-    /// codificador do desktop.
+    /// ajustes, o enquadramento e a qualidade (1–100). Lê de volta da GPU e
+    /// codifica com o mesmo codificador do desktop.
+    ///
+    /// 🔑 **A ordem é a da tela**: o shader devolve a foto inteira e o
+    /// enquadramento vem **depois** — é o que `image_exporter.rs` faz no
+    /// desktop. Inverter daria uma vinheta centrada no quadro cortado em vez de
+    /// no original.
     pub async fn exportar_jpeg(
         &mut self,
         largura: u32,
         altura: u32,
         rgba: &[u8],
         ajustes: &[f32],
+        corte: &[f32],
         qualidade: u8,
     ) -> Result<Vec<u8>, JsValue> {
+        let corte = corte_de_vetor(corte)?;
         let ajustes = Ajustes::de_vetor(ajustes)
             .ok_or_else(|| erro(format!("esperava 46 ajustes, recebi {}", ajustes.len())))?;
         if rgba.len() != (largura as usize) * (altura as usize) * 4 {
@@ -242,7 +307,10 @@ impl Motor {
             .ok_or_else(|| erro("a GPU não devolveu a imagem revelada"))?;
         drop(pixels);
 
-        revelacao_core::jpeg::codificar(&revelada, qualidade.clamp(1, 100))
+        let enquadrada = revelacao_core::transformacao::aplicar(&revelada, &corte, true);
+        drop(revelada);
+
+        revelacao_core::jpeg::codificar(&enquadrada, qualidade.clamp(1, 100))
             .map_err(|e| erro(format!("o JPEG não codificou: {e}")))
     }
 }
