@@ -257,9 +257,28 @@ mod testes {
             .lines()
             .filter_map(|linha| linha.split(':').next())
             .map(str::trim)
-            .filter(|nome| !nome.is_empty() && !nome.starts_with("//"))
+            // O enchimento de 16 bytes do WebGL2 começa com `_` e não é campo.
+            .filter(|nome| !nome.is_empty() && !nome.starts_with("//") && !nome.starts_with('_'))
             .map(str::to_string)
             .collect()
+    }
+
+    /// O `struct Params` do WGSL, com o enchimento, ocupa os mesmos 192 bytes
+    /// que `TAMANHO_DO_UNIFORM` reserva — nem mais (o Rust não escreveria o
+    /// resto) nem menos (o WebGL2 recusaria o pipeline).
+    #[test]
+    fn o_enchimento_do_wgsl_fecha_os_192_bytes() {
+        let shader = include_str!("shaders/corpo.wgsl");
+        let campos = shader
+            .split("struct Params {")
+            .nth(1)
+            .and_then(|resto| resto.split('}').next())
+            .expect("o shader tem de declarar `struct Params`")
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains(": f32"))
+            .count();
+        assert_eq!(campos as u64 * 4, TAMANHO_DO_UNIFORM);
     }
 
     /// O `struct Params` do WGSL declara os mesmos 46 campos do `Ajustes`, na

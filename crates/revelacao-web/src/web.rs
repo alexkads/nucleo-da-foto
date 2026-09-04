@@ -76,20 +76,30 @@ pub async fn abrir(canvas: web_sys::HtmlCanvasElement) -> Result<Motor, JsValue>
         .await
         .ok_or_else(|| erro("nenhum adaptador de GPU: nem WebGPU nem WebGL2"))?;
 
-    let (backend, limites) = match adaptador.get_info().backend {
-        wgpu::Backend::Gl => (
-            "webgl",
-            wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adaptador.limits()),
-        ),
-        _ => (
-            "webgpu",
-            wgpu::Limits::default().using_resolution(adaptador.limits()),
-        ),
+    let info = adaptador.get_info();
+    let backend = match info.backend {
+        wgpu::Backend::Gl => "webgl",
+        _ => "webgpu",
     };
+    web_sys::console::log_1(&JsValue::from_str(&format!(
+        "[Revelação] adaptador: {} ({backend}, {:?})",
+        info.name, info.device_type
+    )));
+
+    // 🔑 **Os limites pedidos são exatamente os do adaptador.** `Limits::default()`
+    // é o piso de uma GPU de verdade e passa do que um adaptador de software
+    // (SwiftShader, o headless do Chrome) oferece — e `request_device` recusa
+    // qualquer limite acima do suportado. O que o adaptador diz que tem, ele
+    // dá; o que interessa ao motor é `max_texture_dimension_2d`, que vem junto.
+    let limites = adaptador.limits();
 
     let motor = revelacao_core::Motor::abrir_com(&adaptador, Entrada::Fragmento, limites)
         .await
-        .ok_or_else(|| erro("o adaptador respondeu, mas o dispositivo não abriu"))?;
+        .map_err(|e| {
+            erro(format!(
+                "o adaptador respondeu, mas o dispositivo não abriu: {e}"
+            ))
+        })?;
 
     // O formato do canvas — o primeiro que **não** é sRGB, para o byte na tela
     // ser o byte do desktop e do arquivo. `Bgra8Unorm` no WebGPU, `Rgba8Unorm`

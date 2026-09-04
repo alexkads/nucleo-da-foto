@@ -254,6 +254,7 @@ impl Motor {
             entrada,
             wgpu::Limits::default(),
         ))
+        .ok()
     }
 
     /// Abre o dispositivo num adaptador que quem chama já escolheu.
@@ -262,11 +263,14 @@ impl Motor {
     /// superfície do canvas, e os limites dependem do backend que respondeu
     /// (`Limits::downlevel_webgl2_defaults()` no WebGL2, com a resolução do
     /// adaptador por cima — o padrão sozinho declara 2048 px de textura).
+    ///
+    /// Devolve o erro do wgpu, e não `None`: no navegador a mensagem é a
+    /// única pista de por que um adaptador que respondeu não abriu.
     pub async fn abrir_com(
         adaptador: &wgpu::Adapter,
         entrada: Entrada,
         limites: wgpu::Limits,
-    ) -> Option<Self> {
+    ) -> Result<Self, wgpu::RequestDeviceError> {
         let (dispositivo, fila) = adaptador
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -277,8 +281,7 @@ impl Motor {
                 },
                 None,
             )
-            .await
-            .ok()?;
+            .await?;
 
         // 🚨 O `struct Params` do WGSL tem de casar com o `Ajustes`, campo a
         // campo: o `uniform` viaja como bytes crus e liga por **posição**, não
@@ -351,7 +354,7 @@ impl Motor {
             }
         };
 
-        Some(Self {
+        Ok(Self {
             dispositivo,
             fila,
             pipeline,

@@ -77,6 +77,14 @@ struct Params {
     nr_color: f32,
     sharpen_amount: f32,
     sharpen_radius: f32,
+    // 🔑 Enchimento, e não campo: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
+    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 46
+    // `f32` dão 184. O Rust continua mandando 184 bytes num buffer de 192
+    // (`TAMANHO_DO_UNIFORM`); estes dois nunca são lidos. Ficam DEPOIS dos 46
+    // para não deslocar nenhuma posição — e o teste que compara os nomes com o
+    // `Ajustes` ignora o que começa com `_`.
+    _enchimento_a: f32,
+    _enchimento_b: f32,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
