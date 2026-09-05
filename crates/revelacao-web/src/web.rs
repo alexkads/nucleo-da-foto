@@ -108,6 +108,57 @@ pub fn enquadramento(corte: &[f32], largura: u32, altura: u32) -> Result<Vec<f32
     ])
 }
 
+/// Codifica pixels RGBA em JPEG — **sem GPU e sem canvas**.
+///
+/// É o caminho da *importação* do pós-venda, que não revela nada: o operador
+/// escolhe 30 originais de câmera e o navegador recodifica cada um antes de
+/// subir, para a API não pagar a decodificação de 30 MB por foto (decisão do
+/// dono, 2026-09-05).
+///
+/// 🔑 **Livre de GPU de propósito.** [`Motor::exportar_jpeg`] precisa de um
+/// `<canvas>`, que não existe dentro de um Worker — e é dentro de um Worker
+/// que a importação roda, para a barra de progresso não travar com a aba. Como
+/// não há ajuste nenhum a aplicar, a passagem pelo shader seria uma cópia cara
+/// de ida e volta pela GPU.
+///
+/// 🔑 **O codificador é o mesmo** de [`Motor::exportar_jpeg`] e do desktop
+/// (`revelacao_core::jpeg`): a foto importada e a foto revelada saem do mesmo
+/// lugar, e "recomprimir no navegador" não vira um segundo formato de arquivo
+/// para o mesmo produto.
+///
+/// Quem reduz o tamanho é o JavaScript, antes de chamar aqui: `createImageBitmap`
+/// decodifica com o decodificador nativo e o `drawImage` reamostra — os dois
+/// muito mais rápidos que os equivalentes em wasm sem SIMD. Ver `imagem.ts`.
+#[wasm_bindgen]
+pub fn comprimir_jpeg(
+    largura: u32,
+    altura: u32,
+    rgba: &[u8],
+    qualidade: u8,
+) -> Result<Vec<u8>, JsValue> {
+    console_error_panic_hook::set_once();
+
+    let esperado = (largura as usize)
+        .checked_mul(altura as usize)
+        .and_then(|p| p.checked_mul(4))
+        .ok_or_else(|| erro(format!("{largura}×{altura} não cabe na memória")))?;
+    if rgba.len() != esperado {
+        return Err(erro(format!(
+            "os bytes não batem com largura × altura × 4: {} para {esperado}",
+            rgba.len()
+        )));
+    }
+
+    let buffer = image::RgbaImage::from_raw(largura, altura, rgba.to_vec())
+        .ok_or_else(|| erro("os pixels não formam uma imagem"))?;
+
+    revelacao_core::jpeg::codificar(
+        &image::DynamicImage::ImageRgba8(buffer),
+        qualidade.clamp(1, 100),
+    )
+    .map_err(|e| erro(format!("o JPEG não codificou: {e}")))
+}
+
 /// Abre o motor sobre o canvas: WebGPU se houver, senão WebGL2.
 ///
 /// # 🚨 Por que o backend é escolhido **antes** de tocar no canvas
