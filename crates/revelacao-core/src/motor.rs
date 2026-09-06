@@ -860,7 +860,7 @@ mod testes {
         for (indice, valor) in alterados {
             campos[*indice] = *valor;
         }
-        Ajustes::de_vetor(&campos).expect("46 campos")
+        Ajustes::de_vetor(&campos).expect("a quantidade certa de campos")
     }
 
     fn com_campo(indice: usize, valor: f32) -> Ajustes {
@@ -1284,6 +1284,13 @@ mod testes {
             nr_color: 30.0,
             sharpen_amount: 50.0,
             sharpen_radius: 1.5,
+            split_shadow_hue: 35.0,
+            split_shadow_sat: 60.0,
+            split_highlight_hue: 210.0,
+            split_highlight_sat: 40.0,
+            split_balance: -20.0,
+            grain_amount: 70.0,
+            grain_size: 40.0,
             ..Default::default()
         };
 
@@ -1305,6 +1312,183 @@ mod testes {
             maior_diferenca <= 1,
             "compute e fragmento divergem em até {maior_diferenca} níveis — \
              a coordenada do fragmento não é o pixel do compute"
+        );
+    }
+
+    /// 🔑 **Sépia é tonalização sobre foto sem cor — e até 2026-09-06 não dava.**
+    ///
+    /// Temperatura e matiz agem no passo 3 do shader, antes da saturação: numa
+    /// foto com `saturation = -1.0` eles pintam uma cor que o passo 9 apaga em
+    /// seguida. Este teste é a prova de que o caminho novo existe: o cinza sai
+    /// âmbar (`r > g > b`) **e com o mesmo brilho**, que é o que separa uma sépia
+    /// de uma foto amarelada.
+    #[test]
+    fn a_tonalizacao_pinta_de_sepia_uma_foto_sem_cor() {
+        let mut motor = motor_pronto();
+        let saida = revelar_e_colher(
+            &mut motor,
+            cinza(16, 128),
+            Ajustes {
+                saturation: -1.0,
+                split_shadow_hue: 35.0,
+                split_shadow_sat: 100.0,
+                split_highlight_hue: 35.0,
+                split_highlight_sat: 100.0,
+                ..Default::default()
+            },
+        );
+
+        let (r, g, b) = (saida[0] as i32, saida[1] as i32, saida[2] as i32);
+        assert!(
+            r > g && g > b,
+            "35° é âmbar: esperava vermelho > verde > azul, saiu ({r}, {g}, {b})"
+        );
+
+        let brilho = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32).round() as i32;
+        assert!(
+            (brilho - 128).abs() <= 2,
+            "tonalizar não pode mudar o brilho: 128 virou {brilho}"
+        );
+    }
+
+    /// As duas pontas da escala recebem cores diferentes — e cada pixel a sua.
+    ///
+    /// A rampa dá um nível de cinza por pixel, então "sombra" e "altas luzes"
+    /// aqui são dois pixels concretos: o 20 e o 240.
+    #[test]
+    fn a_tonalizacao_separa_as_sombras_das_altas_luzes() {
+        let mut motor = motor_pronto();
+        let saida = revelar_e_colher(
+            &mut motor,
+            rampa(),
+            Ajustes {
+                split_shadow_hue: 30.0,
+                split_shadow_sat: 100.0,
+                split_highlight_hue: 210.0,
+                split_highlight_sat: 100.0,
+                ..Default::default()
+            },
+        );
+
+        let quente = |i: usize| saida[i * 4] as i32 - saida[i * 4 + 2] as i32;
+        assert!(
+            quente(20) > 5,
+            "a sombra tinha de puxar para o âmbar, e saiu {}",
+            quente(20)
+        );
+        assert!(
+            quente(240) < -5,
+            "a alta luz tinha de puxar para o azul, e saiu {}",
+            quente(240)
+        );
+    }
+
+    /// ⚠️ **O balanço move a fronteira, e move para os dois lados.**
+    ///
+    /// Sem ele a tonalização é uma escolha só; com ele o meio-tom cai para uma
+    /// ponta ou para a outra — que é o que decide se a foto lê como "sombra
+    /// quente" ou "foto inteira quente".
+    #[test]
+    fn o_balanco_desloca_a_fronteira_da_tonalizacao() {
+        let mut motor = motor_pronto();
+        let tonalizada = |motor: &mut Motor, balanco: f32| {
+            let saida = revelar_e_colher(
+                motor,
+                rampa(),
+                Ajustes {
+                    split_shadow_hue: 30.0,
+                    split_shadow_sat: 100.0,
+                    split_highlight_hue: 210.0,
+                    split_highlight_sat: 100.0,
+                    split_balance: balanco,
+                    ..Default::default()
+                },
+            );
+            // O meio-tom exato: o pixel 128 da rampa.
+            saida[128 * 4] as i32 - saida[128 * 4 + 2] as i32
+        };
+
+        let para_a_sombra = tonalizada(&mut motor, -100.0);
+        let neutro = tonalizada(&mut motor, 0.0);
+        let para_a_luz = tonalizada(&mut motor, 100.0);
+
+        assert!(
+            para_a_luz < neutro && neutro < para_a_sombra,
+            "o meio-tom tinha de esfriar com o balanço nas altas luzes e esquentar              com ele nas sombras — saiu {para_a_luz}, {neutro}, {para_a_sombra}"
+        );
+    }
+
+    /// O grão muda a foto, é **o mesmo** a cada revelação, e some nas pontas.
+    ///
+    /// 🚨 **Repetir é requisito, e não detalhe.** O site revela a mesma foto a
+    /// cada arrasto de slider e exporta no fim; grão sorteado por revelação daria
+    /// uma prévia que nunca é o arquivo, e um "antes/depois" que pisca. Quem
+    /// garante é o hash inteiro do shader, que não depende de relógio nem de
+    /// quadro.
+    #[test]
+    fn o_grao_e_sempre_o_mesmo_e_respeita_as_pontas() {
+        let mut motor = motor_pronto();
+        let com_grao = Ajustes {
+            grain_amount: 100.0,
+            grain_size: 0.0,
+            ..Default::default()
+        };
+
+        let meio_tom = cinza(16, 128);
+        let primeira = revelar_e_colher(&mut motor, meio_tom.clone(), com_grao);
+        let segunda = revelar_e_colher(&mut motor, meio_tom.clone(), com_grao);
+        assert_eq!(
+            primeira, segunda,
+            "o grão tem de ser o mesmo a cada revelação"
+        );
+        assert_ne!(
+            primeira,
+            meio_tom.as_slice().to_vec(),
+            "o grão tinha de mover o meio-tom"
+        );
+
+        // Monocromático: o mesmo delta nos três canais, como prata de filme.
+        for pixel in primeira.as_chunks::<4>().0 {
+            assert_eq!(
+                (pixel[0], pixel[1]),
+                (pixel[2], pixel[2]),
+                "o grão saiu colorido — é chuvisco de sensor, não prata"
+            );
+        }
+
+        let preto = cinza(16, 0);
+        assert_eq!(
+            revelar_e_colher(&mut motor, preto.clone(), com_grao),
+            preto.as_slice().to_vec(),
+            "no preto fechado não há grão a mostrar — e o clamp o viraria mancha"
+        );
+    }
+
+    /// O tamanho do grão engrossa o grumo: células maiores, vizinhos iguais.
+    ///
+    /// A medida é o contraste local — quantos níveis separam pixels vizinhos.
+    /// Grão fino muda a cada pixel; grão grosso repete o mesmo valor por vários,
+    /// e a soma das diferenças cai.
+    #[test]
+    fn o_tamanho_do_grao_engrossa_o_grumo() {
+        let mut motor = motor_pronto();
+        let grao = |motor: &mut Motor, tamanho: f32| {
+            contraste_local(&revelar_e_colher(
+                motor,
+                cinza(16, 128),
+                Ajustes {
+                    grain_amount: 100.0,
+                    grain_size: tamanho,
+                    ..Default::default()
+                },
+            ))
+        };
+
+        let fino = grao(&mut motor, 0.0);
+        let grosso = grao(&mut motor, 100.0);
+        assert!(
+            grosso < fino,
+            "grão de cinco pixels tinha de ter menos contraste entre vizinhos              que o de um pixel — saiu {grosso} contra {fino}"
         );
     }
 

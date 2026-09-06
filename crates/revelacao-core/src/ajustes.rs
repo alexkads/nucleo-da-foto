@@ -1,4 +1,4 @@
-//! Os 46 ajustes, no layout que o WGSL espera.
+//! Os 53 ajustes, no layout que o WGSL espera.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// mandava a mesma struct para o mesmo shader, e **consertado em 17/ago/2026**,
 /// depois que a fase 5 tirou o outro app do caminho: o `struct Params` passou a
 /// declarar os 46 na mesma ordem, e quem prende isso é
-/// `o_wgsl_declara_os_mesmos_46_campos_na_mesma_ordem`.
+/// `o_wgsl_declara_os_mesmos_campos_na_mesma_ordem`.
 ///
 /// ✅ **E desde 17/ago/2026 os 46 campos chegam ao shader e todos têm código que
 /// os use.** Chegar e ser aplicado são duas coisas, e as duas custaram um
@@ -27,6 +27,12 @@ use serde::{Deserialize, Serialize};
 /// 🔑 **Desde 2026-09-04 a struct viaja também como JSON por nome** (`serde`),
 /// para o site guardar a revelação de uma foto. Campo ausente no JSON recebe o
 /// neutro de [`Ajustes::default`] — o mesmo `if let Some` de `ajustes_da_entidade`.
+///
+/// ✅ **Em 2026-09-06 entraram os 7 da Tonalização e do Grão**, e eles entraram
+/// **no fim**, depois de `sharpen_radius`. Uma revelação gravada antes disso não
+/// tem os campos novos no JSON, e o `serde(default)` os completa com o neutro —
+/// que é o mesmo que "sem tonalização e sem grão". Fosse a inserção no meio,
+/// toda revelação já gravada leria o campo do vizinho a partir dali.
 #[repr(C)]
 #[derive(
     Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, Serialize, Deserialize,
@@ -79,21 +85,34 @@ pub struct Ajustes {
     pub nr_color: f32,
     pub sharpen_amount: f32,
     pub sharpen_radius: f32,
+    pub split_shadow_hue: f32,
+    pub split_shadow_sat: f32,
+    pub split_highlight_hue: f32,
+    pub split_highlight_sat: f32,
+    pub split_balance: f32,
+    pub grain_amount: f32,
+    pub grain_size: f32,
 }
 
 /// Quantos campos a struct tem — e quantos `f32` o vetor posicional carrega.
-pub const QUANTIDADE: usize = 46;
+///
+/// ⚠️ **Eram 46 até 2026-09-06.** A Tonalização (5) e o Grão (2) entraram
+/// **no fim da lista**, e não perto do que se parece com elas: a posição de um
+/// campo é o contrato com o shader, e mover `nr_luminance` para junto do grão
+/// faria toda revelação já gravada ler o campo do vizinho.
+pub const QUANTIDADE: usize = 53;
 
 /// O tamanho do buffer de `uniform`, arredondado para múltiplo de 16 bytes.
 ///
 /// 🚨 **Não é `size_of::<Ajustes>()`, e a diferença é uma regra do WGSL.** No
 /// endereço `uniform` o alinhamento de uma struct é `roundUp(16, …)`, então os
-/// 46 `f32` (184 bytes) ocupam 192 do ponto de vista do shader — e o `bind
+/// 53 `f32` (212 bytes) ocupam 224 do ponto de vista do shader — e o `bind
 /// group` recusa um buffer menor que isso. Enquanto o `struct Params` declarava
 /// 28 campos (112 bytes, múltiplo de 16) ninguém precisava saber disto.
 ///
-/// Os 8 bytes de sobra nunca são escritos nem lidos: a CPU manda os 184 do
-/// `bytemuck::bytes_of`, e o shader não tem campo além do 45.
+/// Os 12 bytes de sobra nunca são escritos nem lidos: a CPU manda os 212 do
+/// `bytemuck::bytes_of`, e o shader não tem campo além do 52. O enchimento do
+/// WGSL acompanha: eram dois `_enchimento` para 184 bytes, são três para 212.
 pub(crate) const TAMANHO_DO_UNIFORM: wgpu::BufferAddress = {
     let bytes = std::mem::size_of::<Ajustes>() as wgpu::BufferAddress;
     bytes.next_multiple_of(16)
@@ -135,7 +154,7 @@ impl Default for Ajustes {
 }
 
 impl Ajustes {
-    /// Os 46 nomes, na ordem do `uniform`.
+    /// Os 53 nomes, na ordem do `uniform`.
     ///
     /// 🔑 É a ordem que o vetor posicional ([`Ajustes::como_vetor`]) segue, a
     /// que o `struct Params` do WGSL declara, e a que o site recebe em
@@ -187,18 +206,25 @@ impl Ajustes {
         "nr_color",
         "sharpen_amount",
         "sharpen_radius",
+        "split_shadow_hue",
+        "split_shadow_sat",
+        "split_highlight_hue",
+        "split_highlight_sat",
+        "split_balance",
+        "grain_amount",
+        "grain_size",
     ];
 
     /// Os 46 valores, por posição — o que a GPU recebe, como `f32`.
     pub fn como_vetor(&self) -> [f32; QUANTIDADE] {
         let campos: &[f32] = bytemuck::cast_slice(bytemuck::bytes_of(self));
-        campos.try_into().expect("46 campos de quatro bytes")
+        campos.try_into().expect("53 campos de quatro bytes")
     }
 
     /// De um vetor posicional de 46 `f32`; `None` se o tamanho for outro.
     ///
     /// 🚨 É por aqui que o navegador manda os ajustes, e o tamanho é a única
-    /// conferência possível: 45 valores seriam 45 campos certos e um lixo.
+    /// conferência possível: 52 valores seriam 52 campos certos e um lixo.
     pub fn de_vetor(valores: &[f32]) -> Option<Self> {
         if valores.len() != QUANTIDADE {
             return None;
@@ -236,14 +262,14 @@ mod testes {
         assert_eq!(neutro.saturation, 0.0);
     }
 
-    /// O layout que vai para a GPU tem os 46 campos que o `crates/ui` mandava.
+    /// O layout que vai para a GPU tem os 53 campos, de quatro bytes cada.
     ///
     /// Campo a mais desloca **todos** os seguintes na leitura do shader, e o
     /// sintoma é a saturação virando nitidez.
     #[test]
-    fn o_layout_tem_46_campos_de_quatro_bytes() {
+    fn o_layout_tem_os_campos_de_quatro_bytes() {
         assert_eq!(std::mem::size_of::<Ajustes>(), QUANTIDADE * 4);
-        assert_eq!(TAMANHO_DO_UNIFORM, 192);
+        assert_eq!(TAMANHO_DO_UNIFORM, 224);
     }
 
     /// Os nomes do `struct Params` do WGSL, na ordem em que ele os declara.
@@ -263,7 +289,7 @@ mod testes {
             .collect()
     }
 
-    /// O `struct Params` do WGSL, com o enchimento, ocupa os mesmos 192 bytes
+    /// O `struct Params` do WGSL, com o enchimento, ocupa os mesmos 224 bytes
     /// que `TAMANHO_DO_UNIFORM` reserva — nem mais (o Rust não escreveria o
     /// resto) nem menos (o WebGL2 recusaria o pipeline).
     #[test]
@@ -281,7 +307,7 @@ mod testes {
         assert_eq!(campos as u64 * 4, TAMANHO_DO_UNIFORM);
     }
 
-    /// O `struct Params` do WGSL declara os mesmos 46 campos do `Ajustes`, na
+    /// O `struct Params` do WGSL declara os mesmos 53 campos do `Ajustes`, na
     /// mesma ordem.
     ///
     /// 🚨 **Este teste substitui um que prendia o defeito oposto.** Até 17/ago o
@@ -307,7 +333,7 @@ mod testes {
     /// porque campo declarado e campo aplicado são coisas diferentes: quem mede
     /// a segunda são os testes do [`crate::motor`].
     #[test]
-    fn o_wgsl_declara_os_mesmos_46_campos_na_mesma_ordem() {
+    fn o_wgsl_declara_os_mesmos_campos_na_mesma_ordem() {
         assert_eq!(
             campos_do_wgsl(),
             Ajustes::NOMES,
@@ -336,24 +362,28 @@ mod testes {
         let com_matiz = Ajustes {
             hsl_green_hue: 33.0,
             lens_distortion: -7.0,
+            split_shadow_hue: 210.0,
+            grain_amount: 40.0,
             ..Default::default()
         }
         .como_vetor();
         assert_eq!(com_matiz[posicao("hsl_green_hue")], 33.0);
         assert_eq!(com_matiz[posicao("lens_distortion")], -7.0);
+        assert_eq!(com_matiz[posicao("split_shadow_hue")], 210.0);
+        assert_eq!(com_matiz[posicao("grain_amount")], 40.0);
     }
 
     /// O vetor volta a ser struct — e só com 46 valores.
     #[test]
-    fn de_vetor_exige_exatamente_46() {
+    fn de_vetor_exige_exatamente_a_quantidade() {
         let original = Ajustes {
             exposure: 0.5,
             hsl_blue_lum: -20.0,
             ..Default::default()
         };
         assert_eq!(Ajustes::de_vetor(&original.como_vetor()), Some(original));
-        assert_eq!(Ajustes::de_vetor(&[0.0; 45]), None);
-        assert_eq!(Ajustes::de_vetor(&[0.0; 47]), None);
+        assert_eq!(Ajustes::de_vetor(&[0.0; QUANTIDADE - 1]), None);
+        assert_eq!(Ajustes::de_vetor(&[0.0; QUANTIDADE + 1]), None);
     }
 
     /// 🔑 No JSON, campo ausente é o neutro — e `contrast` ausente é `1.0`.
@@ -376,5 +406,24 @@ mod testes {
             serde_json::from_str(&serde_json::to_string(&lido).expect("serializa"))
                 .expect("desserializa");
         assert_eq!(ida_e_volta, lido);
+    }
+
+    /// 🔑 Uma revelação gravada **antes** da Tonalização abre sem tonalização.
+    ///
+    /// O JSON do site guarda só o que difere do neutro, então toda foto revelada
+    /// até 2026-09-06 tem um objeto sem os sete campos novos. Ausente é neutro, e
+    /// o neutro dos sete é zero — a foto abre exatamente como foi deixada, e não
+    /// com um matiz que ninguém escolheu.
+    #[test]
+    fn a_revelacao_gravada_antes_da_tonalizacao_abre_sem_ela() {
+        let antiga: Ajustes = serde_json::from_str(r#"{"exposure": 0.4, "saturation": -1.0}"#)
+            .expect("o JSON de antes continua válido");
+        assert_eq!(antiga.split_shadow_sat, 0.0);
+        assert_eq!(antiga.split_highlight_sat, 0.0);
+        assert_eq!(antiga.split_balance, 0.0);
+        assert_eq!(antiga.grain_amount, 0.0);
+        assert_eq!(antiga.grain_size, 0.0);
+        assert_eq!(antiga.exposure, 0.4);
+        assert_eq!(antiga.saturation, -1.0);
     }
 }

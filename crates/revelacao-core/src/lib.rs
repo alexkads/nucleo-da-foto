@@ -27,6 +27,6 @@ pub mod jpeg;
 pub mod motor;
 pub mod transformacao;
 
-pub use ajustes::Ajustes;
+pub use ajustes::{Ajustes, QUANTIDADE};
 pub use motor::{Entrada, Motor};
 pub use transformacao::Corte;

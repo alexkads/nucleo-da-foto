@@ -395,14 +395,14 @@ impl Motor {
         self.motor.limites().max_texture_dimension_2d
     }
 
-    /// Os 46 valores do neutro, na ordem do `uniform`.
+    /// Os 53 valores do neutro, na ordem do `uniform`.
     pub fn ajustes_padrao() -> Vec<f32> {
         Ajustes::default().como_vetor().to_vec()
     }
 
-    /// Os 46 nomes, na ordem do `uniform`, como JSON.
+    /// Os 53 nomes, na ordem do `uniform`, como JSON.
     pub fn nomes_dos_ajustes() -> String {
-        serde_json::to_string(&Ajustes::NOMES[..]).expect("46 strings viram JSON")
+        serde_json::to_string(&Ajustes::NOMES[..]).expect("os nomes viram JSON")
     }
 
     /// Sobe a cópia de trabalho (RGBA, 4 bytes por pixel) e ajusta o canvas ao
@@ -444,10 +444,15 @@ impl Motor {
         Ok(())
     }
 
-    /// Aplica os 46 ajustes à cópia de trabalho e desenha no canvas.
+    /// Aplica os 53 ajustes à cópia de trabalho e desenha no canvas.
     pub fn aplicar(&mut self, ajustes: &[f32]) -> Result<(), JsValue> {
-        let ajustes = Ajustes::de_vetor(ajustes)
-            .ok_or_else(|| erro(format!("esperava 46 ajustes, recebi {}", ajustes.len())))?;
+        let ajustes = Ajustes::de_vetor(ajustes).ok_or_else(|| {
+            erro(format!(
+                "esperava {} ajustes, recebi {}",
+                revelacao_core::QUANTIDADE,
+                ajustes.len()
+            ))
+        })?;
         let (pixels, largura, altura) = self
             .trabalho
             .clone()
@@ -470,7 +475,7 @@ impl Motor {
     /// Revela uma imagem **inteira** (não a cópia de trabalho), aplica o
     /// enquadramento e devolve o JPEG.
     ///
-    /// É a exportação: o site manda a foto na resolução de saída, os mesmos 46
+    /// É a exportação: o site manda a foto na resolução de saída, os mesmos 53
     /// ajustes, o enquadramento e a qualidade (1–100). Lê de volta da GPU e
     /// codifica com o mesmo codificador do desktop.
     ///
@@ -488,8 +493,13 @@ impl Motor {
         qualidade: u8,
     ) -> Result<Vec<u8>, JsValue> {
         let corte = corte_de_vetor(corte)?;
-        let ajustes = Ajustes::de_vetor(ajustes)
-            .ok_or_else(|| erro(format!("esperava 46 ajustes, recebi {}", ajustes.len())))?;
+        let ajustes = Ajustes::de_vetor(ajustes).ok_or_else(|| {
+            erro(format!(
+                "esperava {} ajustes, recebi {}",
+                revelacao_core::QUANTIDADE,
+                ajustes.len()
+            ))
+        })?;
         if rgba.len() != (largura as usize) * (altura as usize) * 4 {
             return Err(erro("os bytes não batem com largura × altura × 4"));
         }

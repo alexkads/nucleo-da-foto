@@ -1,4 +1,4 @@
-// O corpo da revelação: os 46 ajustes, num pixel.
+// O corpo da revelação: os 53 ajustes, num pixel.
 //
 // 🔑 **Este arquivo não tem ponto de entrada.** Ele declara o `struct Params`,
 // as texturas e a função `revelar_pixel(coord)`, e é concatenado a uma
@@ -77,18 +77,87 @@ struct Params {
     nr_color: f32,
     sharpen_amount: f32,
     sharpen_radius: f32,
+    // Tonalização (split toning): a cor das sombras e a das altas luzes,
+    // separadas, com um balanço que decide onde uma acaba e a outra começa. É o
+    // virador do quarto escuro — e o único caminho para sépia, porque
+    // temperatura e matiz agem ANTES da saturação e não recolorem um cinza.
+    split_shadow_hue: f32,
+    split_shadow_sat: f32,
+    split_highlight_hue: f32,
+    split_highlight_sat: f32,
+    split_balance: f32,
+    // Grão de filme: quanto, e de que tamanho.
+    grain_amount: f32,
+    grain_size: f32,
     // 🔑 Enchimento, e não campo: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
-    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 46
-    // `f32` dão 184. O Rust continua mandando 184 bytes num buffer de 192
-    // (`TAMANHO_DO_UNIFORM`); estes dois nunca são lidos. Ficam DEPOIS dos 46
+    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 53
+    // `f32` dão 212. O Rust continua mandando 212 bytes num buffer de 224
+    // (`TAMANHO_DO_UNIFORM`); estes três nunca são lidos. Ficam DEPOIS dos 53
     // para não deslocar nenhuma posição — e o teste que compara os nomes com o
     // `Ajustes` ignora o que começa com `_`.
     _enchimento_a: f32,
     _enchimento_b: f32,
+    _enchimento_c: f32,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
+
+/// A cor pura de um matiz em graus, em 0.0–1.0 — saturação cheia, meio-tom.
+///
+/// É o mesmo `c`/`x`/`m` da conversão HSL do fim deste arquivo, com `sat = 1.0`
+/// e `lightness = 0.5`: ali `c` vale 1 e `m` vale 0, e sobra só a roda de cor.
+fn cor_do_matiz(graus: f32) -> vec3<f32> {
+    let h = graus - floor(graus / 360.0) * 360.0;
+    let x = 1.0 - abs((h / 60.0) % 2.0 - 1.0);
+    if (h < 60.0) { return vec3<f32>(1.0, x, 0.0); }
+    if (h < 120.0) { return vec3<f32>(x, 1.0, 0.0); }
+    if (h < 180.0) { return vec3<f32>(0.0, 1.0, x); }
+    if (h < 240.0) { return vec3<f32>(0.0, x, 1.0); }
+    if (h < 300.0) { return vec3<f32>(x, 0.0, 1.0); }
+    return vec3<f32>(1.0, 0.0, x);
+}
+
+/// A luminância percebida (Rec. 601), na mesma escala 0–255 do corpo.
+fn luminancia(cor: vec3<f32>) -> f32 {
+    return dot(cor, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+/// Puxa a cor na direção de um matiz **sem mudar o brilho do pixel**.
+///
+/// 🔑 A recuperação da luminância no fim é o que separa tonalizar de manchar:
+/// misturar com âmbar puro escureceria o azul e clarearia o amarelo, e o
+/// resultado seria uma foto com o contraste redesenhado pela escolha da cor. Do
+/// jeito que está, `forca = 1.0` num cinza dá o matiz puro naquele mesmo nível
+/// de cinza — que é exatamente o que uma sépia é.
+///
+/// ⚠️ O preto puro fica preto: não há brilho que uma cor possa ter e continuar
+/// preto, e a divisão protegida devolve zero em vez de explodir.
+fn tonalizar(cor: vec3<f32>, matiz: f32, forca: f32) -> vec3<f32> {
+    let alvo = cor_do_matiz(matiz) * 255.0;
+    let antes = luminancia(cor);
+    let misturado = mix(cor, alvo, forca);
+    return misturado * (antes / max(luminancia(misturado), 0.0001));
+}
+
+/// Ruído determinístico de 32 bits — o mesmo pixel dá sempre o mesmo grão.
+///
+/// 🚨 **É aritmética inteira de propósito, e não `sin(dot(...))`.** O truque do
+/// seno é o hash mais comum em shader e é o errado aqui: ele depende da precisão
+/// do `sin` de cada backend, e este mesmo arquivo roda como compute no Metal e
+/// como fragmento no WebGL2, com um teste que exige o **mesmo pixel** nos dois.
+/// Multiplicação e deslocamento em `u32` são exatos em qualquer GPU.
+fn embaralhar(x: u32) -> u32 {
+    var v = x;
+    v ^= v >> 17u;
+    v *= 0xed5ad4bbu;
+    v ^= v >> 11u;
+    v *= 0xac4c1b51u;
+    v ^= v >> 15u;
+    v *= 0x31848babu;
+    v ^= v >> 14u;
+    return v;
+}
 
 /// Bilinear read at a fractional position, clamped to the image.
 ///
@@ -639,6 +708,46 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
     }
     
+    // Tonalização — a cor das sombras e a das altas luzes, separadas.
+    //
+    // 🔑 **Vem depois da saturação, e é essa posição que a torna útil.**
+    // Temperatura e matiz (3 e 4) agem sobre a foto ainda colorida, e o que vier
+    // depois de `saturation = -1.0` já perdeu a cor: até 2026-09-06 não havia
+    // como pintar de sépia uma foto em preto e branco — o preset "Sépia" do site
+    // segurava a saturação em -0,82 justamente para sobrar cor que a temperatura
+    // pudesse aquecer, e o resultado era uma foto meio colorida, não uma sépia.
+    //
+    // A conta é a do quarto escuro: cada ponta da escala de tons ganha um matiz
+    // próprio, e cada pixel recebe uma mistura das duas conforme o quanto ele é
+    // sombra ou luz. Sépia é uma ponta só — âmbar nas sombras, saturação alta —
+    // sobre uma foto já dessaturada.
+    if (params.split_shadow_sat != 0.0 || params.split_highlight_sat != 0.0) {
+        let l = clamp(((r + g + b) / 3.0) / 255.0, 0.0, 1.0);
+
+        // O balanço desloca o ponto em que uma ponta cede para a outra:
+        // positivo dá mais foto às altas luzes, negativo às sombras. A transição
+        // é um `smoothstep` de 0,7 de largura para não deixar anel visível no
+        // meio-tom — o mesmo motivo que fez o tom por região virar curva.
+        let balanco = clamp(params.split_balance * 0.01, -1.0, 1.0);
+        let centro = 0.5 - balanco * 0.4;
+        let peso_alta = smoothstep(centro - 0.35, centro + 0.35, l);
+
+        var cor = vec3<f32>(r, g, b);
+        cor = tonalizar(
+            cor,
+            params.split_shadow_hue,
+            clamp(params.split_shadow_sat * 0.01, 0.0, 1.0) * (1.0 - peso_alta),
+        );
+        cor = tonalizar(
+            cor,
+            params.split_highlight_hue,
+            clamp(params.split_highlight_sat * 0.01, 0.0, 1.0) * peso_alta,
+        );
+        r = cor.r;
+        g = cor.g;
+        b = cor.b;
+    }
+
     // Lens vignetting — last, and on purpose.
     //
     // 🔑 It is the only adjustment that depends on WHERE the pixel is instead of
@@ -665,6 +774,36 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         r *= fator;
         g *= fator;
         b *= fator;
+    }
+
+    // Grão de filme — por último, e depois até da vinheta.
+    //
+    // 🔑 O grão é da cópia, e não da cena: no filme ele é a prata do negativo,
+    // e revelar mais ou menos não o move de lugar. Rodá-lo antes do contraste ou
+    // da tonalização faria o ruído passar pelas mesmas curvas da imagem — o grão
+    // mudaria de força ao mexer num slider que não é dele.
+    //
+    // ⚠️ **Ele é monocromático e some nas duas pontas.** O mesmo delta nos três
+    // canais é o que dá grão de prata em vez de chuvisco colorido de sensor; e o
+    // peso `4·l·(1-l)` tira o ruído do preto fechado e do branco estourado, onde
+    // filme nenhum granula e onde o clamp o transformaria em mancha.
+    if (params.grain_amount != 0.0) {
+        // O tamanho é a aresta da célula em pixels: 0 dá grão fino de um pixel,
+        // 100 dá grumo de cinco. Fora dessa faixa não há grão, há mosaico.
+        let lado = 1.0 + clamp(params.grain_size, 0.0, 100.0) * 0.04;
+        let celula = vec2<u32>(
+            u32(f32(coord.x) / lado),
+            u32(f32(coord.y) / lado),
+        );
+        let semente = embaralhar(celula.x * 0x9e3779b9u ^ embaralhar(celula.y));
+        let ruido = f32(semente) / 4294967295.0 - 0.5;
+
+        let l = clamp(((r + g + b) / 3.0) / 255.0, 0.0, 1.0);
+        let peso = 4.0 * l * (1.0 - l);
+        let delta = ruido * clamp(params.grain_amount * 0.01, 0.0, 1.0) * 64.0 * peso;
+        r += delta;
+        g += delta;
+        b += delta;
     }
 
     // Clamp values to 0-255 and convert back to 0.0-1.0
