@@ -159,6 +159,120 @@ pub fn comprimir_jpeg(
     .map_err(|e| erro(format!("o JPEG não codificou: {e}")))
 }
 
+/// Os formatos que este wasm sabe **abrir** — a lista que a tela mostra.
+///
+/// Vem daqui, e não de uma constante em TypeScript, porque quem sabe o que o
+/// `image` foi compilado sabendo ler é o Cargo.toml ao lado (armadilha nº 8:
+/// duas listas da mesma verdade discordam no dia em que uma muda).
+#[wasm_bindgen]
+pub fn formatos_de_entrada() -> String {
+    serde_json::to_string(&["jpeg", "png", "tiff", "webp", "bmp", "gif"]).unwrap_or_default()
+}
+
+/// Os formatos que este wasm sabe **gravar**.
+#[wasm_bindgen]
+pub fn formatos_de_saida() -> String {
+    serde_json::to_string(&["jpeg", "png", "tiff", "webp"]).unwrap_or_default()
+}
+
+/// Decodifica um arquivo de imagem para RGBA — a rede de baixo do navegador.
+///
+/// # Quando isto é chamado
+///
+/// 🔑 **Só quando o `createImageBitmap` recusa o arquivo.** O decodificador
+/// nativo é 5 a 10× mais rápido que o `image` em wasm sem SIMD, e cobre JPEG,
+/// PNG, GIF, WebP e AVIF. O que ele não abre em navegador nenhum é **TIFF** —
+/// e TIFF é o que sai de scanner, de digitalização de negativo e de boa parte
+/// dos labs. Antes disto, o operador soltava o arquivo e a tela dizia "envie
+/// JPEG ou PNG".
+///
+/// # A forma da resposta
+///
+/// Largura, altura e os bytes, num vetor só: `[l_baixo, l_alto, a_baixo,
+/// a_alto, ...rgba]` seria mais compacto, mas ilegível. Aqui vão os dois
+/// números como `u32` no começo de um `Vec<u8>` — quatro bytes cada, em
+/// little-endian, que é o que o `DataView` do JavaScript lê sem conta nenhuma.
+///
+/// ⚠️ **Uma foto de 60 MP são 240 MB de RGBA.** Quem chama tem de ser o Worker,
+/// nunca a thread da interface, e uma de cada vez.
+#[wasm_bindgen]
+pub fn decodificar_imagem(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+    console_error_panic_hook::set_once();
+
+    let imagem = image::load_from_memory(bytes).map_err(|e| {
+        erro(format!(
+            "este arquivo não abriu ({e}). Formatos aceitos: JPEG, PNG, TIFF, WebP, BMP e GIF"
+        ))
+    })?;
+    let rgba = imagem.to_rgba8();
+    let (largura, altura) = rgba.dimensions();
+
+    let mut saida = Vec::with_capacity(8 + rgba.len());
+    saida.extend_from_slice(&largura.to_le_bytes());
+    saida.extend_from_slice(&altura.to_le_bytes());
+    saida.extend_from_slice(rgba.as_raw());
+    Ok(saida)
+}
+
+/// Codifica RGBA no formato pedido — o "baixar em vários formatos".
+///
+/// 🔑 **O JPEG sai do mesmo codificador de sempre** (`revelacao_core::jpeg`),
+/// e não do `image`: é o do desktop e o do editor, e ter dois JPEGs diferentes
+/// para o mesmo produto foi decisão já tomada uma vez.
+///
+/// Os outros três vêm do `image`. O que cada um serve:
+///
+/// - **png** — sem perda, com alfa; é o pedido de quem vai reeditar.
+/// - **tiff** — sem perda, o que lab e gráfica aceitam.
+/// - **webp** — aqui é **sem perda** também (o `image` 0.25 não codifica WebP
+///   com perda): serve para web, e não para mandar por WhatsApp.
+///
+/// ⚠️ Sem perda quer dizer **arquivo grande**: um TIFF de 24 MP passa de 70 MB.
+/// A tela precisa dizer isso antes de o operador escolher.
+#[wasm_bindgen]
+pub fn codificar_imagem(
+    largura: u32,
+    altura: u32,
+    rgba: &[u8],
+    formato: &str,
+    qualidade: u8,
+) -> Result<Vec<u8>, JsValue> {
+    console_error_panic_hook::set_once();
+
+    let esperado = (largura as usize)
+        .checked_mul(altura as usize)
+        .and_then(|p| p.checked_mul(4))
+        .ok_or_else(|| erro(format!("{largura}×{altura} não cabe na memória")))?;
+    if rgba.len() != esperado {
+        return Err(erro(format!(
+            "os bytes não batem com largura × altura × 4: {} para {esperado}",
+            rgba.len()
+        )));
+    }
+    let buffer = image::RgbaImage::from_raw(largura, altura, rgba.to_vec())
+        .ok_or_else(|| erro("os pixels não formam uma imagem"))?;
+    let imagem = image::DynamicImage::ImageRgba8(buffer);
+
+    if formato == "jpeg" {
+        return revelacao_core::jpeg::codificar(&imagem, qualidade.clamp(1, 100))
+            .map_err(|e| erro(format!("o JPEG não codificou: {e}")));
+    }
+
+    let saida_formato = match formato {
+        "png" => image::ImageFormat::Png,
+        "tiff" => image::ImageFormat::Tiff,
+        "webp" => image::ImageFormat::WebP,
+        outro => return Err(erro(format!("formato desconhecido: {outro}"))),
+    };
+    // O TIFF do `image` não aceita alfa em todo caminho, e o WebP sem perda
+    // aceita: RGBA para os dois, RGB só quando o formato exigir.
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    imagem
+        .write_to(&mut bytes, saida_formato)
+        .map_err(|e| erro(format!("o arquivo não codificou: {e}")))?;
+    Ok(bytes.into_inner())
+}
+
 /// Abre o motor sobre o canvas: WebGPU se houver, senão WebGL2.
 ///
 /// # 🚨 Por que o backend é escolhido **antes** de tocar no canvas
