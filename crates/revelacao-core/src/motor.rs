@@ -744,6 +744,20 @@ mod testes {
         )
     }
 
+    /// Os 256 níveis de cinza, um por pixel, em ordem: o pixel `i` vale `i`.
+    ///
+    /// 🔑 É a amostra que enxerga o que a `amostra()` não enxerga: com um nível
+    /// por pixel e nada de vizinhança ligada, a saída de cada pixel é a curva de
+    /// tom inteira, ponto a ponto. Degrau e inversão aparecem como diferença
+    /// entre pixels consecutivos.
+    fn rampa() -> Arc<Vec<u8>> {
+        Arc::new(
+            (0u32..256)
+                .flat_map(|i| [i as u8, i as u8, i as u8, 255])
+                .collect(),
+        )
+    }
+
     fn revelar_e_colher(motor: &mut Motor, entrada: Arc<Vec<u8>>, ajustes: Ajustes) -> Vec<u8> {
         motor
             .revelar(&entrada, 16, 16, &ajustes)
@@ -926,6 +940,101 @@ mod testes {
             saida.as_slice(),
             entrada.as_slice(),
             "o neutro moveu pixel — a leitura bilinear deixou de ser exata no inteiro"
+        );
+    }
+
+    /// 🚨 **Altas luzes, sombras, brancos e pretos não invertem nem dão degrau.**
+    ///
+    /// É o teste do defeito de 06/09: os quatro eram `if` sobre a luminância com
+    /// um fator só por região, e o dono viu o estrago numa foto de estúdio — o
+    /// branco das janelas manchado, contorno duro em volta delas. Duas medidas,
+    /// sobre a rampa de 256 níveis:
+    ///
+    ///   - **Inversão**: um nível de entrada maior nunca pode sair menor. Era o
+    ///     que fazia \"brancos\" em -100 zerar o pixel de 255 e deixar o de 190
+    ///     intacto.
+    ///   - **Degrau**: entre dois níveis vizinhos de entrada a saída não pode
+    ///     pular. Era o que punha contorno onde a luminância cruzava 128 ou 192.
+    ///
+    /// A folga de 4 níveis vem da matemática: a derivada de cada curva fica em
+    /// 0..2, então um passo de 1 nível na entrada anda no máximo 2 na saída, e
+    /// sobra 1 para o arredondamento de cada lado.
+    #[test]
+    fn o_tom_por_regiao_nunca_inverte_nem_da_degrau() {
+        let mut motor = motor_pronto();
+
+        // 4 a 7 é `highlights`, `shadows`, `whites`, `blacks`.
+        let mut casos: Vec<(String, Ajustes)> = Vec::new();
+        for (i, nome) in Ajustes::NOMES.iter().enumerate().take(8).skip(4) {
+            for valor in [-100.0, -60.0, 60.0, 100.0] {
+                casos.push((format!("{nome} em {valor}"), com_campo(i, valor)));
+            }
+        }
+        // 🔑 Os quatro juntos, e nos sinais que se opõem: é a combinação em que
+        // somar os deltas em vez de compor as curvas volta a inverter.
+        casos.push((
+            "os quatro opostos".into(),
+            com_campos(&[(4, -100.0), (5, -100.0), (6, 100.0), (7, 100.0)]),
+        ));
+        casos.push((
+            "os quatro opostos, ao contrário".into(),
+            com_campos(&[(4, 100.0), (5, 100.0), (6, -100.0), (7, -100.0)]),
+        ));
+
+        for (rotulo, ajustes) in casos {
+            let saida = revelar_e_colher(&mut motor, rampa(), ajustes);
+            let nivel = |entrada: usize| saida[entrada * 4] as i32;
+
+            for entrada in 1..256usize {
+                let (antes, agora) = (nivel(entrada - 1), nivel(entrada));
+                assert!(
+                    agora >= antes,
+                    "{rotulo}: a entrada {entrada} saiu em {agora}, ABAIXO do nível \
+                     {antes} que a entrada {} devolveu — isso é a inversão que mancha",
+                    entrada - 1
+                );
+                assert!(
+                    agora - antes <= 4,
+                    "{rotulo}: de {} para {entrada} a saída pulou de {antes} para {agora} — \
+                     esse degrau vira contorno duro na foto",
+                    entrada - 1
+                );
+            }
+        }
+    }
+
+    /// ✅ **Cada um dos quatro age na sua ponta da escala.**
+    ///
+    /// Sem isto, a correção do degrau passaria com os quatro virando controle
+    /// global de brilho — contínuo, monotônico e errado. A medida é a ponta
+    /// oposta: \"sombras\" tem de levantar o cinza 32 e quase não tocar o 240.
+    #[test]
+    fn cada_ajuste_de_tom_age_na_sua_ponta() {
+        let mut motor = motor_pronto();
+        let nivel = |saida: &[u8], entrada: usize| saida[entrada * 4] as i32;
+
+        let sombras = revelar_e_colher(&mut motor, rampa(), com_campo(5, 100.0));
+        assert!(
+            nivel(&sombras, 32) > 32 + 15,
+            "sombras +100 mal levantou o nível 32: saiu {}",
+            nivel(&sombras, 32)
+        );
+        assert!(
+            (nivel(&sombras, 240) - 240).abs() <= 5,
+            "sombras +100 mexeu no nível 240 ({}) — isso é brilho, não sombra",
+            nivel(&sombras, 240)
+        );
+
+        let brancos = revelar_e_colher(&mut motor, rampa(), com_campo(6, -100.0));
+        assert!(
+            nivel(&brancos, 240) < 240 - 15,
+            "brancos -100 mal baixou o nível 240: saiu {}",
+            nivel(&brancos, 240)
+        );
+        assert!(
+            (nivel(&brancos, 32) - 32).abs() <= 5,
+            "brancos -100 mexeu no nível 32 ({}) — a faixa dele é o topo",
+            nivel(&brancos, 32)
         );
     }
 
