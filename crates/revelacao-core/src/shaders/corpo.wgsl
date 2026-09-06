@@ -721,8 +721,28 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     // próprio, e cada pixel recebe uma mistura das duas conforme o quanto ele é
     // sombra ou luz. Sépia é uma ponta só — âmbar nas sombras, saturação alta —
     // sobre uma foto já dessaturada.
+    //
+    // 🚨 **A cor entra recolhida para 0–255, e isso não é zelo: é a correção da
+    // mancha de 2026-09-06.** Contraste, nitidez e as curvas de tom entregam
+    // valores fora da faixa — a nitidez por desenho, que sobressalto e
+    // subsalto na borda é o que ela é — e até aqui isso nunca importou, porque
+    // o `clamp` do fim recolhia tudo. `tonalizar` divide pela luminância da
+    // mistura, e com luminância de ENTRADA negativa essa divisão troca o sinal
+    // dos três canais: o pixel sai em dezenas de milhares e o `clamp` final o
+    // deposita num canto puro da roda de cor. Daí o respingo magenta em área
+    // escura e ao redor de borda forte, no meio de um degradê liso.
+    //
+    // Com a entrada em 0–255 o denominador é `(1-f)·luminância + f·luminância
+    // do matiz`, soma de dois termos não-negativos com um deles positivo
+    // sempre que `f > 0`: não cruza o zero, não inverte, e o fator fica
+    // limitado. Quem prende é `a_tonalizacao_nao_mancha_o_que_veio_fora_da_faixa`.
     if (params.split_shadow_sat != 0.0 || params.split_highlight_sat != 0.0) {
-        let l = clamp(((r + g + b) / 3.0) / 255.0, 0.0, 1.0);
+        var cor = clamp(
+            vec3<f32>(r, g, b),
+            vec3<f32>(0.0, 0.0, 0.0),
+            vec3<f32>(255.0, 255.0, 255.0),
+        );
+        let l = ((cor.r + cor.g + cor.b) / 3.0) / 255.0;
 
         // O balanço desloca o ponto em que uma ponta cede para a outra:
         // positivo dá mais foto às altas luzes, negativo às sombras. A transição
@@ -732,7 +752,6 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         let centro = 0.5 - balanco * 0.4;
         let peso_alta = smoothstep(centro - 0.35, centro + 0.35, l);
 
-        var cor = vec3<f32>(r, g, b);
         cor = tonalizar(
             cor,
             params.split_shadow_hue,

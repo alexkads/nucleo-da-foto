@@ -1418,6 +1418,71 @@ mod testes {
         );
     }
 
+    /// 🚨 **A tonalização não pode manchar o que veio fora da faixa.**
+    ///
+    /// Contraste, nitidez e as curvas de tom entregam valores abaixo de 0 e
+    /// acima de 255 — sempre entregaram, e até 2026-09-06 isso não importava,
+    /// porque o `clamp` do fim do shader recolhia tudo. `tonalizar` divide pela
+    /// luminância da mistura, e essa divisão inverte de sinal quando a
+    /// luminância de entrada é negativa: o pixel explode para dezenas de
+    /// milhares e o `clamp` final o deposita num canto puro da roda de cor.
+    ///
+    /// A rampa é o caso mínimo: os 256 níveis entram lisos, e basta um ajuste
+    /// que empurre o escuro abaixo de zero. Os dois aqui vêm de uma varredura
+    /// dos 53 controles sobre uma sépia ligada, e são os **extremos do
+    /// painel**, não valores de laboratório: contraste 2,0 leva o nível `i` a
+    /// `2i - 128`, negativo abaixo do 64; matiz -10 tira 50 do verde. Nos dois
+    /// o denominador cruzava o zero em algum nível, e ali dois vizinhos saíam
+    /// em cores opostas — salto de 255 num degradê liso.
+    #[test]
+    fn a_tonalizacao_nao_mancha_o_que_veio_fora_da_faixa() {
+        let mut motor = motor_pronto();
+        // Uma sépia como a do preset, e o controle que empurra para fora.
+        let sepia = Ajustes {
+            saturation: -1.0,
+            split_shadow_hue: 35.0,
+            split_shadow_sat: 60.0,
+            split_highlight_hue: 45.0,
+            split_highlight_sat: 40.0,
+            ..Default::default()
+        };
+        let casos = [
+            (
+                "contraste no máximo",
+                Ajustes {
+                    contrast: 2.0,
+                    ..sepia
+                },
+            ),
+            (
+                "matiz no mínimo",
+                Ajustes {
+                    tint: -10.0,
+                    ..sepia
+                },
+            ),
+        ];
+
+        for (nome, ajustes) in casos {
+            let saida = revelar_e_colher(&mut motor, rampa(), ajustes);
+
+            // A entrada anda de um nível por pixel e todo ajuste aqui é função
+            // contínua do nível: nenhum canal tem por que saltar dezenas entre
+            // vizinhos.
+            for i in 1..256usize {
+                for canal in 0..3 {
+                    let antes = saida[(i - 1) * 4 + canal] as i32;
+                    let agora = saida[i * 4 + canal] as i32;
+                    assert!(
+                        (agora - antes).abs() <= 24,
+                        "{nome}: mancha no pixel {i}, canal {canal} — \
+                         {antes} saltou para {agora}"
+                    );
+                }
+            }
+        }
+    }
+
     /// O grão muda a foto, é **o mesmo** a cada revelação, e some nas pontas.
     ///
     /// 🚨 **Repetir é requisito, e não detalhe.** O site revela a mesma foto a
