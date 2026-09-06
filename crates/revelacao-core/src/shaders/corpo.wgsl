@@ -795,7 +795,15 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
             u32(f32(coord.x) / lado),
             u32(f32(coord.y) / lado),
         );
-        let semente = embaralhar(celula.x * 0x9e3779b9u ^ embaralhar(celula.y));
+        // 🚨 **Os parênteses não são estilo: sem eles a foto fica PRETA no
+        // Chrome.** O Tint (o compilador de WGSL do Dawn, que é quem recebe
+        // este arquivo quando o navegador tem WebGPU) recusa misturar `*` e `^`
+        // sem parênteses — "mixing '*' and '^' requires parenthesis". O naga,
+        // que compila para o WebGL2 e roda em todos os testes nativos, aceita a
+        // mesma linha. O shader inteiro era rejeitado, o pipeline nascia
+        // inválido, e o render pass não escrevia nada: preto, sem erro na tela e
+        // com todos os sliders no neutro.
+        let semente = embaralhar((celula.x * 0x9e3779b9u) ^ embaralhar(celula.y));
         let ruido = f32(semente) / 4294967295.0 - 0.5;
 
         let l = clamp(((r + g + b) / 3.0) / 255.0, 0.0, 1.0);
