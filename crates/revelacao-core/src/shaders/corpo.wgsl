@@ -305,41 +305,63 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
     }
     
-    // Calculate luminance for selective adjustments
-    let luminance = (r + g + b) / 3.0;
-    
-    // 5. Highlights (adjust bright areas)
-    if (params.highlights != 0.0 && luminance > 128.0) {
-        let factor = 1.0 + (params.highlights * 0.01);
-        r *= factor;
-        g *= factor;
-        b *= factor;
+    // 5-8. Altas luzes, sombras, brancos e pretos.
+    //
+    // 🚨 Até 2026-09-06 os quatro eram um `if` sobre a luminância — altas luzes
+    // só tocavam `> 128`, brancos só `> 192`, sombras `< 128`, pretos `< 64` —
+    // e multiplicavam a região inteira por um fator só. Isso manchava a foto de
+    // duas maneiras, e o dono viu as duas na mesma imagem:
+    //
+    //   - **Degrau**: dois pixels vizinhos de 127 e 129 saíam com dezenas de
+    //     níveis de diferença. Numa parede lisa isso vira contorno, e em área
+    //     ruidosa vira o granulado que apareceu em volta das janelas.
+    //   - **Inversão**: com "brancos" em -100 o fator virava 0,0 — o pixel de
+    //     255 saía PRETO enquanto o vizinho de 190 ficava intacto. O branco da
+    //     janela virava sujeira; "altas luzes" em -100 zerava tudo acima de 128.
+    //
+    // A forma nova é uma curva por região, aplicada sobre a luminância
+    // normalizada. Cada uma é monotônica por construção — a derivada não fica
+    // negativa em nenhum ponto de -100..+100 — e as quatro entram COMPOSTAS,
+    // uma sobre a saída da outra, porque compor funções crescentes dá função
+    // crescente: nem a combinação dos quatro consegue inverter dois níveis.
+    //
+    //   altas luzes  n + a·n²(1-n)     f' = 1 + a(2n - 3n²)  ≥ 0
+    //   sombras      n + a·n(1-n)²     f' = 1 + a(1-n)(1-3n) ≥ 0
+    //   brancos      n + a·n³/3        f' = 1 + a·n²         ≥ 0
+    //   pretos       n + a·(1-n)³/3    f' = 1 - a(1-n)²      ≥ 0
+    //
+    // Os pesos também escolhem a faixa sem cortá-la: `n²(1-n)` é quase nada no
+    // escuro e some de novo no branco puro (altas luzes recuperam, não movem o
+    // ponto de branco), enquanto `n³` é o contrário — é o que faz "brancos" ser
+    // o controle do topo da escala. Quem prende tudo isso é
+    // `o_tom_por_regiao_nunca_inverte_nem_da_degrau`.
+    if (params.highlights != 0.0 || params.shadows != 0.0
+        || params.whites != 0.0 || params.blacks != 0.0) {
+        let l = clamp(((r + g + b) / 3.0) / 255.0, 0.0, 1.0);
+
+        // 🔑 Uma de cada vez, cada uma sobre o resultado da anterior. A soma
+        // dos quatro deltas seria mais curta e NÃO serviria: as garantias acima
+        // valem para cada curva sozinha, e somadas elas se cancelam — "sombras"
+        // em -100 com "pretos" em +100 devolveria derivada -1 no preto, que é a
+        // inversão de volta. Compostas, a garantia de cada uma basta.
+        var n = clamp(l + (params.whites * 0.01) * l * l * l / 3.0, 0.0, 1.0);
+        n = clamp(n + (params.highlights * 0.01) * n * n * (1.0 - n), 0.0, 1.0);
+        n = clamp(n + (params.shadows * 0.01) * n * (1.0 - n) * (1.0 - n), 0.0, 1.0);
+        let e = 1.0 - n;
+        n = clamp(n + (params.blacks * 0.01) * e * e * e / 3.0, 0.0, 1.0);
+
+        // A cor se preserva pela razão, que escala os três canais juntos.
+        // Abaixo de ~5% de luz não há razão que se sustente (o divisor tende a
+        // zero e o matiz explode), e lá o ajuste entra somado — é o que deixa
+        // "pretos" clarear um preto puro em vez de multiplicar zero por 1,3.
+        let delta = (n - l) * 255.0;
+        let escala = n / max(l, 0.0001);
+        let mistura = smoothstep(0.0, 0.05, l);
+        r = mix(r + delta, r * escala, mistura);
+        g = mix(g + delta, g * escala, mistura);
+        b = mix(b + delta, b * escala, mistura);
     }
-    
-    // 6. Shadows (adjust dark areas)
-    if (params.shadows != 0.0 && luminance < 128.0) {
-        let factor = 1.0 + (params.shadows * 0.01);
-        r *= factor;
-        g *= factor;
-        b *= factor;
-    }
-    
-    // 7. Whites (adjust brightest areas)
-    if (params.whites != 0.0 && luminance > 192.0) {
-        let factor = 1.0 + (params.whites * 0.01);
-        r *= factor;
-        g *= factor;
-        b *= factor;
-    }
-    
-    // 8. Blacks (adjust darkest areas)
-    if (params.blacks != 0.0 && luminance < 64.0) {
-        let factor = 1.0 + (params.blacks * 0.01);
-        r *= factor;
-        g *= factor;
-        b *= factor;
-    }
-    
+
     // Recalculate luminance after tonal adjustments
     let lum2 = (r + g + b) / 3.0;
     
