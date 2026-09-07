@@ -215,6 +215,13 @@ pub struct Motor {
     pipeline: Pipeline,
     /// Recursos por tamanho de imagem — ver [`Recursos`].
     cache: LruCache<(u32, u32), Recursos>,
+    /// Qual API gráfica respondeu — Metal, Vulkan, WebGPU, WebGL2.
+    ///
+    /// 🔑 **É o selo que o editor do site mostra ao lado do nome do arquivo.**
+    /// Lá ele separa WebGPU de WebGL2, que rendem diferente; aqui ele responde
+    /// "a GPU está mesmo sendo usada, e por qual caminho" — a pergunta que
+    /// aparece toda vez que alguém acha o arrasto lento.
+    backend: &'static str,
 }
 
 impl Motor {
@@ -359,7 +366,20 @@ impl Motor {
             fila,
             pipeline,
             cache: LruCache::new(NonZeroUsize::new(5).expect("5 não é zero")),
+            backend: match adaptador.get_info().backend {
+                wgpu::Backend::Metal => "Metal",
+                wgpu::Backend::Vulkan => "Vulkan",
+                wgpu::Backend::Dx12 => "DirectX 12",
+                wgpu::Backend::Gl => "OpenGL",
+                wgpu::Backend::BrowserWebGpu => "WebGPU",
+                wgpu::Backend::Empty => "sem GPU",
+            },
         })
+    }
+
+    /// Qual API gráfica respondeu.
+    pub fn backend(&self) -> &'static str {
+        self.backend
     }
 
     /// Por onde este motor entra no shader.
@@ -405,6 +425,7 @@ impl Motor {
             fila,
             pipeline,
             cache,
+            ..
         } = self;
         let recursos = preparar(
             dispositivo,
@@ -507,6 +528,7 @@ impl Motor {
             fila,
             pipeline,
             cache,
+            ..
         } = self;
         let recursos = preparar(
             dispositivo,
