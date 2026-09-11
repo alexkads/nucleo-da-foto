@@ -356,10 +356,25 @@ impl Tela {
                 de: anterior.alfa,
             });
         }
-        // Só duas ficam: a de antes já não tem para onde esmaecer, e atravessar
-        // a tira com a seta não pode acumular camadas.
+        // Só duas ficam — atravessar a tira com a seta não pode acumular
+        // camadas.
+        //
+        // 🚨 **Sai a menos visível, e não a mais antiga.** Com `remove(0)`, o
+        // operador que apertasse a seta duas vezes antes do primeiro quadro
+        // descartava a foto que estava **inteira** na tela (ela era a mais
+        // antiga) e mantinha uma que nunca chegou a ser desenhada, em alfa
+        // zero: a tela saltava de uma para a outra sem cruzamento nenhum. A
+        // que ainda tem o que mostrar é a que fica.
         if self.camadas.len() >= 2 {
-            self.camadas.remove(0);
+            let descartar = self
+                .camadas
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.saindo.is_some())
+                .min_by(|(_, a), (_, b)| a.alfa.total_cmp(&b.alfa))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.camadas.remove(descartar);
         }
         self.camadas.push(camada);
         Ok(())
