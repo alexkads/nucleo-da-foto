@@ -31,6 +31,16 @@
 //! | JavaScript | escuta o `BroadcastChannel`, baixa a cópia de trabalho, decodifica (`createImageBitmap`, 5–10× mais rápido que em wasm), chama `mostrar`/`ajustar` e roda o laço de quadros |
 //! | aqui | sobe os pixels, revela com os 53 ajustes, enquadra, encaixa na janela, cruza as duas fotos e desenha |
 
-mod tela;
+//! # 🔑 Só existe no alvo `wasm32`
+//!
+//! `wgpu::SurfaceTarget::Canvas` e o `HtmlCanvasElement` não têm par em nativo,
+//! e um crate que só compila num alvo quebraria `cargo test --workspace` e o
+//! clippy do CI — que é exatamente o que aconteceu quando este nasceu sem a
+//! guarda. É a mesma linha do `revelacao-web`, e pelo mesmo motivo: em nativo
+//! ele é vazio de propósito, e o que se prova sem navegador é o
+//! `revelacao-core`, onde a matemática mora.
 
+#[cfg(target_arch = "wasm32")]
+mod tela;
+#[cfg(target_arch = "wasm32")]
 pub use tela::{abrir, Tela};
