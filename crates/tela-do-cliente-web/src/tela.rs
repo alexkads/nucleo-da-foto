@@ -7,18 +7,28 @@ use wasm_bindgen::prelude::*;
 
 /// Quanto dura o cruzamento entre uma foto e a seguinte, em milissegundos.
 ///
-/// ⚠️ **É o teto do que o operador aguenta, não o do que fica bonito parado.**
-/// Um segundo é lindo numa foto só e vira melado quando ele atravessa a tira
-/// com a seta; abaixo de uns 300 ms o cruzamento deixa de ser percebido como
-/// transição e volta a parecer um corte. O número veio da versão em CSS, que
-/// esta substitui.
-const CRUZAMENTO_MS: f64 = 500.0;
+/// 🔑 **Aqui não é o mesmo compromisso da galeria.** Meio segundo era o número
+/// da versão em CSS, herdado de uma tela em que o operador atravessa a tira com
+/// a seta e a transição vira melado. **Esta tela é a do cliente**: quem olha não
+/// está navegando, está decidindo se leva a foto — e o que ele viu foi *"tá
+/// muito rápido"* (dono, 2026-09-11). Um segundo dá tempo de a foto que entra
+/// ser percebida como apresentação, e não como troca de slide.
+///
+/// ⚠️ Passar muito disto tem um custo que não aparece parado: o operador que
+/// anda três fotos seguidas deixa a tela do cliente cruzando o tempo todo, e a
+/// foto nunca assenta. A saída não seria encurtar isto — é [`Tela::mostrar`]
+/// descartar a camada do meio, que é o que ele já faz.
+const CRUZAMENTO_MS: f64 = 1000.0;
 
 /// De quanto a foto que entra começa maior — o respiro de apresentação.
 ///
 /// 🔑 **Só a que entra se move.** Dois movimentos cruzados dariam a impressão
 /// de a foto ter sido empurrada, e o que se quer é que ela **apareça**.
-const PASSO_DA_ENTRADA: f32 = 1.03;
+///
+/// Cresceu junto com o tempo: num cruzamento de um segundo, 3% é um movimento
+/// que quase não se vê — e o movimento é metade do que faz a foto parecer
+/// entrar em vez de piscar.
+const PASSO_DA_ENTRADA: f32 = 1.06;
 
 /// O formato das texturas em que cada foto é revelada.
 ///
@@ -64,6 +74,24 @@ struct Camada {
     /// Quando esta camada entrou, no relógio do `quadro`. `None` = ainda não
     /// começou a contar (o primeiro quadro é quem carimba).
     entrou_em: Option<f64>,
+    /// Esta camada deixou de ser a de cima e está esmaecendo. Ver [`Saida`].
+    saindo: Option<Saida>,
+    /// O alfa do último quadro — é dele que a saída parte.
+    alfa: f32,
+}
+
+/// A despedida de uma camada.
+///
+/// 🚨 **Ela parte do alfa que a camada tinha, e não de 1.** Sem isto, trocar de
+/// foto antes de o cruzamento anterior terminar fazia a foto do meio saltar: ela
+/// estava em 30% de opacidade, virava "a que sai", e o cálculo antigo — que
+/// media o tempo desde a **entrada** dela — a colocava direto num alfa muito
+/// menor. Com o cruzamento em um segundo isso deixou de ser sutil.
+struct Saida {
+    /// Quando começou a sair; `None` até o primeiro quadro carimbar.
+    em: Option<f64>,
+    /// De qual opacidade ela parte.
+    de: f32,
 }
 
 /// A tela do cliente aberta sobre um `<canvas>`.
@@ -321,9 +349,15 @@ impl Tela {
         let corte = corte_de(corte)?;
 
         let camada = self.nova_camada(largura, altura, rgba, ajustes, corte);
-        // Só duas ficam: a que estava entrando vira a que sai, e a de antes dela
-        // já não tem para onde esmaecer. Trocar de foto depressa pela seta não
-        // acumula camadas.
+        // A que estava no ar começa a se despedir **do alfa em que está**.
+        if let Some(anterior) = self.camadas.last_mut() {
+            anterior.saindo = Some(Saida {
+                em: None,
+                de: anterior.alfa,
+            });
+        }
+        // Só duas ficam: a de antes já não tem para onde esmaecer, e atravessar
+        // a tira com a seta não pode acumular camadas.
         if self.camadas.len() >= 2 {
             self.camadas.remove(0);
         }
@@ -398,30 +432,42 @@ impl Tela {
         // 2. O tempo de cada camada, e os uniformes que saem dele.
         let mut animando = false;
         let janela = (self.largura as f32, self.altura as f32);
-        let total = self.camadas.len();
-        for (i, camada) in self.camadas.iter_mut().enumerate() {
-            let entrou = *camada.entrou_em.get_or_insert(agora);
-            let t = ((agora - entrou) / CRUZAMENTO_MS).clamp(0.0, 1.0) as f32;
-            if t < 1.0 {
-                animando = true;
-            }
-            // A última é a que entra; as de baixo esmaecem.
-            let entrando = i + 1 == total;
-            let suave = suavizar(t);
-            let (alfa, zoom) = if entrando {
-                (suave, PASSO_DA_ENTRADA + (1.0 - PASSO_DA_ENTRADA) * suave)
-            } else {
-                (1.0 - suave, 1.0)
+        for camada in self.camadas.iter_mut() {
+            let (alfa, zoom) = match &mut camada.saindo {
+                Some(saida) => {
+                    let comecou = *saida.em.get_or_insert(agora);
+                    let t = ((agora - comecou) / CRUZAMENTO_MS).clamp(0.0, 1.0) as f32;
+                    if t < 1.0 {
+                        animando = true;
+                    }
+                    // Só esmaece: dois movimentos cruzados pareceriam empurrão.
+                    (saida.de * (1.0 - suavizar(t)), 1.0)
+                }
+                None => {
+                    let entrou = *camada.entrou_em.get_or_insert(agora);
+                    let t = ((agora - entrou) / CRUZAMENTO_MS).clamp(0.0, 1.0) as f32;
+                    if t < 1.0 {
+                        animando = true;
+                    }
+                    let suave = suavizar(t);
+                    (suave, PASSO_DA_ENTRADA + (1.0 - PASSO_DA_ENTRADA) * suave)
+                }
             };
+            camada.alfa = alfa;
             let uniforme = montar_uniforme(camada, janela, alfa, zoom);
             self.motor
                 .fila()
                 .write_buffer(&camada.uniforme, 0, bytemuck::bytes_of(&uniforme));
         }
-        // A que saiu já esmaeceu por inteiro: fora.
-        if total > 1 && !animando {
-            self.camadas.remove(0);
-        }
+        // Quem terminou de sair vai embora — e nunca a última, que é a foto no
+        // ar mesmo quando ela chegou sem cruzamento nenhum.
+        let ultima = self.camadas.len().saturating_sub(1);
+        let mut i = 0;
+        self.camadas.retain(|c| {
+            let fica = i == ultima || c.alfa > 0.0 || c.saindo.is_none();
+            i += 1;
+            fica
+        });
 
         // 3. Uma passada: preto, e as camadas por cima.
         let quadro = self
@@ -525,13 +571,26 @@ impl Tela {
             uniforme,
             suja: true,
             entrou_em: None,
+            saindo: None,
+            alfa: 0.0,
         }
     }
 }
 
-/// O `ease-out` do cruzamento — o mesmo perfil do CSS que ele substitui.
+/// A curva do cruzamento: começa devagar, termina devagar.
+///
+/// 🔑 **`ease-in-out`, e não o `ease-out` de antes.** O `ease-out` sai do zero
+/// a toda velocidade — a foto nova "aparece de estalo" e depois demora a
+/// assentar, que é exatamente a sensação de rápido demais que o dono relatou,
+/// mesmo com o tempo aumentado. Esta é simétrica: os dois primeiros quadros
+/// quase não mexem, o meio faz o trabalho, e o fim encosta devagar.
 fn suavizar(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        let d = -2.0 * t + 2.0;
+        1.0 - d * d * d / 2.0
+    }
 }
 
 fn ajustes_de(v: &[f32]) -> Result<Ajustes, JsValue> {
