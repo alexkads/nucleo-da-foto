@@ -400,6 +400,16 @@ impl Motor {
         &self.dispositivo
     }
 
+    /// A fila, para quem submete os **próprios** comandos com este dispositivo.
+    ///
+    /// 🔑 É o que permite compor o que este motor revelou sem abrir um segundo
+    /// dispositivo: a tela do cliente (`tela-do-cliente-web`) revela cada foto numa
+    /// textura com [`Self::desenhar`] e compõe as duas na superfície com um
+    /// pipeline dela. Dois dispositivos não compartilham textura nenhuma.
+    pub fn fila(&self) -> &wgpu::Queue {
+        &self.fila
+    }
+
     /// Uma passada: sobe o que mudou, despacha, lê de volta.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn revelar(

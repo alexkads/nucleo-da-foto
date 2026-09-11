@@ -1,0 +1,21 @@
+[package]
+name = "tela-do-cliente-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "A tela do cliente do balcão, em wgpu: a foto revelada sobre preto, e o cruzamento entre uma e a seguinte"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# O mesmo shader de ajustes do editor e do desktop: a foto que o cliente vê tem
+# de ser a mesma que o operador está fazendo, e não uma segunda interpretação.
+revelacao-core = { path = "../revelacao-core", features = ["webgl"] }
+wgpu = "23.0"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "console"] }
+console_error_panic_hook = "0.1"
+bytemuck = { version = "1", features = ["derive"] }
