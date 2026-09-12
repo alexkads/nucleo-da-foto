@@ -114,6 +114,11 @@ struct Recursos {
     buffer_grades: wgpu::Buffer,
     /// O que produziu as grades em uso — ver [`ChaveDasGrades`].
     chave_das_grades: Option<ChaveDasGrades>,
+    /// A última combinação pedida e quando ela chegou — ver [`adiar_as_grades`].
+    grades_pedidas: Option<ChaveDasGrades>,
+    ultimo_pedido_ms: f64,
+    /// O último desenho saiu com grades de antes.
+    grades_pendentes: bool,
 }
 
 fn criar_recursos(
@@ -204,6 +209,9 @@ fn criar_recursos(
         textura_grade_mo,
         buffer_grades,
         chave_das_grades: None,
+        grades_pedidas: None,
+        ultimo_pedido_ms: 0.0,
+        grades_pendentes: false,
     }
 }
 
@@ -364,17 +372,52 @@ fn textura_de_grade(
     textura
 }
 
+/// Quanto tempo sem mudança nos ajustes que alimentam as grades antes de refazê-las.
+const OCIOSO_ANTES_DAS_GRADES_MS: f64 = 150.0;
+
+/// Desenhar com as grades de antes, em vez de refazê-las agora?
+///
+/// 🚨 **Refazer as grades custa centenas de milissegundos numa cópia de 2048
+/// px** (medido no nativo; o wasm é mais lento), e o editor desenha a cada
+/// quadro de um arrasto: com o estilo P&B ligado, arrastar a exposição virava
+/// um slide travado (dono, 2026-09-12: *"achei os novos controles RGB meio
+/// travado para deslizar"*).
+///
+/// 🔑 **Enquanto os ajustes continuam mudando, a GPU desenha com a grade de
+/// antes** — a exposição, as cores e a vinheta respondem na hora, e só a
+/// vizinhança do `shadhi` e o filtro do `monochrome` ficam um instante para
+/// trás. Parado o arrasto por [`OCIOSO_ANTES_DAS_GRADES_MS`], a grade exata é
+/// refeita. Nunca adia sem relógio (exportação, desktop), numa foto nova, na
+/// primeira grade, ou quando um módulo acabou de ligar.
+fn adiar_as_grades(
+    feitas: Option<&ChaveDasGrades>,
+    pedida: &ChaveDasGrades,
+    relogio: Option<f64>,
+    ultimo_pedido_ms: f64,
+) -> bool {
+    let (Some(agora), Some(feitas)) = (relogio, feitas) else {
+        return false;
+    };
+    feitas.pixels == pedida.pixels
+        && feitas.escala == pedida.escala
+        && feitas.modulos == pedida.modulos
+        && agora - ultimo_pedido_ms < OCIOSO_ANTES_DAS_GRADES_MS
+}
+
 /// O que decide se as grades em uso ainda valem.
 ///
 /// 🔑 **Mexer num controle nosso não refaz a grade**: ela depende só dos
 /// pixels (pela identidade do `Arc`, como a textura de entrada), da escala e
 /// dos parâmetros de `exposure`, `shadhi` e `monochrome`. Refazê-la a cada
 /// arrasto de slider custaria o módulo inteiro em CPU por quadro.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct ChaveDasGrades {
     pixels: usize,
     escala: u32,
     parametros: Vec<u32>,
+    /// `shadhi` e `monochrome` ligados. Uma grade de antes só serve com os
+    /// mesmos módulos: sem ela, o módulo recém-ligado leria uma grade vazia.
+    modulos: (bool, bool),
 }
 
 impl ChaveDasGrades {
@@ -390,6 +433,10 @@ impl ChaveDasGrades {
         let locais = posicao("dt_shadhi_ativo")..=posicao("dt_monochrome_highlights");
         Self {
             pixels: Arc::as_ptr(pixels) as usize,
+            modulos: (
+                ajustes.dt_shadhi_ativo != 0.0,
+                ajustes.dt_monochrome_ativo != 0.0,
+            ),
             escala: escala.to_bits(),
             parametros: exposure.chain(locais).map(|i| vetor[i].to_bits()).collect(),
         }
@@ -417,6 +464,10 @@ pub struct Motor {
     /// A razão entre a imagem revelada e a foto original — ver
     /// [`Motor::definir_escala_do_original`].
     escala_do_original: f32,
+    /// Ver [`Motor::definir_relogio`].
+    relogio_ms: Option<f64>,
+    /// Ver [`Motor::grades_pendentes`].
+    grades_pendentes: bool,
 }
 
 impl Motor {
@@ -546,6 +597,8 @@ impl Motor {
             pipeline,
             cache: LruCache::new(NonZeroUsize::new(5).expect("5 não é zero")),
             escala_do_original: 1.0,
+            relogio_ms: None,
+            grades_pendentes: false,
             backend: match adaptador.get_info().backend {
                 wgpu::Backend::Metal => "Metal",
                 wgpu::Backend::Vulkan => "Vulkan",
@@ -605,6 +658,24 @@ impl Motor {
         };
     }
 
+    /// O relógio de quem desenha em tempo real, em milissegundos — o
+    /// `performance.now()` do navegador, o `agora` do `requestAnimationFrame`.
+    ///
+    /// Com relógio, [`Motor::desenhar`] adia as grades bilaterais enquanto os
+    /// ajustes que as alimentam continuam mudando (ver `adiar_as_grades`).
+    /// `None`, o padrão, é sem pressa: toda revelação sai com as grades exatas.
+    /// [`Motor::revelar`] ignora o relógio — o arquivo exportado é sempre exato.
+    pub fn definir_relogio(&mut self, agora_ms: Option<f64>) {
+        self.relogio_ms = agora_ms.filter(|v| v.is_finite());
+    }
+
+    /// O último [`Motor::desenhar`] saiu com grades de antes: desenhe de novo,
+    /// com os mesmos ajustes, no próximo quadro — é o que as refaz quando o
+    /// arrasto parar.
+    pub fn grades_pendentes(&self) -> bool {
+        self.grades_pendentes
+    }
+
     /// Uma passada: sobe o que mudou, despacha, lê de volta.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn revelar(
@@ -643,6 +714,7 @@ impl Motor {
             altura,
             ajustes,
             escala,
+            None,
         );
 
         let mut encoder = dispositivo.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -731,6 +803,7 @@ impl Motor {
             return None;
         }
         let escala = self.escala_do_original;
+        let relogio = self.relogio_ms;
         let Motor {
             dispositivo,
             fila,
@@ -748,7 +821,9 @@ impl Motor {
             altura,
             ajustes,
             escala,
+            relogio,
         );
+        let pendentes = recursos.grades_pendentes;
 
         let mut encoder = dispositivo.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Revelação Encoder (superfície)"),
@@ -764,6 +839,7 @@ impl Motor {
             formato,
         );
         fila.submit(std::iter::once(encoder.finish()));
+        self.grades_pendentes = pendentes;
         Some(())
     }
 }
@@ -780,6 +856,7 @@ fn preparar<'a>(
     altura: u32,
     ajustes: &Ajustes,
     escala: f32,
+    relogio: Option<f64>,
 ) -> &'a mut Recursos {
     if !cache.contains(&(largura, altura)) {
         cache.put(
@@ -820,9 +897,25 @@ fn preparar<'a>(
     }
 
     // Estágio darktable: as grades bilaterais só se refazem quando a chave muda.
+    recursos.grades_pendentes = false;
     if ajustes.dt_shadhi_ativo != 0.0 || ajustes.dt_monochrome_ativo != 0.0 {
         let chave = ChaveDasGrades::nova(pixels, ajustes, escala);
-        if recursos.chave_das_grades.as_ref() != Some(&chave) {
+        if let Some(agora) = relogio {
+            if recursos.grades_pedidas.as_ref() != Some(&chave) {
+                recursos.ultimo_pedido_ms = agora;
+                recursos.grades_pedidas = Some(chave.clone());
+            }
+        }
+        if recursos.chave_das_grades.as_ref() != Some(&chave)
+            && adiar_as_grades(
+                recursos.chave_das_grades.as_ref(),
+                &chave,
+                relogio,
+                recursos.ultimo_pedido_ms,
+            )
+        {
+            recursos.grades_pendentes = true;
+        } else if recursos.chave_das_grades.as_ref() != Some(&chave) {
             let grades = crate::darktable::grades_do_estagio(
                 pixels,
                 largura as usize,
@@ -1004,6 +1097,40 @@ async fn esperar_o_mapeamento(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod testes {
+    #[test]
+    fn as_grades_esperam_o_arrasto_parar_e_so_ele() {
+        let chave = |pixels, parametro: u32, modulos| super::ChaveDasGrades {
+            pixels,
+            escala: 1,
+            parametros: vec![parametro],
+            modulos,
+        };
+        let adiar = super::adiar_as_grades;
+        let feitas = chave(1, 10, (true, true));
+        let arrastando = chave(1, 11, (true, true));
+        // Sem relógio — a exportação e o desktop: sempre a grade exata.
+        assert!(!adiar(Some(&feitas), &arrastando, None, 0.0));
+        // Mudou há 20 ms: desenha com a de antes.
+        assert!(adiar(Some(&feitas), &arrastando, Some(1020.0), 1000.0));
+        // Parado há 150 ms: refaz.
+        assert!(!adiar(Some(&feitas), &arrastando, Some(1150.0), 1000.0));
+        // Outra foto, a primeira grade, ou um módulo que acabou de ligar: não há
+        // grade de antes que sirva.
+        assert!(!adiar(
+            Some(&feitas),
+            &chave(2, 11, (true, true)),
+            Some(1020.0),
+            1000.0
+        ));
+        assert!(!adiar(None, &arrastando, Some(1020.0), 1000.0));
+        assert!(!adiar(
+            Some(&feitas),
+            &chave(1, 11, (true, false)),
+            Some(1020.0),
+            1000.0
+        ));
+    }
+
     use super::*;
 
     /// Espera a thread abrir o dispositivo, e falha se não houver GPU.

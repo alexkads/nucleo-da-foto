@@ -293,6 +293,19 @@ impl Tubulacao {
         [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
     }
 
+    /// Só o L do Lab — o que a grade do `shadows and highlights` espalha. A mesma
+    /// conta de [`Tubulacao::para_lab`], com uma raiz cúbica em vez de três.
+    pub fn luminancia_lab(&self, rgb: Rgb) -> f32 {
+        let y = mul(&self.trabalho_para_xyz_d50, rgb)[1] / D50_XYZ[1] as f32;
+        let (eps, kappa) = (216.0f32 / 24389.0, 24389.0f32 / 27.0);
+        let fy = if y > eps {
+            y.cbrt()
+        } else {
+            (kappa * y + 16.0) / 116.0
+        };
+        116.0 * fy - 16.0
+    }
+
     /// Lab D50 → trabalho (`dt_Lab_to_XYZ`, `colorspaces_inline_conversions.h:192`).
     pub fn de_lab(&self, lab: Rgb) -> Rgb {
         let fy = (lab[0] + 16.0) / 116.0;
@@ -1267,7 +1280,22 @@ pub fn shadhi(
     escala: f32,
 ) {
     let lab: Vec<Rgb> = pixels.iter().map(|px| tub.para_lab(*px)).collect();
-    let sigma = p.radius.max(0.1) * escala;
+    let l: Vec<f32> = lab.iter().map(|x| x[0]).collect();
+    let mut grade = Bilateral::nova(largura, altura, p.radius.max(0.1) * escala, 100.0);
+    grade.espalhar(&l);
+    grade.borrar();
+    let base = grade.fatiar(&l, -1.0);
+    for (px, saida) in pixels.iter_mut().zip(shadhi_em_lab(&lab, &base, p)) {
+        *px = tub.de_lab(saida);
+    }
+}
+
+/// O miolo do [`shadhi`]: do Lab e da base borrada ao Lab de saída.
+///
+/// Separado para [`grades_do_estagio`] reaproveitar o Lab e a grade que já
+/// calculou, e tirar o filtro do `monochrome` direto do Lab que sai daqui — sem
+/// a ida ao RGB e a volta ao Lab, que custavam mais que a conta inteira.
+fn shadhi_em_lab(lab: &[Rgb], base: &[f32], p: ShadowsHighlights) -> Vec<Rgb> {
     let shadows = 2.0 * (p.shadows / 100.0).clamp(-1.0, 1.0);
     let highlights = 2.0 * (p.highlights / 100.0).clamp(-1.0, 1.0);
     let whitepoint = (1.0 - p.whitepoint / 100.0).max(0.01);
@@ -1279,12 +1307,6 @@ pub fn shadhi(
     let flags = p.flags;
     let unbound_mask = flags & UNBOUND_BILATERAL != 0;
     let low = p.low_approximation;
-
-    let l: Vec<f32> = lab.iter().map(|x| x[0]).collect();
-    let mut grade = Bilateral::nova(largura, altura, sigma, 100.0);
-    grade.espalhar(&l);
-    grade.borrar();
-    let base = grade.fatiar(&l, -1.0);
 
     let refs = |la: f32| {
         let lref = (if la.abs() > low {
@@ -1309,82 +1331,85 @@ pub fn shadhi(
         }
     };
 
-    for (k, px) in pixels.iter_mut().enumerate() {
-        let mut ta = [lab[k][0] / 100.0, lab[k][1] / 128.0, lab[k][2] / 128.0];
-        let mut tb = [(100.0 - base[k]) / 100.0, 0.0f32, 0.0f32];
-        if ta[0] > 0.0 {
-            ta[0] /= whitepoint;
-        }
-        if tb[0] > 0.0 {
-            tb[0] /= whitepoint;
-        }
+    lab.iter()
+        .zip(base)
+        .map(|(c, b)| {
+            let mut ta = [c[0] / 100.0, c[1] / 128.0, c[2] / 128.0];
+            let mut tb = [(100.0 - b) / 100.0, 0.0f32, 0.0f32];
+            if ta[0] > 0.0 {
+                ta[0] /= whitepoint;
+            }
+            if tb[0] > 0.0 {
+                tb[0] /= whitepoint;
+            }
 
-        // Altas luzes (shadhi.c:424–454).
-        let mut h2 = highlights * highlights;
-        let hx = (1.0 - tb[0] / (1.0 - compress)).clamp(0.0, 1.0);
-        while h2 > 0.0 {
-            let la = if flags & UNBOUND_HIGHLIGHTS_L != 0 {
-                ta[0]
-            } else {
-                ta[0].clamp(0.0, 1.0)
-            };
-            let mut lb = (tb[0] - 0.5) * sinal(-highlights) * sinal(1.0 - la) + 0.5;
-            if !unbound_mask {
-                lb = lb.clamp(0.0, 1.0);
+            // Altas luzes (shadhi.c:424–454).
+            let mut h2 = highlights * highlights;
+            let hx = (1.0 - tb[0] / (1.0 - compress)).clamp(0.0, 1.0);
+            while h2 > 0.0 {
+                let la = if flags & UNBOUND_HIGHLIGHTS_L != 0 {
+                    ta[0]
+                } else {
+                    ta[0].clamp(0.0, 1.0)
+                };
+                let mut lb = (tb[0] - 0.5) * sinal(-highlights) * sinal(1.0 - la) + 0.5;
+                if !unbound_mask {
+                    lb = lb.clamp(0.0, 1.0);
+                }
+                let (lref, href) = refs(la);
+                let op = h2.min(1.0) * hx;
+                h2 -= 1.0;
+                ta[0] = la * (1.0 - op) + overlay(la, lb) * op;
+                if flags & UNBOUND_HIGHLIGHTS_L == 0 {
+                    ta[0] = ta[0].clamp(0.0, 1.0);
+                }
+                let cf = ta[0] * lref * (1.0 - highlights_ccorrect)
+                    + (1.0 - ta[0]) * href * highlights_ccorrect;
+                ta[1] = ta[1] * (1.0 - op) + (ta[1] + tb[1]) * cf * op;
+                if flags & UNBOUND_HIGHLIGHTS_A == 0 {
+                    ta[1] = ta[1].clamp(-1.0, 1.0);
+                }
+                ta[2] = ta[2] * (1.0 - op) + (ta[2] + tb[2]) * cf * op;
+                if flags & UNBOUND_HIGHLIGHTS_B == 0 {
+                    ta[2] = ta[2].clamp(-1.0, 1.0);
+                }
             }
-            let (lref, href) = refs(la);
-            let op = h2.min(1.0) * hx;
-            h2 -= 1.0;
-            ta[0] = la * (1.0 - op) + overlay(la, lb) * op;
-            if flags & UNBOUND_HIGHLIGHTS_L == 0 {
-                ta[0] = ta[0].clamp(0.0, 1.0);
-            }
-            let cf = ta[0] * lref * (1.0 - highlights_ccorrect)
-                + (1.0 - ta[0]) * href * highlights_ccorrect;
-            ta[1] = ta[1] * (1.0 - op) + (ta[1] + tb[1]) * cf * op;
-            if flags & UNBOUND_HIGHLIGHTS_A == 0 {
-                ta[1] = ta[1].clamp(-1.0, 1.0);
-            }
-            ta[2] = ta[2] * (1.0 - op) + (ta[2] + tb[2]) * cf * op;
-            if flags & UNBOUND_HIGHLIGHTS_B == 0 {
-                ta[2] = ta[2].clamp(-1.0, 1.0);
-            }
-        }
 
-        // Sombras (shadhi.c:456–487).
-        let mut s2 = shadows * shadows;
-        let sx = (tb[0] / (1.0 - compress) - compress / (1.0 - compress)).clamp(0.0, 1.0);
-        while s2 > 0.0 {
-            let la = if flags & UNBOUND_HIGHLIGHTS_L != 0 {
-                ta[0]
-            } else {
-                ta[0].clamp(0.0, 1.0)
-            };
-            let mut lb = (tb[0] - 0.5) * sinal(shadows) * sinal(1.0 - la) + 0.5;
-            if !unbound_mask {
-                lb = lb.clamp(0.0, 1.0);
+            // Sombras (shadhi.c:456–487).
+            let mut s2 = shadows * shadows;
+            let sx = (tb[0] / (1.0 - compress) - compress / (1.0 - compress)).clamp(0.0, 1.0);
+            while s2 > 0.0 {
+                let la = if flags & UNBOUND_HIGHLIGHTS_L != 0 {
+                    ta[0]
+                } else {
+                    ta[0].clamp(0.0, 1.0)
+                };
+                let mut lb = (tb[0] - 0.5) * sinal(shadows) * sinal(1.0 - la) + 0.5;
+                if !unbound_mask {
+                    lb = lb.clamp(0.0, 1.0);
+                }
+                let (lref, href) = refs(la);
+                let op = s2.min(1.0) * sx;
+                s2 -= 1.0;
+                ta[0] = la * (1.0 - op) + overlay(la, lb) * op;
+                if flags & UNBOUND_SHADOWS_L == 0 {
+                    ta[0] = ta[0].clamp(0.0, 1.0);
+                }
+                let cf = ta[0] * lref * shadows_ccorrect
+                    + (1.0 - ta[0]) * href * (1.0 - shadows_ccorrect);
+                ta[1] = ta[1] * (1.0 - op) + (ta[1] + tb[1]) * cf * op;
+                if flags & UNBOUND_SHADOWS_A == 0 {
+                    ta[1] = ta[1].clamp(-1.0, 1.0);
+                }
+                ta[2] = ta[2] * (1.0 - op) + (ta[2] + tb[2]) * cf * op;
+                if flags & UNBOUND_SHADOWS_B == 0 {
+                    ta[2] = ta[2].clamp(-1.0, 1.0);
+                }
             }
-            let (lref, href) = refs(la);
-            let op = s2.min(1.0) * sx;
-            s2 -= 1.0;
-            ta[0] = la * (1.0 - op) + overlay(la, lb) * op;
-            if flags & UNBOUND_SHADOWS_L == 0 {
-                ta[0] = ta[0].clamp(0.0, 1.0);
-            }
-            let cf =
-                ta[0] * lref * shadows_ccorrect + (1.0 - ta[0]) * href * (1.0 - shadows_ccorrect);
-            ta[1] = ta[1] * (1.0 - op) + (ta[1] + tb[1]) * cf * op;
-            if flags & UNBOUND_SHADOWS_A == 0 {
-                ta[1] = ta[1].clamp(-1.0, 1.0);
-            }
-            ta[2] = ta[2] * (1.0 - op) + (ta[2] + tb[2]) * cf * op;
-            if flags & UNBOUND_SHADOWS_B == 0 {
-                ta[2] = ta[2].clamp(-1.0, 1.0);
-            }
-        }
 
-        *px = tub.de_lab([ta[0] * 100.0, ta[1] * 128.0, ta[2] * 128.0]);
-    }
+            [ta[0] * 100.0, ta[1] * 128.0, ta[2] * 128.0]
+        })
+        .collect()
 }
 
 // ----------------------------------------------------------------- monochrome
@@ -1589,41 +1614,73 @@ pub fn grades_do_estagio(
     escala: f32,
 ) -> GradesDoEstagio {
     let tub = Tubulacao::nova();
+    // 🔑 **O sRGB por tabela**: são 256 valores de byte, e o `powf` por canal de
+    // [`Tubulacao::entrar`] era um décimo do custo. Mesma conta, mesmos bits.
+    let linear: [f32; 256] = std::array::from_fn(|v| {
+        let x = v as f32 / 255.0;
+        if x <= 0.04045 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    });
     let mut px: Vec<Rgb> = rgba
         .as_chunks::<4>()
         .0
         .iter()
-        .map(|c| tub.entrar([c[0], c[1], c[2]]))
+        .map(|c| {
+            mul(
+                &tub.srgb_para_trabalho,
+                [
+                    linear[c[0] as usize],
+                    linear[c[1] as usize],
+                    linear[c[2] as usize],
+                ],
+            )
+        })
         .collect();
     if a.dt_exposure_ativo != 0.0 {
         exposure(&mut px, Exposure::de(a));
     }
+
+    let com_monochrome = a.dt_monochrome_ativo != 0.0;
+    // O Lab que sai do `shadhi`, quando o `monochrome` precisa dele.
+    let mut lab_depois_do_shadhi: Option<Vec<Rgb>> = None;
     let mut shadhi_grade = None;
     if a.dt_shadhi_ativo != 0.0 {
-        let l: Vec<f32> = px.iter().map(|c| tub.para_lab(*c)[0]).collect();
-        let mut g = Bilateral::nova(largura, altura, a.dt_shadhi_radius.max(0.1) * escala, 100.0);
-        g.espalhar(&l);
-        g.borrar();
-        shadhi_grade = Some(GradeParaGpu::de(&g));
-        if a.dt_monochrome_ativo != 0.0 {
-            shadhi(
-                &mut px,
-                largura,
-                altura,
-                &tub,
-                ShadowsHighlights::de(a),
-                escala,
-            );
+        let p = ShadowsHighlights::de(a);
+        let mut g = Bilateral::nova(largura, altura, p.radius.max(0.1) * escala, 100.0);
+        if com_monochrome {
+            // O filtro do `monochrome` é tirado da imagem **depois** do `shadhi`:
+            // a conta roda aqui, sobre o Lab e a grade que já estão prontos.
+            let lab: Vec<Rgb> = px.iter().map(|c| tub.para_lab(*c)).collect();
+            let l: Vec<f32> = lab.iter().map(|c| c[0]).collect();
+            g.espalhar(&l);
+            g.borrar();
+            let base = g.fatiar(&l, -1.0);
+            lab_depois_do_shadhi = Some(shadhi_em_lab(&lab, &base, p));
+        } else {
+            let l: Vec<f32> = px.iter().map(|c| tub.luminancia_lab(*c)).collect();
+            g.espalhar(&l);
+            g.borrar();
         }
+        shadhi_grade = Some(GradeParaGpu::de(&g));
     }
+
     let mut monochrome_grade = None;
-    if a.dt_monochrome_ativo != 0.0 {
+    if com_monochrome {
         let p = Monochrome::de(a);
         let sigma2 = 2.0 * (p.size * 128.0) * (p.size * 128.0);
-        let filtro: Vec<f32> = px
-            .iter()
-            .map(|c| filtro_monochrome(tub.para_lab(*c), p, sigma2))
-            .collect();
+        let filtro: Vec<f32> = match &lab_depois_do_shadhi {
+            Some(lab) => lab
+                .iter()
+                .map(|c| filtro_monochrome(*c, p, sigma2))
+                .collect(),
+            None => px
+                .iter()
+                .map(|c| filtro_monochrome(tub.para_lab(*c), p, sigma2))
+                .collect(),
+        };
         let mut g = Bilateral::nova(largura, altura, 20.0 / (1.0 / escala).max(1.0), 250.0);
         g.espalhar(&filtro);
         g.borrar();
@@ -1638,6 +1695,84 @@ pub fn grades_do_estagio(
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// 🔑 **As grades do caminho rápido são as do gabarito.** O caminho rápido
+    /// decodifica o sRGB por tabela, espalha só o L e tira o filtro do
+    /// `monochrome` direto do Lab do `shadhi`; o gabarito é a composição das
+    /// funções medidas contra o darktable — `entrar`, `para_lab`, `shadhi` e o
+    /// Lab da imagem de saída.
+    #[test]
+    fn as_grades_rapidas_sao_as_do_gabarito() {
+        let (w, h) = (64usize, 40usize);
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&[
+                    (x * 4) as u8,
+                    (y * 6) as u8,
+                    ((x + y) * 3 % 256) as u8,
+                    255,
+                ]);
+            }
+        }
+        let a = Ajustes {
+            dt_exposure_ativo: 1.0,
+            dt_exposure_black: -0.002,
+            dt_exposure_exposure: 0.4,
+            dt_shadhi_ativo: 1.0,
+            dt_shadhi_radius: 8.0,
+            dt_shadhi_shadows: 65.0,
+            dt_shadhi_highlights: -20.0,
+            dt_monochrome_ativo: 1.0,
+            dt_monochrome_a: 12.0,
+            dt_monochrome_b: -6.0,
+            ..Default::default()
+        };
+        let tub = Tubulacao::nova();
+        let mut px: Vec<Rgb> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| tub.entrar([c[0], c[1], c[2]]))
+            .collect();
+        exposure(&mut px, Exposure::de(&a));
+        let l: Vec<f32> = px.iter().map(|c| tub.para_lab(*c)[0]).collect();
+        let mut gabarito_sh = Bilateral::nova(w, h, 8.0, 100.0);
+        gabarito_sh.espalhar(&l);
+        gabarito_sh.borrar();
+        shadhi(&mut px, w, h, &tub, ShadowsHighlights::de(&a), 1.0);
+        let p = Monochrome::de(&a);
+        let sigma2 = 2.0 * (p.size * 128.0) * (p.size * 128.0);
+        let filtro: Vec<f32> = px
+            .iter()
+            .map(|c| filtro_monochrome(tub.para_lab(*c), p, sigma2))
+            .collect();
+        let mut gabarito_mo = Bilateral::nova(w, h, 20.0, 250.0);
+        gabarito_mo.espalhar(&filtro);
+        gabarito_mo.borrar();
+
+        let rapidas = grades_do_estagio(&rgba, w, h, &a, 1.0);
+        for (nome, rapida, gabarito) in [
+            (
+                "shadhi",
+                rapidas.shadhi.unwrap(),
+                GradeParaGpu::de(&gabarito_sh),
+            ),
+            (
+                "monochrome",
+                rapidas.monochrome.unwrap(),
+                GradeParaGpu::de(&gabarito_mo),
+            ),
+        ] {
+            assert_eq!(rapida.dados.len(), gabarito.dados.len(), "{nome}");
+            for (k, (r, g)) in rapida.dados.iter().zip(&gabarito.dados).enumerate() {
+                assert!(
+                    (r - g).abs() <= 1e-3 * (1.0 + g.abs()),
+                    "{nome}[{k}]: {r} × {g}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_grade_vira_atlas_com_as_fatias_de_l_lado_a_lado() {

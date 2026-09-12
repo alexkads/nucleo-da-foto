@@ -434,12 +434,16 @@ impl Tela {
             .filter(|(_, c)| c.suja)
             .map(|(i, _)| i)
             .collect();
+        let mut grades_pendentes = false;
         for i in sujas {
             let (pixels, largura, altura, ajustes, escala) = {
                 let c = &self.camadas[i];
                 (c.pixels.clone(), c.largura, c.altura, c.ajustes, c.escala)
             };
             self.motor.definir_escala_do_original(escala);
+            // O editor manda um aviso por quadro de arrasto: as grades RGB esperam
+            // ele parar, como no editor.
+            self.motor.definir_relogio(Some(agora));
             let vista = self.camadas[i]
                 .textura
                 .create_view(&wgpu::TextureViewDescriptor::default());
@@ -453,7 +457,13 @@ impl Tela {
                     FORMATO_DA_CAMADA,
                 )
                 .ok_or_else(|| erro("o motor não revelou a foto"))?;
-            self.camadas[i].suja = false;
+            // 🔑 Com grades de antes, a camada continua suja e o quadro seguinte
+            // desenha de novo — é o que as refaz quando o editor parar de mexer.
+            if self.motor.grades_pendentes() {
+                grades_pendentes = true;
+            } else {
+                self.camadas[i].suja = false;
+            }
         }
 
         // 2. O tempo de cada camada, e os uniformes que saem dele.
@@ -533,7 +543,7 @@ impl Tela {
         }
         self.motor.fila().submit(std::iter::once(encoder.finish()));
         quadro.present();
-        Ok(animando)
+        Ok(animando || grades_pendentes)
     }
 }
 

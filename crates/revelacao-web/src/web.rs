@@ -460,8 +460,13 @@ impl Motor {
         Ok(())
     }
 
-    /// Aplica os 53 ajustes à cópia de trabalho e desenha no canvas.
-    pub fn aplicar(&mut self, ajustes: &[f32]) -> Result<(), JsValue> {
+    /// Aplica os ajustes à cópia de trabalho e desenha no canvas.
+    ///
+    /// `agora` é o relógio de quem arrasta (`performance.now()`): com ele, as
+    /// grades dos controles RGB esperam o arrasto parar para se refazer. Devolve
+    /// `true` quando o desenho saiu com grades de antes — aí o site desenha de
+    /// novo no próximo quadro, com os mesmos ajustes, até vir `false`.
+    pub fn aplicar(&mut self, ajustes: &[f32], agora: Option<f64>) -> Result<bool, JsValue> {
         let ajustes = Ajustes::de_vetor(ajustes).ok_or_else(|| {
             erro(format!(
                 "esperava {} ajustes, recebi {}",
@@ -483,11 +488,12 @@ impl Motor {
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.motor
             .definir_escala_do_original(self.escala_do_trabalho);
+        self.motor.definir_relogio(agora);
         self.motor
             .desenhar(&pixels, largura, altura, &ajustes, &vista, self.formato)
             .ok_or_else(|| erro("o motor não desenhou"))?;
         quadro.present();
-        Ok(())
+        Ok(self.motor.grades_pendentes())
     }
 
     /// Revela uma imagem **inteira** (não a cópia de trabalho), aplica o
