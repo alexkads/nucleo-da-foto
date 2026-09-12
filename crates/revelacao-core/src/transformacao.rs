@@ -175,6 +175,85 @@ impl Corte {
     }
 }
 
+/// As UVs que levam do quad da tela ao pixel da textura — o enquadramento
+/// feito pelo **amostrador da GPU**, sem copiar imagem nenhuma.
+///
+/// # Por que existe, e por que mora aqui
+///
+/// 🔑 A tela do cliente desenha a foto num quad e deixa a GPU ler o pedaço
+/// certo; [`aplicar`] faz a mesma conta copiando pixels, e é dele que sai o
+/// JPEG. As duas **precisam** concordar: é o que impede o operador de enquadrar
+/// uma coisa e o cliente ver outra.
+///
+/// 🚨 **Ela nasceu dentro do `tela-do-cliente-web` e veio para cá em
+/// 2026-09-12**, quando o dono relatou que *"o rotacionamento de fotos na tela
+/// do cliente não está funcionando corretamente"* enquanto a revelação, as
+/// tiras e a biblioteca giravam certo. Lá ela não tinha teste — o crate só
+/// compila para `wasm32`, e o próprio arquivo diz que "o que se prova sem
+/// navegador é o `revelacao-core`, onde a matemática mora". Aqui ela é
+/// comparada com [`aplicar`] pixel a pixel, nos quatro giros.
+///
+/// Devolve `(uv_x, uv_y, uv_off)`, que o shader usa como
+/// `uv = uv_off + uv_x·s + uv_y·t` para `(s, t)` no quad `0..1`.
+pub fn uvs_do_enquadramento(
+    largura: u32,
+    altura: u32,
+    corte: &Corte,
+) -> ([f32; 2], [f32; 2], [f32; 2]) {
+    let (lg, ag) = corte.dimensoes_giradas(largura, altura);
+    let (rx, ry, rw, rh) = corte.retangulo(lg, ag);
+
+    // Do quad (0..1) para o pedaço que o retângulo marca, no espaço girado.
+    let (mut ux, mut uy, mut uoff) = (
+        [rw as f32 / lg as f32, 0.0],
+        [0.0, rh as f32 / ag as f32],
+        [rx as f32 / lg as f32, ry as f32 / ag as f32],
+    );
+
+    // O endireitamento gira em torno do centro do espaço girado, como em
+    // [`aplicar`].
+    if corte.angulo() != 0.0 {
+        let r = corte.angulo().to_radians();
+        let (sen, cos) = r.sin_cos();
+        // Em UV o espaço não é quadrado: gira em pixels e volta.
+        let gira = |v: [f32; 2]| {
+            let (x, y) = (v[0] * lg as f32, v[1] * ag as f32);
+            [
+                (x * cos - y * sen) / lg as f32,
+                (x * sen + y * cos) / ag as f32,
+            ]
+        };
+        let centro = [0.5, 0.5];
+        let canto = [uoff[0] - centro[0], uoff[1] - centro[1]];
+        let girado = gira(canto);
+        uoff = [girado[0] + centro[0], girado[1] + centro[1]];
+        ux = gira(ux);
+        uy = gira(uy);
+    }
+
+    // Giro de 90° e espelhos: uma troca de eixos e um sinal.
+    let quartos = ((corte.giro_90() % 4) + 4) % 4;
+    for _ in 0..quartos {
+        // (x, y) → (y, 1 - x): um quarto de volta no espaço normalizado.
+        let troca = |v: [f32; 2]| [v[1], -v[0]];
+        ux = troca(ux);
+        uy = troca(uy);
+        uoff = [uoff[1], 1.0 - uoff[0]];
+    }
+    if corte.espelho_h() {
+        ux[0] = -ux[0];
+        uy[0] = -uy[0];
+        uoff[0] = 1.0 - uoff[0];
+    }
+    if corte.espelho_v() {
+        ux[1] = -ux[1];
+        uy[1] = -uy[1];
+        uoff[1] = 1.0 - uoff[1];
+    }
+
+    (ux, uy, uoff)
+}
+
 /// A foto pronta para a tela.
 ///
 /// `recortar` é `false` no modo de corte: lá a foto aparece inteira (girada e
@@ -759,5 +838,117 @@ mod testes {
 
         let saida = aplicar(&entrada, &corte, true);
         assert!(saida.width() >= 1 && saida.height() >= 1);
+    }
+}
+
+#[cfg(test)]
+mod testes_do_enquadramento {
+    use super::{aplicar, uvs_do_enquadramento, Corte};
+
+    /// Uma foto **retangular** com cada pixel identificável pela cor.
+    ///
+    /// 🔑 **Retangular de propósito, e não quadrada.** Num quadrado, trocar os
+    /// eixos do giro de 90° dá certo por acidente: os dois divisores são iguais,
+    /// e um erro de normalização desaparece. É exatamente o caso que uma foto de
+    /// câmera nunca é.
+    fn foto() -> image::DynamicImage {
+        let (w, h) = (8u32, 5u32);
+        let mut img = image::RgbaImage::new(w, h);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            // Vermelho conta a coluna, verde conta a linha: qualquer troca de
+            // eixo ou espelho aparece na cor.
+            *p = image::Rgba([(x * 30) as u8, (y * 50) as u8, 7, 255]);
+        }
+        image::DynamicImage::ImageRgba8(img)
+    }
+
+    /// Amostra a textura pela UV que o shader calcularia para `(s, t)`.
+    fn pela_uv(
+        origem: &image::DynamicImage,
+        uvs: ([f32; 2], [f32; 2], [f32; 2]),
+        s: f32,
+        t: f32,
+    ) -> [u8; 4] {
+        let (ux, uy, uoff) = uvs;
+        let u = uoff[0] + ux[0] * s + uy[0] * t;
+        let v = uoff[1] + ux[1] * s + uy[1] * t;
+        let img = origem.to_rgba8();
+        let (w, h) = (img.width() as f32, img.height() as f32);
+        // O amostrador da GPU lê o centro do pixel; aqui é o mesmo arredondamento.
+        let x = ((u * w).floor().max(0.0) as u32).min(img.width() - 1);
+        let y = ((v * h).floor().max(0.0) as u32).min(img.height() - 1);
+        img.get_pixel(x, y).0
+    }
+
+    /// O que a tela do cliente mostra tem de ser o que o arquivo tem.
+    ///
+    /// 🚨 É a prova do que o dono relatou em 2026-09-12: a revelação e a
+    /// biblioteca giravam certo e a tela do cliente, não. O juiz é o
+    /// `transformacao::aplicar` do core — a mesma função que recorta o JPEG.
+    fn confere(corte: &Corte, caso: &str) {
+        let origem = foto();
+        let esperada = aplicar(&origem, corte, true).to_rgba8();
+        let uvs = uvs_do_enquadramento(origem.width(), origem.height(), corte);
+
+        for j in 0..esperada.height() {
+            for i in 0..esperada.width() {
+                let s = (i as f32 + 0.5) / esperada.width() as f32;
+                let t = (j as f32 + 0.5) / esperada.height() as f32;
+                let vista = pela_uv(&origem, uvs, s, t);
+                let arquivo = esperada.get_pixel(i, j).0;
+                assert_eq!(
+                    vista, arquivo,
+                    "{caso}: em ({i},{j}) a tela do cliente mostra {vista:?} e o arquivo tem {arquivo:?}"
+                );
+            }
+        }
+    }
+
+    fn corte(giro: i32, espelho_h: bool, espelho_v: bool) -> Corte {
+        Corte::novo(0.0, 0.0, 1.0, 1.0, giro, 0.0, espelho_h, espelho_v)
+    }
+
+    #[test]
+    fn sem_enquadramento_a_foto_e_ela_mesma() {
+        confere(&corte(0, false, false), "neutro");
+    }
+
+    #[test]
+    fn os_quatro_giros_de_90_batem_com_o_arquivo() {
+        for giro in [1, 2, 3] {
+            confere(&corte(giro, false, false), &format!("giro {giro}"));
+        }
+    }
+
+    #[test]
+    fn os_espelhos_batem_com_o_arquivo() {
+        confere(&corte(0, true, false), "espelho horizontal");
+        confere(&corte(0, false, true), "espelho vertical");
+    }
+
+    #[test]
+    fn giro_com_espelho_bate_com_o_arquivo() {
+        // 🚨 O caso em que a **ordem** aparece: espelhar e depois girar não dá o
+        // mesmo que girar e depois espelhar.
+        for giro in [1, 2, 3] {
+            confere(
+                &corte(giro, true, false),
+                &format!("giro {giro} + espelho h"),
+            );
+            confere(
+                &corte(giro, false, true),
+                &format!("giro {giro} + espelho v"),
+            );
+        }
+    }
+
+    #[test]
+    fn recorte_com_giro_bate_com_o_arquivo() {
+        // Meio quadro, girado: recorte e giro se compõem, e é onde um erro de
+        // normalização desloca a imagem em vez de distorcê-la.
+        for giro in [0, 1, 2, 3] {
+            let c = Corte::novo(0.25, 0.25, 0.5, 0.5, giro, 0.0, false, false);
+            confere(&c, &format!("recorte + giro {giro}"));
+        }
     }
 }

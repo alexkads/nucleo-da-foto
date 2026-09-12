@@ -643,19 +643,38 @@ fn corte_de(v: &[f32]) -> Result<Corte, JsValue> {
 /// `dimensoes_giradas`), e não uma aproximação: é o que impede o operador de
 /// enquadrar uma coisa na tela e o cliente ver outra. O que muda entre os dois é
 /// só quem interpola — aqui o amostrador, no arquivo a bilinear do core.
-fn montar_uniforme(camada: &Camada, janela: (f32, f32), alfa: f32, zoom: f32) -> CamadaUniforme {
-    let corte = &camada.corte;
-    let (lg, ag) = corte.dimensoes_giradas(camada.largura, camada.altura);
+/// Onde esta camada fica na janela, e que pedaço da foto ela mostra.
+///
+/// 🚨 **O enquadramento é a mesma conta do arquivo** (`Corte::retangulo` sobre
+/// `dimensoes_giradas`), e não uma aproximação: é o que impede o operador de
+/// enquadrar uma coisa na tela e o cliente ver outra. O que muda entre os dois é
+/// só quem interpola — aqui o amostrador, no arquivo a bilinear do core.
+/// As UVs do enquadramento — a parte **pura**, e é ela que o teste cobra.
+///
+/// 🔑 **Extraída de `montar_uniforme` em 2026-09-12**, quando o dono relatou
+/// que *"o rotacionamento de fotos na tela do cliente não está funcionando
+/// corretamente"* enquanto a revelação, as tiras e a biblioteca funcionavam. O
+/// resto daquela função precisa de uma `Camada` com textura de GPU e não se
+/// testa fora do navegador; esta parte é aritmética, e agora está presa a um
+/// teste que a compara com o `transformacao::aplicar` do core — a mesma conta
+/// que produz o arquivo.
+///
+/// Devolve `(uv_x, uv_y, uv_off)`, que o shader usa como
+/// `uv = uv_off + uv_x·s + uv_y·t` para `(s, t)` no quad `0..1`.
+///
+/// 🚨 **A ordem é a do `transformacao.rs`: espelhos, giro de 90°, ângulo,
+/// recorte.** Aqui ela é percorrida ao contrário, porque o caminho é o inverso
+/// — do pixel na tela de volta ao pixel da textura.
+pub(crate) fn uvs_do_enquadramento(
+    largura: u32,
+    altura: u32,
+    corte: &Corte,
+) -> ([f32; 2], [f32; 2], [f32; 2]) {
+    let (lg, ag) = corte.dimensoes_giradas(largura, altura);
     let (rx, ry, rw, rh) = corte.retangulo(lg, ag);
 
-    // 1. Encaixe: a foto enquadrada cabe inteira na janela, sem cortar nada.
-    let (jw, jh) = janela;
-    let escala = (jw / rw.max(1) as f32).min(jh / rh.max(1) as f32) * zoom;
-    let largura_na_tela = rw as f32 * escala;
-    let altura_na_tela = rh as f32 * escala;
-
-    // 2. As UVs: do quad (0..1) para o pedaço da foto que o retângulo marca,
-    //    no espaço girado — e daí de volta para o espaço da textura.
+    // As UVs: do quad (0..1) para o pedaço da foto que o retângulo marca, no
+    // espaço girado — e daí de volta para o espaço da textura.
     let (mut ux, mut uy, mut uoff) = (
         [rw as f32 / lg as f32, 0.0],
         [0.0, rh as f32 / ag as f32],
@@ -682,8 +701,7 @@ fn montar_uniforme(camada: &Camada, janela: (f32, f32), alfa: f32, zoom: f32) ->
         uy = gira(uy);
     }
 
-    // 3. Giro de 90° e espelhos: uma troca de eixos e um sinal, na ordem em que
-    //    o `transformacao.rs` os aplica.
+    // Giro de 90° e espelhos: uma troca de eixos e um sinal.
     let quartos = ((corte.giro_90() % 4) + 4) % 4;
     for _ in 0..quartos {
         // (x, y) → (y, 1 - x): um quarto de volta no espaço normalizado.
@@ -702,6 +720,30 @@ fn montar_uniforme(camada: &Camada, janela: (f32, f32), alfa: f32, zoom: f32) ->
         uy[1] = -uy[1];
         uoff[1] = 1.0 - uoff[1];
     }
+
+    (ux, uy, uoff)
+}
+
+/// Onde esta camada fica na janela, e que pedaço da foto ela mostra.
+///
+/// 🚨 **O enquadramento é a mesma conta do arquivo** (`Corte::retangulo` sobre
+/// `dimensoes_giradas`), e não uma aproximação: é o que impede o operador de
+/// enquadrar uma coisa na tela e o cliente ver outra. O que muda entre os dois é
+/// só quem interpola — aqui o amostrador, no arquivo a bilinear do core.
+fn montar_uniforme(camada: &Camada, janela: (f32, f32), alfa: f32, zoom: f32) -> CamadaUniforme {
+    let corte = &camada.corte;
+    let (lg, ag) = corte.dimensoes_giradas(camada.largura, camada.altura);
+    let (_rx, _ry, rw, rh) = corte.retangulo(lg, ag);
+
+    // 1. Encaixe: a foto enquadrada cabe inteira na janela, sem cortar nada.
+    let (jw, jh) = janela;
+    let escala = (jw / rw.max(1) as f32).min(jh / rh.max(1) as f32) * zoom;
+    let largura_na_tela = rw as f32 * escala;
+    let altura_na_tela = rh as f32 * escala;
+
+    // 2. As UVs — a conta pura, testada em `uvs_do_enquadramento`.
+    let (ux, uy, uoff) =
+        revelacao_core::transformacao::uvs_do_enquadramento(camada.largura, camada.altura, corte);
 
     CamadaUniforme {
         escala: [largura_na_tela / jw, altura_na_tela / jh],
