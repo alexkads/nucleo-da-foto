@@ -60,7 +60,13 @@ cp "$SAIDA/revelacao_web.d.ts" "$FONTE/revelacao_web.d.ts"
 echo "→ nomes.json e VERSAO"
 cargo run -q -p revelacao-core --bin nomes-dos-ajustes > "$PUBLICO/nomes.json"
 VERSAO="$(git rev-parse --short HEAD)"
-if [[ -n "$(git status --porcelain crates/revelacao-core crates/revelacao-web)" ]]; then
+# 🚨 **O perfil e este script entram na conta do "sujo".** Antes só os dois
+# crates contavam, e isso bastava enquanto a compilação era sempre a mesma. Não
+# é mais: o `opt-level` do `[profile.release-web]` e o `+simd128` daqui mudam o
+# `.wasm` **sem mudar uma linha de Rust** — e o site agora serve o motor com
+# `Cache-Control: immutable`, onde uma VERSAO que não muda é um wasm velho que
+# nunca mais se desfaz no navegador de quem já o baixou.
+if [[ -n "$(git status --porcelain crates/revelacao-core crates/revelacao-web Cargo.toml "$0")" ]]; then
     VERSAO="$VERSAO-sujo"
 fi
 echo "$VERSAO" > "$PUBLICO/VERSAO"
