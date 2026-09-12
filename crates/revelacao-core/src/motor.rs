@@ -952,6 +952,122 @@ mod testes {
         }
     }
 
+    /// Os 21 controles de 2026-09-12 chegam ao shader **e fazem efeito**.
+    ///
+    /// # Por que este teste, e por que assim
+    ///
+    /// 🚨 **"Chegar" e "ser aplicado" já foram duas coisas diferentes aqui.** Em
+    /// 17/ago/2026 os 46 campos chegavam ao `uniform` e o corpo do shader não
+    /// mencionava matiz, luminância nem lente em lugar nenhum — os controles
+    /// existiam na tela, o operador os movia, e a foto não mudava. O teste de
+    /// paridade de nomes (`o_wgsl_declara_os_mesmos_campos_na_mesma_ordem`)
+    /// passa nessa situação: ele confere o contrato, não o efeito.
+    ///
+    /// Estes 21 entraram porque o operador do estúdio disse que não conseguia
+    /// reproduzir os estilos que tem no Lightroom e no darktable. Cada um só
+    /// vale se mudar o pixel — e é isso que se cobra aqui, um por um.
+    ///
+    /// ⚠️ **A amostra é colorida de propósito.** Calibração, mixer P&B e
+    /// tonalização por faixa são todos função do **matiz**: num cinza chapado
+    /// os três não teriam o que fazer, e o teste passaria verde sobre um shader
+    /// vazio.
+    #[test]
+    fn a_calibracao_o_mixer_pb_e_o_color_grading_chegam_ao_shader() {
+        let mut motor = motor_pronto();
+        let entrada = amostra();
+        let neutro = revelar_e_colher(&mut motor, entrada.clone(), Ajustes::default());
+
+        let posicao = |nome: &str| {
+            Ajustes::NOMES
+                .iter()
+                .position(|n| *n == nome)
+                .unwrap_or_else(|| panic!("`{nome}` não está em NOMES"))
+        };
+
+        // 🔑 Cada caso leva o **par** que o controle precisa para agir. Matiz
+        // sem saturação não pinta nada (a tonalização multiplica um pelo
+        // outro), e o mixer não existe com a foto colorida — exatamente como no
+        // Lightroom, onde o mixer só aparece depois do B&W.
+        let casos: &[(&str, &[(&str, f32)])] = &[
+            ("Calibração — matiz do vermelho", &[("calib_red_hue", 60.0)]),
+            ("Calibração — saturação do vermelho", &[("calib_red_sat", 80.0)]),
+            ("Calibração — matiz do verde", &[("calib_green_hue", 60.0)]),
+            ("Calibração — saturação do verde", &[("calib_green_sat", 80.0)]),
+            ("Calibração — matiz do azul", &[("calib_blue_hue", 60.0)]),
+            ("Calibração — saturação do azul", &[("calib_blue_sat", 80.0)]),
+            ("Calibração — matiz das sombras", &[("calib_shadow_tint", 80.0)]),
+            (
+                "Color Grading — tons médios",
+                &[("split_midtone_hue", 40.0), ("split_midtone_sat", 80.0)],
+            ),
+            (
+                "Color Grading — global",
+                &[("split_global_hue", 200.0), ("split_global_sat", 80.0)],
+            ),
+            (
+                "Color Grading — a mistura muda a largura das faixas",
+                &[
+                    ("split_shadow_hue", 30.0),
+                    ("split_shadow_sat", 80.0),
+                    ("split_highlight_hue", 210.0),
+                    ("split_highlight_sat", 80.0),
+                    ("split_blending", 0.0),
+                ],
+            ),
+            ("Mixer P&B — vermelho", &[("bw_ativo", 1.0), ("bw_red", 80.0)]),
+            ("Mixer P&B — laranja", &[("bw_ativo", 1.0), ("bw_orange", 80.0)]),
+            ("Mixer P&B — amarelo", &[("bw_ativo", 1.0), ("bw_yellow", 80.0)]),
+            ("Mixer P&B — verde", &[("bw_ativo", 1.0), ("bw_green", 80.0)]),
+            ("Mixer P&B — água", &[("bw_ativo", 1.0), ("bw_aqua", 80.0)]),
+            ("Mixer P&B — azul", &[("bw_ativo", 1.0), ("bw_blue", 80.0)]),
+            ("Mixer P&B — roxo", &[("bw_ativo", 1.0), ("bw_purple", 80.0)]),
+            ("Mixer P&B — magenta", &[("bw_ativo", 1.0), ("bw_magenta", 80.0)]),
+        ];
+
+        for (rotulo, campos) in casos {
+            let indices: Vec<(usize, f32)> =
+                campos.iter().map(|(n, v)| (posicao(n), *v)).collect();
+            let saida = revelar_e_colher(&mut motor, entrada.clone(), com_campos(&indices));
+            assert_ne!(
+                saida, neutro,
+                "`{rotulo}` devia chegar ao shader e não mudou nada"
+            );
+        }
+
+        // 🚨 **O mixer desligado não pode fazer nada**, como no Lightroom: os
+        // oito sliders existem, o preset os traz, e sem o B&W ligado eles
+        // dormem. Sem esta linha, um preset de cor com `GrayMixer` dentro
+        // dessaturaria a foto sem ninguém ter pedido.
+        let so_os_sliders = com_campos(&[
+            (posicao("bw_red"), 100.0),
+            (posicao("bw_blue"), -100.0),
+        ]);
+        assert_eq!(
+            revelar_e_colher(&mut motor, entrada.clone(), so_os_sliders),
+            neutro,
+            "o mixer P&B agiu com `bw_ativo` em zero"
+        );
+
+        // 🚨 **E a mistura no neutro (50) tem de devolver a foto de antes.** O
+        // valor fixo que estava no shader era 0,35 de meia-largura, e é nele
+        // que `0,10 + 0,50 · 0,5` cai: se esta conta mudar, toda revelação já
+        // gravada com tonalização sai diferente da que o operador salvou.
+        let tonalizada = [
+            (posicao("split_shadow_hue"), 30.0),
+            (posicao("split_shadow_sat"), 80.0),
+        ];
+        let com_neutro_explicito = com_campos(&[
+            tonalizada[0],
+            tonalizada[1],
+            (posicao("split_blending"), 50.0),
+        ]);
+        assert_eq!(
+            revelar_e_colher(&mut motor, entrada.clone(), com_campos(&tonalizada)),
+            revelar_e_colher(&mut motor, entrada.clone(), com_neutro_explicito),
+            "a mistura neutra devia ser a largura de antes"
+        );
+    }
+
     /// 🚨 **O neutro devolve a foto intacta — numa imagem com detalhe.**
     ///
     /// Existe porque `o_neutro_devolve_o_pixel_intacto` **não consegue** ver o

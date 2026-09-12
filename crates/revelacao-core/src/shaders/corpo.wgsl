@@ -89,15 +89,40 @@ struct Params {
     // Grão de filme: quanto, e de que tamanho.
     grain_amount: f32,
     grain_size: f32,
+    // Calibração de câmera: move os PRIMÁRIOS, e não uma faixa de matiz como o
+    // HSL. É a base da maioria dos presets de filme, e faltava inteira.
+    calib_red_hue: f32,
+    calib_red_sat: f32,
+    calib_green_hue: f32,
+    calib_green_sat: f32,
+    calib_blue_hue: f32,
+    calib_blue_sat: f32,
+    calib_shadow_tint: f32,
+    // Color Grading: os tons médios e o global que o split toning não tem, e a
+    // mistura que decide a largura da transição entre as faixas.
+    split_midtone_hue: f32,
+    split_midtone_sat: f32,
+    split_global_hue: f32,
+    split_global_sat: f32,
+    split_blending: f32,
+    // Mixer de preto e branco: a luminância de cada faixa de matiz.
+    bw_ativo: f32,
+    bw_red: f32,
+    bw_orange: f32,
+    bw_yellow: f32,
+    bw_green: f32,
+    bw_aqua: f32,
+    bw_blue: f32,
+    bw_purple: f32,
+    bw_magenta: f32,
     // 🔑 Enchimento, e não campo: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
-    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 53
-    // `f32` dão 212. O Rust continua mandando 212 bytes num buffer de 224
-    // (`TAMANHO_DO_UNIFORM`); estes três nunca são lidos. Ficam DEPOIS dos 53
+    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 74
+    // `f32` dão 296. O Rust continua mandando 296 bytes num buffer de 304
+    // (`TAMANHO_DO_UNIFORM`); estes dois nunca são lidos. Ficam DEPOIS dos 74
     // para não deslocar nenhuma posição — e o teste que compara os nomes com o
     // `Ajustes` ignora o que começa com `_`.
     _enchimento_a: f32,
     _enchimento_b: f32,
-    _enchimento_c: f32,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
@@ -119,6 +144,78 @@ fn cor_do_matiz(graus: f32) -> vec3<f32> {
 }
 
 /// A luminância percebida (Rec. 601), na mesma escala 0–255 do corpo.
+/// O quanto este matiz "é" o primário de `centro`, com queda larga.
+///
+/// 🔑 **Larga de propósito, ao contrário das faixas do HSL.** O HSL existe para
+/// mexer numa cor sem tocar na vizinha, e por isso suas faixas são estreitas e
+/// somem em 15–45°. A calibração faz o oposto: ela move o primário e a foto
+/// inteira acompanha. Com queda de 120° os três pesos somam perto de 1 em
+/// qualquer matiz, e não sobra buraco entre um primário e o seguinte.
+fn peso_do_primario(matiz: f32, centro: f32) -> f32 {
+    var d = abs(matiz - centro);
+    if (d > 180.0) { d = 360.0 - d; }
+    let t = clamp(d / 120.0, 0.0, 1.0);
+    let c = cos(t * 1.5707963);
+    return c * c;
+}
+
+/// O ganho de luminância que o mixer de preto e branco dá a este matiz.
+///
+/// 🔑 **Os centros e as meias-larguras são os mesmos do HSL**, de propósito: um
+/// preset que escurece o azul do céu no mixer e outro que o escurece no HSL têm
+/// de pegar o mesmo pixel. Duas réguas para "azul" dariam dois resultados para
+/// a mesma palavra.
+fn mistura_pb(matiz: f32) -> f32 {
+    var ganho = 0.0;
+    if (matiz < 15.0 || matiz >= 345.0) {
+        var d = matiz;
+        if (d >= 345.0) { d = d - 360.0; }
+        ganho += params.bw_red * (1.0 - min(abs(d) / 15.0, 1.0));
+    }
+    if (matiz >= 15.0 && matiz < 45.0) {
+        ganho += params.bw_orange * (1.0 - min(abs(matiz - 30.0) / 15.0, 1.0));
+    }
+    if (matiz >= 45.0 && matiz < 75.0) {
+        ganho += params.bw_yellow * (1.0 - min(abs(matiz - 60.0) / 15.0, 1.0));
+    }
+    if (matiz >= 75.0 && matiz < 165.0) {
+        ganho += params.bw_green * (1.0 - min(abs(matiz - 120.0) / 45.0, 1.0));
+    }
+    if (matiz >= 165.0 && matiz < 210.0) {
+        ganho += params.bw_aqua * (1.0 - min(abs(matiz - 187.5) / 22.5, 1.0));
+    }
+    if (matiz >= 210.0 && matiz < 270.0) {
+        ganho += params.bw_blue * (1.0 - min(abs(matiz - 240.0) / 30.0, 1.0));
+    }
+    if (matiz >= 270.0 && matiz < 310.0) {
+        ganho += params.bw_purple * (1.0 - min(abs(matiz - 290.0) / 20.0, 1.0));
+    }
+    if (matiz >= 310.0 && matiz < 345.0) {
+        ganho += params.bw_magenta * (1.0 - min(abs(matiz - 327.5) / 17.5, 1.0));
+    }
+    return ganho;
+}
+
+/// O matiz (graus), a saturação e o valor de uma cor em 0–1. Croma zero devolve
+/// matiz 0 — quem chama precisa tratar o cinza, que não tem matiz.
+fn para_hsv(cor: vec3<f32>) -> vec3<f32> {
+    let mx = max(cor.r, max(cor.g, cor.b));
+    let mn = min(cor.r, min(cor.g, cor.b));
+    let croma = mx - mn;
+    var h = 0.0;
+    if (croma > 0.0001) {
+        if (mx == cor.r) {
+            h = 60.0 * (((cor.g - cor.b) / croma) % 6.0);
+        } else if (mx == cor.g) {
+            h = 60.0 * (((cor.b - cor.r) / croma) + 2.0);
+        } else {
+            h = 60.0 * (((cor.r - cor.g) / croma) + 4.0);
+        }
+        if (h < 0.0) { h = h + 360.0; }
+    }
+    return vec3<f32>(h, croma / max(mx, 0.0001), mx);
+}
+
 fn luminancia(cor: vec3<f32>) -> f32 {
     return dot(cor, vec3<f32>(0.299, 0.587, 0.114));
 }
@@ -341,6 +438,61 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
         
     }
+    // 0. Calibração de câmera — **antes de tudo**, e é essa posição que a define.
+    //
+    // 🔑 No Lightroom ela age nos primários do perfil da câmera, antes de
+    // qualquer revelação; rodá-la depois do contraste ou do HSL daria outra
+    // coisa com o mesmo nome. Aqui é o primeiro ajuste de cor do pipeline, logo
+    // após o ruído e a nitidez (que são espaciais e não mexem em matiz).
+    //
+    // ⚠️ **Aproximação declarada.** A da Adobe é uma matriz no espaço do perfil,
+    // que este motor não tem — ele recebe RGB já revelado. Aqui cada primário
+    // gira o matiz e escala a saturação com queda larga (`peso_do_primario`), o
+    // que reproduz o comportamento visível na faixa que os presets usam. O
+    // extremo diverge, e diverge de forma suave: nenhum valor inverte nada.
+    if (params.calib_red_hue != 0.0 || params.calib_red_sat != 0.0
+        || params.calib_green_hue != 0.0 || params.calib_green_sat != 0.0
+        || params.calib_blue_hue != 0.0 || params.calib_blue_sat != 0.0) {
+        let entrada = clamp(vec3<f32>(r, g, b) / 255.0, vec3<f32>(0.0), vec3<f32>(1.0));
+        let hsv = para_hsv(entrada);
+        if (hsv.y > 0.0005) {
+            let pr = peso_do_primario(hsv.x, 0.0);
+            let pg = peso_do_primario(hsv.x, 120.0);
+            let pb = peso_do_primario(hsv.x, 240.0);
+
+            // 🔑 O 0,3 é a mesma régua do matiz do HSL: o extremo do slider da
+            // Adobe desloca cerca de 30°, não meia volta. Está escrito uma vez
+            // aqui e uma vez no `lightroom.ts`, e os dois dizem o mesmo.
+            let dh = (params.calib_red_hue * pr
+                + params.calib_green_hue * pg
+                + params.calib_blue_hue * pb) * 0.3;
+            let ds = 1.0 + (params.calib_red_sat * pr
+                + params.calib_green_sat * pg
+                + params.calib_blue_sat * pb) * 0.01;
+
+            var h = (hsv.x + dh) % 360.0;
+            if (h < 0.0) { h = h + 360.0; }
+            let sat = clamp(hsv.y * ds, 0.0, 1.0);
+            // HSV → RGB pela cor pura do matiz: `v · mix(branco, pura, sat)`.
+            let nova = hsv.z * mix(vec3<f32>(1.0), cor_do_matiz(h), sat) * 255.0;
+            r = nova.r;
+            g = nova.g;
+            b = nova.b;
+        }
+    }
+
+    // 0b. O matiz das sombras da calibração — verde/magenta, só embaixo.
+    if (params.calib_shadow_tint != 0.0) {
+        let l = clamp(((r + g + b) / 3.0) / 255.0, 0.0, 1.0);
+        // Some no meio-tom: é o que o controle da Adobe faz, e é o que impede
+        // um retrato de ganhar magenta na pele por causa de um preset de filme.
+        let peso = 1.0 - smoothstep(0.0, 0.5, l);
+        let t = params.calib_shadow_tint * 0.01 * peso * 12.0;
+        r += t;
+        b += t;
+        g -= t;
+    }
+
     if (params.exposure != 0.0) {
         let factor = pow(2.0, params.exposure);
         r *= factor;
@@ -708,6 +860,36 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
     }
     
+    // Mixer de preto e branco — depois do HSL, antes da tonalização.
+    //
+    // 🔑 **É esta posição que faz a sépia funcionar.** A tonalização vem logo
+    // abaixo justamente para recolorir uma foto já sem cor (ver o comentário
+    // dela); converter para P&B aqui põe o mixer no mesmo lugar em que o
+    // Lightroom o põe — depois da mistura de cor, antes do virador.
+    //
+    // 🚨 **A luminância não é um peso fixo.** É a `luminancia()` do motor
+    // corrigida por faixa de matiz (`mistura_pb`), e é isso que separa um P&B
+    // de retrato de um cinza chapado: escurecer o azul do céu sem levar a pele
+    // junto é literalmente o que o operador pede a este controle.
+    if (params.bw_ativo != 0.0) {
+        let cor = clamp(
+            vec3<f32>(r, g, b),
+            vec3<f32>(0.0, 0.0, 0.0),
+            vec3<f32>(255.0, 255.0, 255.0),
+        );
+        let hsv = para_hsv(cor / 255.0);
+        // Cinza não tem matiz: sem saturação não há faixa a que pertencer, e o
+        // ganho seria o do vermelho por acidente do `para_hsv`.
+        let ganho = select(0.0, mistura_pb(hsv.x), hsv.y > 0.0005);
+        // O slider da Adobe vai de -100 a +100 e clareia/escurece a faixa; o
+        // peso pela saturação evita degrau entre um pixel quase cinza e o
+        // vizinho colorido, que é o mesmo cuidado do tom por região.
+        let y = clamp(luminancia(cor) * (1.0 + ganho * 0.01 * hsv.y), 0.0, 255.0);
+        r = y;
+        g = y;
+        b = y;
+    }
+
     // Tonalização — a cor das sombras e a das altas luzes, separadas.
     //
     // 🔑 **Vem depois da saturação, e é essa posição que a torna útil.**
@@ -736,7 +918,8 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     // do matiz`, soma de dois termos não-negativos com um deles positivo
     // sempre que `f > 0`: não cruza o zero, não inverte, e o fator fica
     // limitado. Quem prende é `a_tonalizacao_nao_mancha_o_que_veio_fora_da_faixa`.
-    if (params.split_shadow_sat != 0.0 || params.split_highlight_sat != 0.0) {
+    if (params.split_shadow_sat != 0.0 || params.split_highlight_sat != 0.0
+        || params.split_midtone_sat != 0.0 || params.split_global_sat != 0.0) {
         var cor = clamp(
             vec3<f32>(r, g, b),
             vec3<f32>(0.0, 0.0, 0.0),
@@ -745,22 +928,46 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         let l = ((cor.r + cor.g + cor.b) / 3.0) / 255.0;
 
         // O balanço desloca o ponto em que uma ponta cede para a outra:
-        // positivo dá mais foto às altas luzes, negativo às sombras. A transição
-        // é um `smoothstep` de 0,7 de largura para não deixar anel visível no
-        // meio-tom — o mesmo motivo que fez o tom por região virar curva.
+        // positivo dá mais foto às altas luzes, negativo às sombras.
         let balanco = clamp(params.split_balance * 0.01, -1.0, 1.0);
         let centro = 0.5 - balanco * 0.4;
-        let peso_alta = smoothstep(centro - 0.35, centro + 0.35, l);
+
+        // 🔑 **A mistura vira a LARGURA da transição**, que é o que o
+        // `Blending` da Adobe faz: em 0 as faixas têm borda quase dura, em 100
+        // elas se sobrepõem quase inteiras. No neutro (50) a meia-largura dá
+        // **0,35** — exatamente o valor fixo que estava aqui antes de
+        // 2026-09-12, e é por isso que toda revelação já gravada continua
+        // saindo idêntica.
+        let mistura = clamp(params.split_blending * 0.01, 0.0, 1.0);
+        let meia = 0.10 + mistura * 0.50;
+        let peso_alta = smoothstep(centro - meia, centro + meia, l);
+        let peso_baixa = 1.0 - peso_alta;
+        // O meio é o que as duas pontas não reivindicam — um sino em torno do
+        // centro, que vale 1 onde as duas empatam e 0 nas extremidades.
+        let peso_meio = 1.0 - abs(peso_alta - peso_baixa);
 
         cor = tonalizar(
             cor,
             params.split_shadow_hue,
-            clamp(params.split_shadow_sat * 0.01, 0.0, 1.0) * (1.0 - peso_alta),
+            clamp(params.split_shadow_sat * 0.01, 0.0, 1.0) * peso_baixa,
+        );
+        cor = tonalizar(
+            cor,
+            params.split_midtone_hue,
+            clamp(params.split_midtone_sat * 0.01, 0.0, 1.0) * peso_meio,
         );
         cor = tonalizar(
             cor,
             params.split_highlight_hue,
             clamp(params.split_highlight_sat * 0.01, 0.0, 1.0) * peso_alta,
+        );
+        // 🔑 O global não tem peso de faixa — é a tinta que cai na foto
+        // inteira, e entra por último para tingir também o que as três faixas
+        // acabaram de fazer.
+        cor = tonalizar(
+            cor,
+            params.split_global_hue,
+            clamp(params.split_global_sat * 0.01, 0.0, 1.0),
         );
         r = cor.r;
         g = cor.g;

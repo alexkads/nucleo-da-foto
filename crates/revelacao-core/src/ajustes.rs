@@ -1,4 +1,4 @@
-//! Os 53 ajustes, no layout que o WGSL espera.
+//! Os 74 ajustes, no layout que o WGSL espera.
 
 use serde::{Deserialize, Serialize};
 
@@ -92,15 +92,67 @@ pub struct Ajustes {
     pub split_balance: f32,
     pub grain_amount: f32,
     pub grain_size: f32,
+    // ------------------------------------------------ Calibração de câmera
+    // 🚨 **É a base da maioria dos presets de filme**, e faltava inteira até
+    // 2026-09-12 — o operador do estúdio relatou que não conseguia reproduzir
+    // os estilos que tem no Lightroom e no darktable, e este era o buraco
+    // maior depois da curva por ponto. Ela move os **primários** antes de todo
+    // o resto: um preset que gira o vermelho para o laranja e dessatura o azul
+    // muda a foto inteira, não uma faixa de matiz como o HSL faz.
+    //
+    // ⚠️ **É uma aproximação declarada.** A calibração da Adobe é uma matriz no
+    // espaço do perfil da câmera, que este motor não tem (ele recebe RGB já
+    // revelado). Aqui ela é rotação de matiz e escala de saturação em torno de
+    // cada primário, com queda larga — o comportamento visível é o mesmo nos
+    // valores que os presets usam; o que muda é o extremo.
+    pub calib_red_hue: f32,
+    pub calib_red_sat: f32,
+    pub calib_green_hue: f32,
+    pub calib_green_sat: f32,
+    pub calib_blue_hue: f32,
+    pub calib_blue_sat: f32,
+    pub calib_shadow_tint: f32,
+    // ------------------------------------- Color Grading: os eixos que faltavam
+    // O split toning clássico tem duas pontas; o "Color Grading" do LR 10 em
+    // diante tem três mais um global, e os presets modernos usam os quatro. Sem
+    // os tons médios, um preset cinematográfico perde justamente onde a pele
+    // vive.
+    pub split_midtone_hue: f32,
+    pub split_midtone_sat: f32,
+    pub split_global_hue: f32,
+    pub split_global_sat: f32,
+    /// Quanto as três faixas se misturam — o `Blending` da Adobe, 0 a 100.
+    ///
+    /// 🔑 Neutro **50**, e não 0: é o valor em que a Adobe abre o controle, e
+    /// abrir em 0 daria três faixas de bordas duras numa foto que ninguém
+    /// tocou. Ver `Ajustes::default`.
+    pub split_blending: f32,
+    // ------------------------------------------ Mixer de preto e branco
+    // 🚨 **Zero cobertura até 2026-09-12.** Um preset B&W do Lightroom virava
+    // `saturation = -1` e perdia a mistura por canal — que é exatamente o que
+    // separa um P&B de retrato (pele clara, céu escuro) de um cinza chapado.
+    /// Liga o mixer. Sem ele os oito abaixo não fazem nada, como no Lightroom:
+    /// o mixer só existe com a foto convertida para P&B.
+    pub bw_ativo: f32,
+    pub bw_red: f32,
+    pub bw_orange: f32,
+    pub bw_yellow: f32,
+    pub bw_green: f32,
+    pub bw_aqua: f32,
+    pub bw_blue: f32,
+    pub bw_purple: f32,
+    pub bw_magenta: f32,
 }
 
 /// Quantos campos a struct tem — e quantos `f32` o vetor posicional carrega.
 ///
-/// ⚠️ **Eram 46 até 2026-09-06.** A Tonalização (5) e o Grão (2) entraram
-/// **no fim da lista**, e não perto do que se parece com elas: a posição de um
-/// campo é o contrato com o shader, e mover `nr_luminance` para junto do grão
-/// faria toda revelação já gravada ler o campo do vizinho.
-pub const QUANTIDADE: usize = 53;
+/// ⚠️ **Eram 46 até 2026-09-06, e 53 até 2026-09-12.** A Tonalização (5) e o
+/// Grão (2) entraram primeiro; depois a Calibração de câmera (7), os eixos que
+/// faltavam do Color Grading (5) e o mixer de preto e branco (9). **Todos no
+/// fim da lista**, e não perto do que se parece com eles: a posição de um campo
+/// é o contrato com o shader, e mover `nr_luminance` para junto do grão faria
+/// toda revelação já gravada ler o campo do vizinho.
+pub const QUANTIDADE: usize = 74;
 
 /// O tamanho do buffer de `uniform`, arredondado para múltiplo de 16 bytes.
 ///
@@ -149,12 +201,16 @@ impl Default for Ajustes {
         let mut neutro: Self = bytemuck::Zeroable::zeroed();
         neutro.contrast = 1.0;
         neutro.sharpen_radius = 1.0;
+        // 🚨 **O terceiro neutro que não é zero** (2026-09-12). A mistura do
+        // Color Grading abre em 50 na Adobe; em 0 as três faixas teriam borda
+        // dura, e uma foto que ninguém tocou já sairia diferente.
+        neutro.split_blending = 50.0;
         neutro
     }
 }
 
 impl Ajustes {
-    /// Os 53 nomes, na ordem do `uniform`.
+    /// Os 74 nomes, na ordem do `uniform`.
     ///
     /// 🔑 É a ordem que o vetor posicional ([`Ajustes::como_vetor`]) segue, a
     /// que o `struct Params` do WGSL declara, e a que o site recebe em
@@ -213,6 +269,27 @@ impl Ajustes {
         "split_balance",
         "grain_amount",
         "grain_size",
+        "calib_red_hue",
+        "calib_red_sat",
+        "calib_green_hue",
+        "calib_green_sat",
+        "calib_blue_hue",
+        "calib_blue_sat",
+        "calib_shadow_tint",
+        "split_midtone_hue",
+        "split_midtone_sat",
+        "split_global_hue",
+        "split_global_sat",
+        "split_blending",
+        "bw_ativo",
+        "bw_red",
+        "bw_orange",
+        "bw_yellow",
+        "bw_green",
+        "bw_aqua",
+        "bw_blue",
+        "bw_purple",
+        "bw_magenta",
     ];
 
     /// Os 46 valores, por posição — o que a GPU recebe, como `f32`.
@@ -262,14 +339,20 @@ mod testes {
         assert_eq!(neutro.saturation, 0.0);
     }
 
-    /// O layout que vai para a GPU tem os 53 campos, de quatro bytes cada.
+    /// O layout que vai para a GPU tem os 74 campos, de quatro bytes cada.
     ///
     /// Campo a mais desloca **todos** os seguintes na leitura do shader, e o
     /// sintoma é a saturação virando nitidez.
+    ///
+    /// ⚠️ **O número do `uniform` é escrito à mão de propósito.** Derivá-lo aqui
+    /// (`size_of().next_multiple_of(16)`) faria o teste concordar com qualquer
+    /// mudança, inclusive com a errada — e é justamente o alinhamento de 16
+    /// bytes do WebGL2 que já derrubou este shader uma vez. 74 × 4 = 296, e o
+    /// próximo múltiplo de 16 é 304.
     #[test]
     fn o_layout_tem_os_campos_de_quatro_bytes() {
         assert_eq!(std::mem::size_of::<Ajustes>(), QUANTIDADE * 4);
-        assert_eq!(TAMANHO_DO_UNIFORM, 224);
+        assert_eq!(TAMANHO_DO_UNIFORM, 304);
     }
 
     /// Os nomes do `struct Params` do WGSL, na ordem em que ele os declara.
@@ -357,7 +440,11 @@ mod testes {
         let neutro = Ajustes::default().como_vetor();
         assert_eq!(neutro[posicao("contrast")], 1.0);
         assert_eq!(neutro[posicao("sharpen_radius")], 1.0);
-        assert_eq!(neutro.iter().filter(|v| **v != 0.0).count(), 2);
+        // 🚨 O terceiro neutro que não é zero, desde 2026-09-12: a mistura do
+        // Color Grading abre em 50, como na Adobe. Em 0 as três faixas teriam
+        // borda dura e uma foto intocada já sairia diferente.
+        assert_eq!(neutro[posicao("split_blending")], 50.0);
+        assert_eq!(neutro.iter().filter(|v| **v != 0.0).count(), 3);
 
         let com_matiz = Ajustes {
             hsl_green_hue: 33.0,
