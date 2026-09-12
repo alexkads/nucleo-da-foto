@@ -19,6 +19,17 @@
 # nunca descasarem no cache do navegador.
 #
 # Os artefatos são commitados no repositório do site: a Vercel não tem Rust.
+# 🚨 **Se a pilha local estiver no ar, reinicie o `web`.**
+#
+# O `versao.ts` deste script é lido por `import`, e o Turbopack **não o
+# recompila** quando ele muda por fora do editor: o contêiner continua servindo
+# o `?v=` antigo, o navegador continua carregando o wasm de antes, e o motor
+# novo simplesmente não entra. Isso custou uma ida e volta com o dono em
+# 2026-09-12 — ele testou uma correção três vezes contra o binário velho.
+#
+#   docker compose -f docker-compose.dev.yml restart web
+#
+# Em produção não acontece: a Vercel constrói do zero a cada deploy.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
