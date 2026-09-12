@@ -47,12 +47,16 @@ use crate::ajustes::{Ajustes, TAMANHO_DO_UNIFORM};
 /// O shader do desktop: o corpo mais a entrada por compute.
 const SHADER_COMPUTE: &str = concat!(
     include_str!("shaders/corpo.wgsl"),
+    include_str!("shaders/darktable_constantes.wgsl"),
+    include_str!("shaders/darktable.wgsl"),
     include_str!("shaders/entrada_compute.wgsl")
 );
 
 /// O shader do navegador: o corpo mais a entrada por vértice e fragmento.
 const SHADER_FRAGMENTO: &str = concat!(
     include_str!("shaders/corpo.wgsl"),
+    include_str!("shaders/darktable_constantes.wgsl"),
+    include_str!("shaders/darktable.wgsl"),
     include_str!("shaders/entrada_fragmento.wgsl")
 );
 
@@ -950,6 +954,157 @@ mod testes {
             let saida = revelar_e_colher(&mut motor, entrada.clone(), com_campos(campos));
             assert_ne!(saida, neutro, "Detalhe — `{rotulo}` não fez efeito nenhum");
         }
+    }
+
+    /// O estilo `RecordarFotos P&B`, nos três módulos por pixel.
+    fn estilo_recordarfotos_pb() -> Ajustes {
+        Ajustes {
+            dt_exposure_ativo: 1.0,
+            dt_exposure_black: -0.0019,
+            dt_exposure_exposure: 0.163,
+            dt_vignette_ativo: 1.0,
+            dt_vignette_scale: 87.82,
+            dt_vignette_falloff_scale: 45.51,
+            dt_vignette_brightness: 0.99999,
+            dt_vignette_saturation: 0.147,
+            dt_vignette_autoratio: 1.0,
+            dt_vignette_shape: 0.48,
+            dt_cb_ativo: 1.0,
+            dt_cb_shadows_c: 0.1747,
+            dt_cb_shadows_h: 71.54,
+            dt_cb_midtones_h: 73.85,
+            dt_cb_highlights_y: 0.0449,
+            dt_cb_highlights_c: 0.0833,
+            dt_cb_highlights_h: 71.54,
+            dt_cb_saturation_highlights: 0.1603,
+            dt_cb_saturation_midtones: 0.1346,
+            dt_cb_brilliance_midtones: 0.1474,
+            ..Default::default()
+        }
+    }
+
+    /// O gabarito de CPU (`darktable.rs`) sobre pixels RGBA.
+    fn oraculo_darktable(entrada: &[u8], largura: usize, altura: usize, ajustes: &Ajustes) -> Vec<u8> {
+        use crate::darktable as dt;
+        let tub = dt::Tubulacao::nova();
+        let mut px: Vec<dt::Rgb> = entrada
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| tub.entrar([c[0], c[1], c[2]]))
+            .collect();
+        if ajustes.dt_exposure_ativo != 0.0 {
+            dt::exposure(&mut px, dt::Exposure::de(ajustes));
+        }
+        if ajustes.dt_vignette_ativo != 0.0 {
+            dt::vignette(&mut px, largura, altura, dt::Vignette::de(ajustes));
+        }
+        if ajustes.dt_cb_ativo != 0.0 {
+            dt::color_balance_rgb(&mut px, &tub, &dt::ColorBalanceRgb::de(ajustes));
+        }
+        px.iter()
+            .flat_map(|c| {
+                let s = tub.sair(*c);
+                [s[0], s[1], s[2], 255]
+            })
+            .collect()
+    }
+
+    /// Cores saturadas em todos os matizes e uma rampa de cinza, 64×40.
+    fn carta_colorida() -> Arc<Vec<u8>> {
+        let (w, h) = (64u32, 40u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let cor = if y < 30 {
+                    // Matiz pela coluna, valor e saturação pela linha.
+                    let hh = x as f32 / w as f32 * 6.0;
+                    let (v, s) = (1.0 - (y / 10) as f32 * 0.3, 1.0 - (y % 10) as f32 * 0.09);
+                    let c = v * s;
+                    let xx = c * (1.0 - (hh % 2.0 - 1.0).abs());
+                    let m = v - c;
+                    let (r, g, b) = match hh as u32 {
+                        0 => (c, xx, 0.0),
+                        1 => (xx, c, 0.0),
+                        2 => (0.0, c, xx),
+                        3 => (0.0, xx, c),
+                        4 => (xx, 0.0, c),
+                        _ => (c, 0.0, xx),
+                    };
+                    [((r + m) * 255.0) as u8, ((g + m) * 255.0) as u8, ((b + m) * 255.0) as u8]
+                } else {
+                    [(x * 4) as u8; 3]
+                };
+                px.extend_from_slice(&[cor[0], cor[1], cor[2], 255]);
+            }
+        }
+        Arc::new(px)
+    }
+
+    /// O estágio darktable da GPU é o do gabarito de CPU, pixel a pixel.
+    ///
+    /// # Por que este é o teste que vale
+    ///
+    /// 🚨 **O gabarito já foi medido contra o darktable-cli 5.6.1** (máximo de 1
+    /// nível numa carta de teste). O que falta provar é que o WGSL é a mesma
+    /// conta — e é aqui que um `pow(0, 0)` indefinido, uma matriz com linha e
+    /// coluna trocadas ou uma constante com um dígito errado apareceriam.
+    ///
+    /// ⚠️ **Tolerância de 1 nível**, e só por arredondamento: a GPU pode fundir
+    /// multiplicação e soma (FMA) e errar na sétima casa. Uma conta errada move
+    /// o pixel dezenas de níveis.
+    #[test]
+    fn o_estagio_darktable_por_pixel_bate_com_o_oraculo() {
+        let mut motor = motor_pronto();
+        let entrada = carta_colorida();
+        let (w, h) = (64usize, 40usize);
+        let estilo = estilo_recordarfotos_pb();
+        let so = |exp: bool, vig: bool, cb: bool| Ajustes {
+            dt_exposure_ativo: exp as u8 as f32,
+            dt_vignette_ativo: vig as u8 as f32,
+            dt_cb_ativo: cb as u8 as f32,
+            ..estilo
+        };
+        let casos = [
+            ("exposure", so(true, false, false)),
+            ("vignetting", so(false, true, false)),
+            ("color balance rgb", so(false, false, true)),
+            ("os três, na ordem do darktable", estilo),
+        ];
+        for (rotulo, ajustes) in casos {
+            let gpu = motor
+                .revelar(&entrada, w as u32, h as u32, &ajustes)
+                .expect("o motor devolveu imagem")
+                .into_rgba8()
+                .into_raw();
+            let cpu = oraculo_darktable(&entrada, w, h, &ajustes);
+            let mut pior = (0u8, 0usize);
+            for (i, (a, b)) in gpu.iter().zip(cpu.iter()).enumerate() {
+                if i % 4 == 3 {
+                    continue;
+                }
+                let d = a.abs_diff(*b);
+                if d > pior.0 {
+                    pior = (d, i);
+                }
+            }
+            let k = pior.1 / 4 * 4;
+            assert!(
+                pior.0 <= 1,
+                "{rotulo}: pixel ({}, {}) saiu {:?} na GPU e {:?} no gabarito",
+                (k / 4) % w,
+                (k / 4) / w,
+                &gpu[k..k + 3],
+                &cpu[k..k + 3]
+            );
+        }
+        // E desligado ele não existe: o neutro continua devolvendo a foto.
+        let neutro = motor
+            .revelar(&entrada, w as u32, h as u32, &Ajustes::default())
+            .unwrap()
+            .into_rgba8()
+            .into_raw();
+        assert_eq!(neutro, *entrada, "o estágio darktable desligado mexeu na foto");
     }
 
     /// A curva por ponto age, é monótona, e no neutro devolve a foto intacta.

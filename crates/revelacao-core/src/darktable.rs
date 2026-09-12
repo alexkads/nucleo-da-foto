@@ -36,6 +36,8 @@
 
 use std::f32::consts::PI;
 
+use crate::Ajustes;
+
 /// Um pixel no espaço de trabalho: RGB linear Rec.2020, branco D50.
 pub type Rgb = [f32; 3];
 type Matriz = [[f32; 3]; 3];
@@ -756,6 +758,118 @@ pub fn color_balance_rgb(pixels: &mut [Rgb], tub: &Tubulacao, p: &ColorBalanceRg
     }
 }
 
+// ------------------------------------------------------- o que o shader recebe
+
+impl Exposure {
+    /// Os campos `dt_exposure_*` do [`Ajustes`].
+    pub fn de(a: &Ajustes) -> Self {
+        Self { black: a.dt_exposure_black, exposure: a.dt_exposure_exposure }
+    }
+}
+
+impl Vignette {
+    /// Os campos `dt_vignette_*` do [`Ajustes`].
+    pub fn de(a: &Ajustes) -> Self {
+        Self {
+            scale: a.dt_vignette_scale,
+            falloff_scale: a.dt_vignette_falloff_scale,
+            brightness: a.dt_vignette_brightness,
+            saturation: a.dt_vignette_saturation,
+            center: [a.dt_vignette_center_x, a.dt_vignette_center_y],
+            autoratio: a.dt_vignette_autoratio != 0.0,
+            whratio: a.dt_vignette_whratio,
+            shape: a.dt_vignette_shape,
+            unbound: a.dt_vignette_unbound != 0.0,
+        }
+    }
+}
+
+impl ColorBalanceRgb {
+    /// Os campos `dt_cb_*` do [`Ajustes`].
+    pub fn de(a: &Ajustes) -> Self {
+        Self {
+            shadows_y: a.dt_cb_shadows_y,
+            shadows_c: a.dt_cb_shadows_c,
+            shadows_h: a.dt_cb_shadows_h,
+            midtones_y: a.dt_cb_midtones_y,
+            midtones_c: a.dt_cb_midtones_c,
+            midtones_h: a.dt_cb_midtones_h,
+            highlights_y: a.dt_cb_highlights_y,
+            highlights_c: a.dt_cb_highlights_c,
+            highlights_h: a.dt_cb_highlights_h,
+            global_y: a.dt_cb_global_y,
+            global_c: a.dt_cb_global_c,
+            global_h: a.dt_cb_global_h,
+            shadows_weight: a.dt_cb_shadows_weight,
+            white_fulcrum: a.dt_cb_white_fulcrum,
+            highlights_weight: a.dt_cb_highlights_weight,
+            chroma_shadows: a.dt_cb_chroma_shadows,
+            chroma_highlights: a.dt_cb_chroma_highlights,
+            chroma_global: a.dt_cb_chroma_global,
+            chroma_midtones: a.dt_cb_chroma_midtones,
+            saturation_global: a.dt_cb_saturation_global,
+            saturation_highlights: a.dt_cb_saturation_highlights,
+            saturation_midtones: a.dt_cb_saturation_midtones,
+            saturation_shadows: a.dt_cb_saturation_shadows,
+            hue_angle: a.dt_cb_hue_angle,
+            brilliance_global: a.dt_cb_brilliance_global,
+            brilliance_highlights: a.dt_cb_brilliance_highlights,
+            brilliance_midtones: a.dt_cb_brilliance_midtones,
+            brilliance_shadows: a.dt_cb_brilliance_shadows,
+            mask_grey_fulcrum: a.dt_cb_mask_grey_fulcrum,
+            vibrance: a.dt_cb_vibrance,
+            grey_fulcrum: a.dt_cb_grey_fulcrum,
+            contrast: a.dt_cb_contrast,
+        }
+    }
+}
+
+/// O texto de `shaders/darktable_constantes.wgsl`: as matrizes da tubulação e a
+/// tabela de gamut do Rec.2020, calculadas aqui e escritas como literais.
+///
+/// # Por que gerado, e não escrito à mão
+///
+/// 🚨 **São 512 números da tabela de gamut e 63 das matrizes**, e todos saem de
+/// contas que já foram medidas contra o darktable (Bradford do lcms, CAT16,
+/// dt UCS). Copiá-los à mão para o WGSL seria a forma mais certa de o shader
+/// divergir do gabarito por um dígito — e ninguém acharia. O teste
+/// `as_constantes_do_wgsl_estao_em_dia` falha se o arquivo não for exatamente
+/// o que esta função devolve.
+pub fn constantes_wgsl() -> String {
+    let tub = Tubulacao::nova();
+    let mut s = String::from(
+        "// Gerado por `cargo run -q -p revelacao-core --example darktable-constantes-wgsl` — não editar.\n\
+         // As matrizes e a tabela de gamut do estágio darktable, calculadas em `src/darktable.rs`.\n\n",
+    );
+    let matriz = |nome: &str, m: &Matriz| {
+        let linha = |l: [f32; 3]| format!("    vec3<f32>({:e}, {:e}, {:e}),\n", l[0], l[1], l[2]);
+        format!(
+            "const {nome}: array<vec3<f32>, 3> = array<vec3<f32>, 3>(\n{}{}{});\n",
+            linha(m[0]),
+            linha(m[1]),
+            linha(m[2])
+        )
+    };
+    let para_xyz_d65 = mul_mat(&XYZ_D50_PARA_D65_CAT16, &tub.trabalho_para_xyz_d50);
+    s += &matriz("DT_SRGB_PARA_TRABALHO", &tub.srgb_para_trabalho);
+    s += &matriz("DT_TRABALHO_PARA_SRGB", &tub.trabalho_para_srgb);
+    s += &matriz("DT_CB_ENTRADA", &mul_mat(&XYZ_D65_PARA_LMS_2006, &para_xyz_d65));
+    s += &matriz("DT_CB_SAIDA", &mul_mat(&tub.xyz_d50_para_trabalho, &XYZ_D65_PARA_D50_CAT16));
+    s += &matriz("DT_LMS_PARA_FILMLIGHT", &LMS_PARA_FILMLIGHT);
+    s += &matriz("DT_FILMLIGHT_PARA_LMS", &FILMLIGHT_PARA_LMS);
+    s += &matriz("DT_LMS_2006_PARA_XYZ_D65", &LMS_2006_PARA_XYZ_D65);
+    let lut = tabela_de_gamut(&para_xyz_d65);
+    s += "\n// `dt_UCS_22_build_gamut_LUT` sobre o Rec.2020 linear: M² da borda, por matiz.\n";
+    s += &format!("var<private> DT_GAMUT: array<f32, {LUT_ELEM}> = array<f32, {LUT_ELEM}>(\n");
+    for bloco in lut.chunks(6) {
+        s += "    ";
+        s += &bloco.iter().map(|v| format!("{v:e},")).collect::<Vec<_>>().join(" ");
+        s += "\n";
+    }
+    s += ");\n";
+    s
+}
+
 // ------------------------------------------------------------------ bilateral
 
 /// A grade bilateral do darktable (`src/common/bilateral.c`).
@@ -1167,6 +1281,17 @@ pub fn monochrome(pixels: &mut [Rgb], largura: usize, altura: usize, tub: &Tubul
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn as_constantes_do_wgsl_estao_em_dia() {
+        let caminho = concat!(env!("CARGO_MANIFEST_DIR"), "/src/shaders/darktable_constantes.wgsl");
+        let no_disco = std::fs::read_to_string(caminho).unwrap_or_default();
+        assert!(
+            no_disco == constantes_wgsl(),
+            "darktable_constantes.wgsl envelheceu — regere com: cargo run -q -p revelacao-core \
+             --example darktable-constantes-wgsl > crates/revelacao-core/src/shaders/darktable_constantes.wgsl"
+        );
+    }
 
     #[test]
     fn o_dt_fast_expf_e_o_do_darktable_e_nao_o_exp() {

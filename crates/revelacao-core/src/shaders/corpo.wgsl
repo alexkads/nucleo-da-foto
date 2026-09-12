@@ -153,14 +153,63 @@ struct Params {
     curva_b6: f32,
     curva_b7: f32,
     curva_b8: f32,
+    // Estágio darktable 5.6.1: nomes e escalas do `.dtstyle`. Ver `darktable.wgsl`.
+    dt_exposure_ativo: f32,
+    dt_exposure_black: f32,
+    dt_exposure_exposure: f32,
+    dt_vignette_ativo: f32,
+    dt_vignette_scale: f32,
+    dt_vignette_falloff_scale: f32,
+    dt_vignette_brightness: f32,
+    dt_vignette_saturation: f32,
+    dt_vignette_center_x: f32,
+    dt_vignette_center_y: f32,
+    dt_vignette_autoratio: f32,
+    dt_vignette_whratio: f32,
+    dt_vignette_shape: f32,
+    dt_vignette_unbound: f32,
+    dt_cb_ativo: f32,
+    dt_cb_shadows_y: f32,
+    dt_cb_shadows_c: f32,
+    dt_cb_shadows_h: f32,
+    dt_cb_midtones_y: f32,
+    dt_cb_midtones_c: f32,
+    dt_cb_midtones_h: f32,
+    dt_cb_highlights_y: f32,
+    dt_cb_highlights_c: f32,
+    dt_cb_highlights_h: f32,
+    dt_cb_global_y: f32,
+    dt_cb_global_c: f32,
+    dt_cb_global_h: f32,
+    dt_cb_shadows_weight: f32,
+    dt_cb_white_fulcrum: f32,
+    dt_cb_highlights_weight: f32,
+    dt_cb_chroma_shadows: f32,
+    dt_cb_chroma_highlights: f32,
+    dt_cb_chroma_global: f32,
+    dt_cb_chroma_midtones: f32,
+    dt_cb_saturation_global: f32,
+    dt_cb_saturation_highlights: f32,
+    dt_cb_saturation_midtones: f32,
+    dt_cb_saturation_shadows: f32,
+    dt_cb_hue_angle: f32,
+    dt_cb_brilliance_global: f32,
+    dt_cb_brilliance_highlights: f32,
+    dt_cb_brilliance_midtones: f32,
+    dt_cb_brilliance_shadows: f32,
+    dt_cb_mask_grey_fulcrum: f32,
+    dt_cb_vibrance: f32,
+    dt_cb_grey_fulcrum: f32,
+    dt_cb_contrast: f32,
     // 🔑 Enchimento, e não campo: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
-    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 110
-    // `f32` dão 440. O Rust continua mandando 440 bytes num buffer de 448
-    // (`TAMANHO_DO_UNIFORM`); estes dois nunca são lidos. Ficam DEPOIS dos 110
+    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 157
+    // `f32` dão 628. O Rust continua mandando 628 bytes num buffer de 640
+    // (`TAMANHO_DO_UNIFORM`); estes três nunca são lidos. Ficam DEPOIS dos 157
     // para não deslocar nenhuma posição — e o teste que compara os nomes com o
     // `Ajustes` ignora o que começa com `_`.
     _enchimento_a: f32,
     _enchimento_b: f32,
+    _enchimento_c: f32,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
@@ -534,6 +583,23 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
         
     }
+    // Estágio darktable — a base, e os nossos controles por cima.
+    //
+    // 🔑 **Vem antes de todo ajuste de cor nosso, e depois do ruído e da
+    // nitidez.** Um estilo do darktable é um visual inteiro, e o que o operador
+    // mexe na revelação é retoque sobre ele — a mesma relação de um preset com
+    // os sliders. Ruído e nitidez ficam antes porque leem a vizinhança da
+    // textura de entrada, e não do pixel já revelado.
+    //
+    // Desligado, nenhum dos três módulos toca o pixel — nem a ida e volta ao
+    // espaço linear, que custaria arredondamento à toa.
+    if (params.dt_exposure_ativo != 0.0 || params.dt_vignette_ativo != 0.0 || params.dt_cb_ativo != 0.0) {
+        let dt_saida = dt_estagio(vec3<f32>(r, g, b), coord, dims);
+        r = dt_saida.r;
+        g = dt_saida.g;
+        b = dt_saida.b;
+    }
+
     // 0. Calibração de câmera — **antes de tudo**, e é essa posição que a define.
     //
     // 🔑 No Lightroom ela age nos primários do perfil da câmera, antes de
