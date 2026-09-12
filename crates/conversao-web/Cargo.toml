@@ -1,0 +1,18 @@
+[package]
+name = "conversao-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Converte a foto guardada (WebP) no JPEG que o cliente leva ao laboratório — no navegador dele"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 🔑 **Só o codificador, sem GPU nenhuma.** É o ponto deste crate: o wasm da
+# revelação tem 3,3 MB porque carrega o `wgpu`, e quem abre a galeria no celular
+# para baixar uma foto não precisa de um motor de renderização.
+foto-codec = { path = "../foto-codec" }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"

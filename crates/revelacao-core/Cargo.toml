@@ -26,6 +26,8 @@ bytemuck = { version = "1.14", features = ["derive"] }
 # Só o JPEG: é o que o site recebe e o que a exportação grava. O desktop liga o
 # resto das features pelo `infrastructure`, e a unificação do cargo faz o resto.
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# O codificador de foto, que já foi um módulo daqui — ver `src/jpeg.rs`.
+foto-codec = { path = "../foto-codec" }
 lru = "0.16.2"
 # O `map_async` avisa por callback; o canal transforma isso num `await` que
 # funciona igual na thread de fundo do desktop e no laço de eventos do navegador.

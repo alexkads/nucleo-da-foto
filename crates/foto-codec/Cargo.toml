@@ -1,0 +1,19 @@
+[package]
+name = "foto-codec"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "O codificador de foto do estúdio — um só, para todo destino: desktop, editor no navegador e download do cliente"
+
+[dependencies]
+# 📸 **Só o que abre e fecha arquivo de foto.** Este crate existe para poder ser
+# compilado para wasm **sem GPU**: o `revelacao-core` traz o `wgpu` junto, e um
+# navegador de cliente que só precisa converter um arquivo não tem por que
+# baixar um motor de renderização.
+#
+# `webp` está aqui pelo **decodificador**: desde 2026-09-12 o acervo guarda WebP,
+# e é este crate que devolve o JPEG que o cliente leva ao laboratório. Escrever
+# WebP não é com ele — o `image` só faz WebP lossless, que numa foto sai maior
+# que o JPEG; quem escreve é o navegador, na importação.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
