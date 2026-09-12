@@ -106,6 +106,14 @@ struct Recursos {
     /// não por conteúdo. Comparar 24 MB byte a byte para decidir se vale subir
     /// 24 MB custaria quase o mesmo que subir.
     ultimos_pixels: Option<Arc<Vec<u8>>>,
+    /// As grades bilaterais do estágio darktable — `shadows and highlights` e
+    /// `monochrome` —, de 1×1 enquanto nenhum dos dois está ligado.
+    textura_grade_sh: wgpu::Texture,
+    textura_grade_mo: wgpu::Texture,
+    /// Tamanho e sigmas das duas grades (`DadosDasGrades` no WGSL).
+    buffer_grades: wgpu::Buffer,
+    /// O que produziu as grades em uso — ver [`ChaveDasGrades`].
+    chave_das_grades: Option<ChaveDasGrades>,
 }
 
 fn criar_recursos(
@@ -156,38 +164,25 @@ fn criar_recursos(
         mapped_at_creation: false,
     });
 
-    let vista_de_entrada = textura_entrada.create_view(&wgpu::TextureViewDescriptor::default());
-    let vista_de_saida = textura_saida.create_view(&wgpu::TextureViewDescriptor::default());
-    let entrada = wgpu::BindGroupEntry {
-        binding: 0,
-        resource: wgpu::BindingResource::TextureView(&vista_de_entrada),
-    };
-    let ajustes = wgpu::BindGroupEntry {
-        binding: 2,
-        resource: buffer_ajustes.as_entire_binding(),
-    };
-    let grupo = match pipeline {
-        Pipeline::Compute(pipeline) => dispositivo.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Compute Bind Group"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                entrada,
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&vista_de_saida),
-                },
-                ajustes,
-            ],
-        }),
-        // O fragmento não tem o binding 1: a saída é o alvo do passe.
-        Pipeline::Fragmento {
-            layout_do_grupo, ..
-        } => dispositivo.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Fragment Bind Group"),
-            layout: layout_do_grupo,
-            entries: &[entrada, ajustes],
-        }),
-    };
+    let vazia = crate::darktable::GradeParaGpu::vazia();
+    let textura_grade_sh = textura_de_grade(dispositivo, None, &vazia);
+    let textura_grade_mo = textura_de_grade(dispositivo, None, &vazia);
+    let buffer_grades = dispositivo.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Dados das grades"),
+        size: 64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let grupo = montar_grupo(
+        dispositivo,
+        pipeline,
+        &textura_entrada,
+        &textura_saida,
+        &buffer_ajustes,
+        &textura_grade_sh,
+        &textura_grade_mo,
+        &buffer_grades,
+    );
 
     let buffer_saida = dispositivo.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Output Buffer"),
@@ -205,6 +200,199 @@ fn criar_recursos(
         bytes_por_linha_alinhado,
         bytes_por_linha,
         ultimos_pixels: None,
+        textura_grade_sh,
+        textura_grade_mo,
+        buffer_grades,
+        chave_das_grades: None,
+    }
+}
+
+/// O layout do grupo 0: entrada, saída (só no compute), ajustes, as duas grades
+/// bilaterais e os dados delas.
+///
+/// Todas as texturas lidas são `Float { filterable: false }`: o shader só usa
+/// `textureLoad`, e o `R32Float` das grades não é filtrável sem feature extra.
+fn criar_layout_do_grupo(
+    dispositivo: &wgpu::Device,
+    estagio: wgpu::ShaderStages,
+) -> wgpu::BindGroupLayout {
+    let textura = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: estagio,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    let uniforme = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: estagio,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let mut entradas = vec![textura(0), uniforme(2), textura(3), textura(4), uniforme(5)];
+    if estagio == wgpu::ShaderStages::COMPUTE {
+        entradas.push(wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: estagio,
+            ty: wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            },
+            count: None,
+        });
+    }
+    dispositivo.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Layout do grupo 0"),
+        entries: &entradas,
+    })
+}
+
+/// O bind group do passe: entrada, saída (só no compute), ajustes e as grades.
+///
+/// 🔑 **É refeito quando as grades mudam de tamanho**, e não a cada quadro: a
+/// textura de uma grade é recriada quando outra foto ou outro raio muda o
+/// número de células, e o grupo antigo apontaria para a textura destruída.
+#[allow(clippy::too_many_arguments)]
+fn montar_grupo(
+    dispositivo: &wgpu::Device,
+    pipeline: &Pipeline,
+    entrada: &wgpu::Texture,
+    saida: &wgpu::Texture,
+    ajustes: &wgpu::Buffer,
+    grade_sh: &wgpu::Texture,
+    grade_mo: &wgpu::Texture,
+    grades: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    let vista = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+    let (v_entrada, v_saida, v_sh, v_mo) = (
+        vista(entrada),
+        vista(saida),
+        vista(grade_sh),
+        vista(grade_mo),
+    );
+    let mut entradas = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&v_entrada),
+        },
+        wgpu::BindGroupEntry {
+            binding: 2,
+            resource: ajustes.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 3,
+            resource: wgpu::BindingResource::TextureView(&v_sh),
+        },
+        wgpu::BindGroupEntry {
+            binding: 4,
+            resource: wgpu::BindingResource::TextureView(&v_mo),
+        },
+        wgpu::BindGroupEntry {
+            binding: 5,
+            resource: grades.as_entire_binding(),
+        },
+    ];
+    match pipeline {
+        Pipeline::Compute(pipeline) => {
+            entradas.push(wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&v_saida),
+            });
+            dispositivo.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Compute Bind Group"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &entradas,
+            })
+        }
+        // O fragmento não tem o binding 1: a saída é o alvo do passe.
+        Pipeline::Fragmento {
+            layout_do_grupo, ..
+        } => dispositivo.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Fragment Bind Group"),
+            layout: layout_do_grupo,
+            entries: &entradas,
+        }),
+    }
+}
+
+/// Uma grade bilateral como textura `R32Float`, com as fatias de L lado a lado.
+fn textura_de_grade(
+    dispositivo: &wgpu::Device,
+    fila: Option<&wgpu::Queue>,
+    grade: &crate::darktable::GradeParaGpu,
+) -> wgpu::Texture {
+    let tamanho = wgpu::Extent3d {
+        width: grade.largura_do_atlas(),
+        height: grade.size_y,
+        depth_or_array_layers: 1,
+    };
+    let textura = dispositivo.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Grade bilateral"),
+        size: tamanho,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    if let Some(fila) = fila {
+        fila.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &textura,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&grade.dados),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * grade.largura_do_atlas()),
+                rows_per_image: Some(grade.size_y),
+            },
+            tamanho,
+        );
+    }
+    textura
+}
+
+/// O que decide se as grades em uso ainda valem.
+///
+/// 🔑 **Mexer num controle nosso não refaz a grade**: ela depende só dos
+/// pixels (pela identidade do `Arc`, como a textura de entrada), da escala e
+/// dos parâmetros de `exposure`, `shadhi` e `monochrome`. Refazê-la a cada
+/// arrasto de slider custaria o módulo inteiro em CPU por quadro.
+#[derive(PartialEq)]
+struct ChaveDasGrades {
+    pixels: usize,
+    escala: u32,
+    parametros: Vec<u32>,
+}
+
+impl ChaveDasGrades {
+    fn nova(pixels: &Arc<Vec<u8>>, ajustes: &Ajustes, escala: f32) -> Self {
+        let vetor = ajustes.como_vetor();
+        let posicao = |nome: &str| {
+            Ajustes::NOMES
+                .iter()
+                .position(|n| *n == nome)
+                .expect("campo do estágio darktable")
+        };
+        let exposure = posicao("dt_exposure_ativo")..=posicao("dt_exposure_exposure");
+        let locais = posicao("dt_shadhi_ativo")..=posicao("dt_monochrome_highlights");
+        Self {
+            pixels: Arc::as_ptr(pixels) as usize,
+            escala: escala.to_bits(),
+            parametros: exposure.chain(locais).map(|i| vetor[i].to_bits()).collect(),
+        }
     }
 }
 
@@ -226,6 +414,9 @@ pub struct Motor {
     /// "a GPU está mesmo sendo usada, e por qual caminho" — a pergunta que
     /// aparece toda vez que alguém acha o arrasto lento.
     backend: &'static str,
+    /// A razão entre a imagem revelada e a foto original — ver
+    /// [`Motor::definir_escala_do_original`].
+    escala_do_original: f32,
 }
 
 impl Motor {
@@ -304,10 +495,20 @@ impl Motor {
                     label: Some("Image Adjustments Shader (compute)"),
                     source: wgpu::ShaderSource::Wgsl(SHADER_COMPUTE.into()),
                 });
+                // 🚨 Explícito também aqui: o layout automático declara toda
+                // `texture_2d<f32>` como filtrável, e a grade bilateral é
+                // `R32Float`, que não é.
+                let layout_do_grupo =
+                    criar_layout_do_grupo(&dispositivo, wgpu::ShaderStages::COMPUTE);
+                let layout = dispositivo.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Compute Pipeline Layout"),
+                    bind_group_layouts: &[&layout_do_grupo],
+                    push_constant_ranges: &[],
+                });
                 Pipeline::Compute(dispositivo.create_compute_pipeline(
                     &wgpu::ComputePipelineDescriptor {
                         label: Some("Image Processing Pipeline"),
-                        layout: None,
+                        layout: Some(&layout),
                         module: &modulo,
                         entry_point: Some("main"),
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -324,33 +525,7 @@ impl Motor {
                 // todos os pipelines por formato, e layouts implícitos são um
                 // por pipeline.
                 let layout_do_grupo =
-                    dispositivo.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("Fragment Bind Group Layout"),
-                        entries: &[
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 0,
-                                visibility: wgpu::ShaderStages::FRAGMENT,
-                                ty: wgpu::BindingType::Texture {
-                                    sample_type: wgpu::TextureSampleType::Float {
-                                        filterable: false,
-                                    },
-                                    view_dimension: wgpu::TextureViewDimension::D2,
-                                    multisampled: false,
-                                },
-                                count: None,
-                            },
-                            wgpu::BindGroupLayoutEntry {
-                                binding: 2,
-                                visibility: wgpu::ShaderStages::FRAGMENT,
-                                ty: wgpu::BindingType::Buffer {
-                                    ty: wgpu::BufferBindingType::Uniform,
-                                    has_dynamic_offset: false,
-                                    min_binding_size: None,
-                                },
-                                count: None,
-                            },
-                        ],
-                    });
+                    criar_layout_do_grupo(&dispositivo, wgpu::ShaderStages::FRAGMENT);
                 let layout = dispositivo.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("Fragment Pipeline Layout"),
                     bind_group_layouts: &[&layout_do_grupo],
@@ -370,6 +545,7 @@ impl Motor {
             fila,
             pipeline,
             cache: LruCache::new(NonZeroUsize::new(5).expect("5 não é zero")),
+            escala_do_original: 1.0,
             backend: match adaptador.get_info().backend {
                 wgpu::Backend::Metal => "Metal",
                 wgpu::Backend::Vulkan => "Vulkan",
@@ -414,6 +590,21 @@ impl Motor {
         &self.fila
     }
 
+    /// A razão entre a imagem que vai ser revelada e a foto original.
+    ///
+    /// 🚨 **Os módulos locais do estágio darktable medem em pixels da foto
+    /// original**: o raio de 100 px do `shadows and highlights` é um pedaço da
+    /// foto, e numa cópia de trabalho de 2048 px de uma foto de 6016 ele é um
+    /// raio de 34. Sem isto, a cópia mostraria um estilo e o arquivo sairia com
+    /// outro. Padrão 1 — a exportação em tamanho cheio.
+    pub fn definir_escala_do_original(&mut self, escala: f32) {
+        self.escala_do_original = if escala.is_finite() && escala > 0.0 {
+            escala
+        } else {
+            1.0
+        };
+    }
+
     /// Uma passada: sobe o que mudou, despacha, lê de volta.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn revelar(
@@ -434,6 +625,7 @@ impl Motor {
         altura: u32,
         ajustes: &Ajustes,
     ) -> Option<DynamicImage> {
+        let escala = self.escala_do_original;
         let Motor {
             dispositivo,
             fila,
@@ -450,6 +642,7 @@ impl Motor {
             largura,
             altura,
             ajustes,
+            escala,
         );
 
         let mut encoder = dispositivo.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -537,6 +730,7 @@ impl Motor {
         if !matches!(self.pipeline, Pipeline::Fragmento { .. }) {
             return None;
         }
+        let escala = self.escala_do_original;
         let Motor {
             dispositivo,
             fila,
@@ -553,6 +747,7 @@ impl Motor {
             largura,
             altura,
             ajustes,
+            escala,
         );
 
         let mut encoder = dispositivo.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -584,6 +779,7 @@ fn preparar<'a>(
     largura: u32,
     altura: u32,
     ajustes: &Ajustes,
+    escala: f32,
 ) -> &'a mut Recursos {
     if !cache.contains(&(largura, altura)) {
         cache.put(
@@ -623,6 +819,54 @@ fn preparar<'a>(
         recursos.ultimos_pixels = Some(pixels.clone());
     }
 
+    // Estágio darktable: as grades bilaterais só se refazem quando a chave muda.
+    if ajustes.dt_shadhi_ativo != 0.0 || ajustes.dt_monochrome_ativo != 0.0 {
+        let chave = ChaveDasGrades::nova(pixels, ajustes, escala);
+        if recursos.chave_das_grades.as_ref() != Some(&chave) {
+            let grades = crate::darktable::grades_do_estagio(
+                pixels,
+                largura as usize,
+                altura as usize,
+                ajustes,
+                escala,
+            );
+            let mut dados = [0.0f32; 16];
+            if let Some(g) = &grades.shadhi {
+                recursos.textura_grade_sh = textura_de_grade(dispositivo, Some(fila), g);
+                dados[..6].copy_from_slice(&[
+                    g.size_x as f32,
+                    g.size_y as f32,
+                    g.size_z as f32,
+                    0.0,
+                    g.sigma_s,
+                    g.sigma_r,
+                ]);
+            }
+            if let Some(g) = &grades.monochrome {
+                recursos.textura_grade_mo = textura_de_grade(dispositivo, Some(fila), g);
+                dados[8..14].copy_from_slice(&[
+                    g.size_x as f32,
+                    g.size_y as f32,
+                    g.size_z as f32,
+                    0.0,
+                    g.sigma_s,
+                    g.sigma_r,
+                ]);
+            }
+            fila.write_buffer(&recursos.buffer_grades, 0, bytemuck::cast_slice(&dados));
+            recursos.grupo = montar_grupo(
+                dispositivo,
+                pipeline,
+                &recursos.textura_entrada,
+                &recursos.textura_saida,
+                &recursos.buffer_ajustes,
+                &recursos.textura_grade_sh,
+                &recursos.textura_grade_mo,
+                &recursos.buffer_grades,
+            );
+            recursos.chave_das_grades = Some(chave);
+        }
+    }
     fila.write_buffer(&recursos.buffer_ajustes, 0, bytemuck::bytes_of(ajustes));
     recursos
 }
@@ -956,12 +1200,16 @@ mod testes {
         }
     }
 
-    /// O estilo `RecordarFotos P&B`, nos três módulos por pixel.
+    /// O estilo `RecordarFotos P&B`, com os cinco módulos.
     fn estilo_recordarfotos_pb() -> Ajustes {
         Ajustes {
             dt_exposure_ativo: 1.0,
             dt_exposure_black: -0.0019,
             dt_exposure_exposure: 0.163,
+            dt_shadhi_ativo: 1.0,
+            dt_shadhi_shadows: 65.38,
+            dt_shadhi_highlights: -20.51,
+            dt_monochrome_ativo: 1.0,
             dt_vignette_ativo: 1.0,
             dt_vignette_scale: 87.82,
             dt_vignette_falloff_scale: 45.51,
@@ -984,7 +1232,12 @@ mod testes {
     }
 
     /// O gabarito de CPU (`darktable.rs`) sobre pixels RGBA.
-    fn oraculo_darktable(entrada: &[u8], largura: usize, altura: usize, ajustes: &Ajustes) -> Vec<u8> {
+    fn oraculo_darktable(
+        entrada: &[u8],
+        largura: usize,
+        altura: usize,
+        ajustes: &Ajustes,
+    ) -> Vec<u8> {
         use crate::darktable as dt;
         let tub = dt::Tubulacao::nova();
         let mut px: Vec<dt::Rgb> = entrada
@@ -995,6 +1248,26 @@ mod testes {
             .collect();
         if ajustes.dt_exposure_ativo != 0.0 {
             dt::exposure(&mut px, dt::Exposure::de(ajustes));
+        }
+        if ajustes.dt_shadhi_ativo != 0.0 {
+            dt::shadhi(
+                &mut px,
+                largura,
+                altura,
+                &tub,
+                dt::ShadowsHighlights::de(ajustes),
+                1.0,
+            );
+        }
+        if ajustes.dt_monochrome_ativo != 0.0 {
+            dt::monochrome(
+                &mut px,
+                largura,
+                altura,
+                &tub,
+                dt::Monochrome::de(ajustes),
+                1.0,
+            );
         }
         if ajustes.dt_vignette_ativo != 0.0 {
             dt::vignette(&mut px, largura, altura, dt::Vignette::de(ajustes));
@@ -1031,7 +1304,11 @@ mod testes {
                         4 => (xx, 0.0, c),
                         _ => (c, 0.0, xx),
                     };
-                    [((r + m) * 255.0) as u8, ((g + m) * 255.0) as u8, ((b + m) * 255.0) as u8]
+                    [
+                        ((r + m) * 255.0) as u8,
+                        ((g + m) * 255.0) as u8,
+                        ((b + m) * 255.0) as u8,
+                    ]
                 } else {
                     [(x * 4) as u8; 3]
                 };
@@ -1041,7 +1318,8 @@ mod testes {
         Arc::new(px)
     }
 
-    /// O estágio darktable da GPU é o do gabarito de CPU, pixel a pixel.
+    /// O estágio darktable da GPU é o do gabarito de CPU, pixel a pixel —
+    /// inclusive o fatiamento das grades bilaterais calculadas em CPU.
     ///
     /// # Por que este é o teste que vale
     ///
@@ -1059,17 +1337,22 @@ mod testes {
         let entrada = carta_colorida();
         let (w, h) = (64usize, 40usize);
         let estilo = estilo_recordarfotos_pb();
-        let so = |exp: bool, vig: bool, cb: bool| Ajustes {
-            dt_exposure_ativo: exp as u8 as f32,
-            dt_vignette_ativo: vig as u8 as f32,
-            dt_cb_ativo: cb as u8 as f32,
+        // Um módulo ligado de cada vez, e os cinco juntos.
+        let so = |modulo: &str| Ajustes {
+            dt_exposure_ativo: (modulo == "exposure") as u8 as f32,
+            dt_shadhi_ativo: (modulo == "shadhi") as u8 as f32,
+            dt_monochrome_ativo: (modulo == "monochrome") as u8 as f32,
+            dt_vignette_ativo: (modulo == "vignette") as u8 as f32,
+            dt_cb_ativo: (modulo == "cb") as u8 as f32,
             ..estilo
         };
         let casos = [
-            ("exposure", so(true, false, false)),
-            ("vignetting", so(false, true, false)),
-            ("color balance rgb", so(false, false, true)),
-            ("os três, na ordem do darktable", estilo),
+            ("exposure", so("exposure")),
+            ("shadows and highlights", so("shadhi")),
+            ("monochrome", so("monochrome")),
+            ("vignetting", so("vignette")),
+            ("color balance rgb", so("cb")),
+            ("os cinco, na ordem do darktable", estilo),
         ];
         for (rotulo, ajustes) in casos {
             let gpu = motor
@@ -1104,7 +1387,10 @@ mod testes {
             .unwrap()
             .into_rgba8()
             .into_raw();
-        assert_eq!(neutro, *entrada, "o estágio darktable desligado mexeu na foto");
+        assert_eq!(
+            neutro, *entrada,
+            "o estágio darktable desligado mexeu na foto"
+        );
     }
 
     /// A curva por ponto age, é monótona, e no neutro devolve a foto intacta.
@@ -1243,12 +1529,24 @@ mod testes {
         // Lightroom, onde o mixer só aparece depois do B&W.
         let casos: &[(&str, &[(&str, f32)])] = &[
             ("Calibração — matiz do vermelho", &[("calib_red_hue", 60.0)]),
-            ("Calibração — saturação do vermelho", &[("calib_red_sat", 80.0)]),
+            (
+                "Calibração — saturação do vermelho",
+                &[("calib_red_sat", 80.0)],
+            ),
             ("Calibração — matiz do verde", &[("calib_green_hue", 60.0)]),
-            ("Calibração — saturação do verde", &[("calib_green_sat", 80.0)]),
+            (
+                "Calibração — saturação do verde",
+                &[("calib_green_sat", 80.0)],
+            ),
             ("Calibração — matiz do azul", &[("calib_blue_hue", 60.0)]),
-            ("Calibração — saturação do azul", &[("calib_blue_sat", 80.0)]),
-            ("Calibração — matiz das sombras", &[("calib_shadow_tint", 80.0)]),
+            (
+                "Calibração — saturação do azul",
+                &[("calib_blue_sat", 80.0)],
+            ),
+            (
+                "Calibração — matiz das sombras",
+                &[("calib_shadow_tint", 80.0)],
+            ),
             (
                 "Color Grading — tons médios",
                 &[("split_midtone_hue", 40.0), ("split_midtone_sat", 80.0)],
@@ -1267,19 +1565,36 @@ mod testes {
                     ("split_blending", 0.0),
                 ],
             ),
-            ("Mixer P&B — vermelho", &[("bw_ativo", 1.0), ("bw_red", 80.0)]),
-            ("Mixer P&B — laranja", &[("bw_ativo", 1.0), ("bw_orange", 80.0)]),
-            ("Mixer P&B — amarelo", &[("bw_ativo", 1.0), ("bw_yellow", 80.0)]),
-            ("Mixer P&B — verde", &[("bw_ativo", 1.0), ("bw_green", 80.0)]),
+            (
+                "Mixer P&B — vermelho",
+                &[("bw_ativo", 1.0), ("bw_red", 80.0)],
+            ),
+            (
+                "Mixer P&B — laranja",
+                &[("bw_ativo", 1.0), ("bw_orange", 80.0)],
+            ),
+            (
+                "Mixer P&B — amarelo",
+                &[("bw_ativo", 1.0), ("bw_yellow", 80.0)],
+            ),
+            (
+                "Mixer P&B — verde",
+                &[("bw_ativo", 1.0), ("bw_green", 80.0)],
+            ),
             ("Mixer P&B — água", &[("bw_ativo", 1.0), ("bw_aqua", 80.0)]),
             ("Mixer P&B — azul", &[("bw_ativo", 1.0), ("bw_blue", 80.0)]),
-            ("Mixer P&B — roxo", &[("bw_ativo", 1.0), ("bw_purple", 80.0)]),
-            ("Mixer P&B — magenta", &[("bw_ativo", 1.0), ("bw_magenta", 80.0)]),
+            (
+                "Mixer P&B — roxo",
+                &[("bw_ativo", 1.0), ("bw_purple", 80.0)],
+            ),
+            (
+                "Mixer P&B — magenta",
+                &[("bw_ativo", 1.0), ("bw_magenta", 80.0)],
+            ),
         ];
 
         for (rotulo, campos) in casos {
-            let indices: Vec<(usize, f32)> =
-                campos.iter().map(|(n, v)| (posicao(n), *v)).collect();
+            let indices: Vec<(usize, f32)> = campos.iter().map(|(n, v)| (posicao(n), *v)).collect();
             let saida = revelar_e_colher(&mut motor, entrada.clone(), com_campos(&indices));
             assert_ne!(
                 saida, neutro,
@@ -1291,10 +1606,7 @@ mod testes {
         // oito sliders existem, o preset os traz, e sem o B&W ligado eles
         // dormem. Sem esta linha, um preset de cor com `GrayMixer` dentro
         // dessaturaria a foto sem ninguém ter pedido.
-        let so_os_sliders = com_campos(&[
-            (posicao("bw_red"), 100.0),
-            (posicao("bw_blue"), -100.0),
-        ]);
+        let so_os_sliders = com_campos(&[(posicao("bw_red"), 100.0), (posicao("bw_blue"), -100.0)]);
         assert_eq!(
             revelar_e_colher(&mut motor, entrada.clone(), so_os_sliders),
             neutro,

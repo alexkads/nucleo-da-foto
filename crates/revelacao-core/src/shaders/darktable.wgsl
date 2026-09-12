@@ -426,14 +426,274 @@ fn dt_color_balance_rgb(px: vec3<f32>) -> vec3<f32> {
     return max(dt_mul3(DT_CB_SAIDA, xyz2), vec3<f32>(0.0));
 }
 
+// ------------------------------------------------------------- grades e Lab
+
+/// O tamanho `(size_x, size_y, size_z, 0)` e os sigmas `(σs, σr, 0, 0)` de cada
+/// grade bilateral, em múltiplos de 16 bytes como o uniform exige.
+struct DadosDasGrades {
+    sh_tamanho: vec4<f32>,
+    sh_sigma: vec4<f32>,
+    mo_tamanho: vec4<f32>,
+    mo_sigma: vec4<f32>,
+}
+
+@group(0) @binding(3) var dt_grade_shadhi: texture_2d<f32>;
+@group(0) @binding(4) var dt_grade_monochrome: texture_2d<f32>;
+@group(0) @binding(5) var<uniform> dt_grades: DadosDasGrades;
+
+/// `dt_XYZ_to_Lab` (`colorspaces_inline_conversions.h:148`), branco D50.
+fn dt_lab_f(x: f32) -> f32 {
+    if (x > 216.0 / 24389.0) {
+        return pow(x, 1.0 / 3.0);
+    }
+    return (24389.0 / 27.0 * x + 16.0) / 116.0;
+}
+
+fn dt_lab_f_inv(x: f32) -> f32 {
+    if (x > 0.20689655172413796) {
+        return x * x * x;
+    }
+    return (116.0 * x - 16.0) / (24389.0 / 27.0);
+}
+
+fn dt_para_lab(t: vec3<f32>) -> vec3<f32> {
+    let xyz = dt_mul3(DT_TRABALHO_PARA_XYZ_D50, t);
+    let fx = dt_lab_f(xyz.x / 0.9642);
+    let fy = dt_lab_f(xyz.y);
+    let fz = dt_lab_f(xyz.z / 0.8249);
+    return vec3<f32>(116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz));
+}
+
+fn dt_de_lab(lab: vec3<f32>) -> vec3<f32> {
+    let fy = (lab.x + 16.0) / 116.0;
+    let fx = fy + lab.y / 500.0;
+    let fz = fy - lab.z / 200.0;
+    let xyz = vec3<f32>(0.9642 * dt_lab_f_inv(fx), dt_lab_f_inv(fy), 0.8249 * dt_lab_f_inv(fz));
+    return dt_mul3(DT_XYZ_D50_PARA_TRABALHO, xyz);
+}
+
+/// A célula da grade e os pesos trilineares de um pixel (`bilateral.c:398–439`).
+struct CelulaDaGrade {
+    xi: i32,
+    yi: i32,
+    zi: i32,
+    sx: i32,
+    xf: f32,
+    yf: f32,
+    zf: f32,
+}
+
+fn dt_celula(tamanho: vec4<f32>, sigma: vec4<f32>, coord: vec2<u32>, l: f32) -> CelulaDaGrade {
+    let s_inv = 1.0 / sigma.x;
+    let r_inv = 1.0 / sigma.y;
+    let x = clamp(f32(coord.x) * s_inv, 0.0, tamanho.x - 1.0);
+    let y = clamp(f32(coord.y) * s_inv, 0.0, tamanho.y - 1.0);
+    let z = clamp(l * r_inv, 0.0, tamanho.z - 1.0);
+    let xi = min(i32(x), i32(tamanho.x) - 2);
+    let yi = min(i32(y), i32(tamanho.y) - 2);
+    let zi = min(i32(z), i32(tamanho.z) - 2);
+    return CelulaDaGrade(xi, yi, zi, i32(tamanho.x), x - f32(xi), y - f32(yi), z - f32(zi));
+}
+
+/// O texel `(x + z·size_x, y)` do atlas é a célula `(x, y, z)`.
+fn dt_texel_sh(c: CelulaDaGrade, dx: i32, dy: i32, dz: i32) -> f32 {
+    return textureLoad(dt_grade_shadhi, vec2<i32>(c.xi + dx + (c.zi + dz) * c.sx, c.yi + dy), 0).r;
+}
+
+fn dt_texel_mo(c: CelulaDaGrade, dx: i32, dy: i32, dz: i32) -> f32 {
+    return textureLoad(dt_grade_monochrome, vec2<i32>(c.xi + dx + (c.zi + dz) * c.sx, c.yi + dy), 0).r;
+}
+
+/// Os oito pesos na ordem do `dt_bilateral_slice`.
+fn dt_trilinear(c: CelulaDaGrade, t000: f32, t100: f32, t010: f32, t110: f32, t001: f32, t101: f32, t011: f32, t111: f32) -> f32 {
+    return t000 * (1.0 - c.xf) * (1.0 - c.yf) * (1.0 - c.zf)
+        + t100 * c.xf * (1.0 - c.yf) * (1.0 - c.zf)
+        + t010 * (1.0 - c.xf) * c.yf * (1.0 - c.zf)
+        + t110 * c.xf * c.yf * (1.0 - c.zf)
+        + t001 * (1.0 - c.xf) * (1.0 - c.yf) * c.zf
+        + t101 * c.xf * (1.0 - c.yf) * c.zf
+        + t011 * (1.0 - c.xf) * c.yf * c.zf
+        + t111 * c.xf * c.yf * c.zf;
+}
+
+/// O L da base (detalhe −1): `max(0, L + σr · 0,04 · soma)`.
+fn dt_fatiar_shadhi(coord: vec2<u32>, l: f32) -> f32 {
+    let c = dt_celula(dt_grades.sh_tamanho, dt_grades.sh_sigma, coord, l);
+    let soma = dt_trilinear(c,
+        dt_texel_sh(c, 0, 0, 0), dt_texel_sh(c, 1, 0, 0), dt_texel_sh(c, 0, 1, 0), dt_texel_sh(c, 1, 1, 0),
+        dt_texel_sh(c, 0, 0, 1), dt_texel_sh(c, 1, 0, 1), dt_texel_sh(c, 0, 1, 1), dt_texel_sh(c, 1, 1, 1));
+    return max(0.0, l + dt_grades.sh_sigma.y * 0.04 * soma);
+}
+
+fn dt_fatiar_monochrome(coord: vec2<u32>, l: f32) -> f32 {
+    let c = dt_celula(dt_grades.mo_tamanho, dt_grades.mo_sigma, coord, l);
+    let soma = dt_trilinear(c,
+        dt_texel_mo(c, 0, 0, 0), dt_texel_mo(c, 1, 0, 0), dt_texel_mo(c, 0, 1, 0), dt_texel_mo(c, 1, 1, 0),
+        dt_texel_mo(c, 0, 0, 1), dt_texel_mo(c, 1, 0, 1), dt_texel_mo(c, 0, 1, 1), dt_texel_mo(c, 1, 1, 1));
+    return max(0.0, l + dt_grades.mo_sigma.y * 0.04 * soma);
+}
+
+// ----------------------------------------------------- shadows and highlights
+
+fn dt_sinal(x: f32) -> f32 {
+    if (x < 0.0) {
+        return -1.0;
+    }
+    return 1.0;
+}
+
+fn dt_copysign(v: f32, s: f32) -> f32 {
+    if (s < 0.0) {
+        return -abs(v);
+    }
+    return abs(v);
+}
+
+/// `shadhi.c:336–491`, algoritmo bilateral. Ver `darktable::shadhi`.
+fn dt_shadhi(t: vec3<f32>, coord: vec2<u32>) -> vec3<f32> {
+    let flags = u32(params.dt_shadhi_flags);
+    let lab = dt_para_lab(t);
+    let base = dt_fatiar_shadhi(coord, lab.x);
+    let shadows = 2.0 * clamp(params.dt_shadhi_shadows / 100.0, -1.0, 1.0);
+    let highlights = 2.0 * clamp(params.dt_shadhi_highlights / 100.0, -1.0, 1.0);
+    let whitepoint = max(1.0 - params.dt_shadhi_whitepoint / 100.0, 0.01);
+    let compress = clamp(params.dt_shadhi_compress / 100.0, 0.0, 0.99);
+    let sh_cc = (clamp(params.dt_shadhi_shadows_ccorrect / 100.0, 0.0, 1.0) - 0.5) * dt_sinal(shadows) + 0.5;
+    let hl_cc = (clamp(params.dt_shadhi_highlights_ccorrect / 100.0, 0.0, 1.0) - 0.5) * dt_sinal(-highlights) + 0.5;
+    let unbound_mask = (flags & 128u) != 0u;
+    let low = 1e-6;
+
+    var ta = vec3<f32>(lab.x / 100.0, lab.y / 128.0, lab.z / 128.0);
+    var tb0 = (100.0 - base) / 100.0;
+    if (ta.x > 0.0) {
+        ta.x = ta.x / whitepoint;
+    }
+    if (tb0 > 0.0) {
+        tb0 = tb0 / whitepoint;
+    }
+
+    // Altas luzes (shadhi.c:424–454). `tb` a e b são zero.
+    var h2 = highlights * highlights;
+    let hx = clamp(1.0 - tb0 / (1.0 - compress), 0.0, 1.0);
+    loop {
+        if (!(h2 > 0.0)) {
+            break;
+        }
+        var la = ta.x;
+        if ((flags & 8u) == 0u) {
+            la = clamp(ta.x, 0.0, 1.0);
+        }
+        var lb = (tb0 - 0.5) * dt_sinal(-highlights) * dt_sinal(1.0 - la) + 0.5;
+        if (!unbound_mask) {
+            lb = clamp(lb, 0.0, 1.0);
+        }
+        let lref = dt_copysign(select(1.0 / low, 1.0 / abs(la), abs(la) > low), la);
+        let href = dt_copysign(select(1.0 / low, 1.0 / abs(1.0 - la), abs(1.0 - la) > low), 1.0 - la);
+        let op = min(h2, 1.0) * hx;
+        h2 = h2 - 1.0;
+        var sobre = 2.0 * la * lb;
+        if (la > 0.5) {
+            sobre = 1.0 - (1.0 - 2.0 * (la - 0.5)) * (1.0 - lb);
+        }
+        ta.x = la * (1.0 - op) + sobre * op;
+        if ((flags & 8u) == 0u) {
+            ta.x = clamp(ta.x, 0.0, 1.0);
+        }
+        let cf = ta.x * lref * (1.0 - hl_cc) + (1.0 - ta.x) * href * hl_cc;
+        ta.y = ta.y * (1.0 - op) + ta.y * cf * op;
+        if ((flags & 16u) == 0u) {
+            ta.y = clamp(ta.y, -1.0, 1.0);
+        }
+        ta.z = ta.z * (1.0 - op) + ta.z * cf * op;
+        if ((flags & 32u) == 0u) {
+            ta.z = clamp(ta.z, -1.0, 1.0);
+        }
+    }
+
+    // Sombras (shadhi.c:456–487).
+    var s2 = shadows * shadows;
+    let sx = clamp(tb0 / (1.0 - compress) - compress / (1.0 - compress), 0.0, 1.0);
+    loop {
+        if (!(s2 > 0.0)) {
+            break;
+        }
+        // Sic: o darktable lê `UNBOUND_HIGHLIGHTS_L` aqui (shadhi.c:462).
+        var la = ta.x;
+        if ((flags & 8u) == 0u) {
+            la = clamp(ta.x, 0.0, 1.0);
+        }
+        var lb = (tb0 - 0.5) * dt_sinal(shadows) * dt_sinal(1.0 - la) + 0.5;
+        if (!unbound_mask) {
+            lb = clamp(lb, 0.0, 1.0);
+        }
+        let lref = dt_copysign(select(1.0 / low, 1.0 / abs(la), abs(la) > low), la);
+        let href = dt_copysign(select(1.0 / low, 1.0 / abs(1.0 - la), abs(1.0 - la) > low), 1.0 - la);
+        let op = min(s2, 1.0) * sx;
+        s2 = s2 - 1.0;
+        var sobre = 2.0 * la * lb;
+        if (la > 0.5) {
+            sobre = 1.0 - (1.0 - 2.0 * (la - 0.5)) * (1.0 - lb);
+        }
+        ta.x = la * (1.0 - op) + sobre * op;
+        if ((flags & 1u) == 0u) {
+            ta.x = clamp(ta.x, 0.0, 1.0);
+        }
+        let cf = ta.x * lref * sh_cc + (1.0 - ta.x) * href * (1.0 - sh_cc);
+        ta.y = ta.y * (1.0 - op) + ta.y * cf * op;
+        if ((flags & 2u) == 0u) {
+            ta.y = clamp(ta.y, -1.0, 1.0);
+        }
+        ta.z = ta.z * (1.0 - op) + ta.z * cf * op;
+        if ((flags & 4u) == 0u) {
+            ta.z = clamp(ta.z, -1.0, 1.0);
+        }
+    }
+
+    return dt_de_lab(vec3<f32>(ta.x * 100.0, ta.y * 128.0, ta.z * 128.0));
+}
+
+// ----------------------------------------------------------------- monochrome
+
+/// `dt_fast_expf` (`math.h:418–431`): a interpolação na representação binária,
+/// e não o `exp`.
+fn dt_fast_expf(x: f32) -> f32 {
+    let k0 = i32(1065353216.0 + x * 11401300.0);
+    return bitcast<f32>(u32(max(k0, 0)));
+}
+
+fn dt_envelope(l: f32) -> f32 {
+    let x = clamp(l / 100.0, 0.0, 1.0);
+    if (x < 0.6) {
+        let t = x / 0.6 - 1.0;
+        return 1.0 - t * t;
+    }
+    let t1 = (1.0 - x) / 0.4;
+    let t2 = t1 * t1;
+    return 3.0 * t2 - 2.0 * t2 * t1;
+}
+
+/// `monochrome.c:196–249`. Ver `darktable::monochrome`.
+fn dt_monochrome(t: vec3<f32>, coord: vec2<u32>) -> vec3<f32> {
+    let lab = dt_para_lab(t);
+    let tamanho = params.dt_monochrome_size * 128.0;
+    let sigma2 = 2.0 * tamanho * tamanho;
+    let da = lab.y - params.dt_monochrome_a;
+    let db = lab.z - params.dt_monochrome_b;
+    let filtro = 100.0 * dt_fast_expf(-clamp((da * da + db * db) / sigma2, 0.0, 1.0));
+    let borrado = dt_fatiar_monochrome(coord, filtro);
+    let tt = dt_envelope(lab.x);
+    let mistura = tt + (1.0 - tt) * (1.0 - params.dt_monochrome_highlights);
+    let saida = (1.0 - mistura) * lab.x + mistura * borrado * (1.0 / 100.0) * lab.x;
+    return dt_de_lab(vec3<f32>(saida, 0.0, 0.0));
+}
+
 // --------------------------------------------------------------------- estágio
 
 /// Do sRGB 0–255 do corpo ao espaço do darktable, os módulos na ordem do
 /// pipeline dele, e de volta.
 ///
-/// 🔑 **A ordem é a do `iop_order` do darktable 5.6**: exposure, (shadows and
-/// highlights, monochrome — o próximo incremento, que precisa da grade
-/// bilateral), vignetting, color balance rgb.
+/// 🔑 **A ordem é a do `iop_order` do darktable 5.6**: exposure, shadows and
+/// highlights, monochrome, vignetting, color balance rgb.
 fn dt_estagio(rgb255: vec3<f32>, coord: vec2<u32>, dims: vec2<u32>) -> vec3<f32> {
     let linear = vec3<f32>(
         dt_srgb_para_linear(rgb255.r),
@@ -443,6 +703,12 @@ fn dt_estagio(rgb255: vec3<f32>, coord: vec2<u32>, dims: vec2<u32>) -> vec3<f32>
     var t = dt_mul3(DT_SRGB_PARA_TRABALHO, linear);
     if (params.dt_exposure_ativo != 0.0) {
         t = dt_exposure(t);
+    }
+    if (params.dt_shadhi_ativo != 0.0) {
+        t = dt_shadhi(t, coord);
+    }
+    if (params.dt_monochrome_ativo != 0.0) {
+        t = dt_monochrome(t, coord);
     }
     if (params.dt_vignette_ativo != 0.0) {
         t = dt_vignette(t, coord, dims);

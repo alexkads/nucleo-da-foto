@@ -16,36 +16,59 @@ use std::{fs, path::Path, time::Instant};
 
 use image::codecs::jpeg::JpegEncoder;
 use revelacao_core::darktable::{
-    color_balance_rgb, exposure, monochrome, shadhi, vignette, ColorBalanceRgb, Exposure, Monochrome, Rgb,
-    ShadowsHighlights, Tubulacao, Vignette,
+    color_balance_rgb, exposure, monochrome, shadhi, vignette, ColorBalanceRgb, Exposure,
+    Monochrome, Rgb, ShadowsHighlights, Tubulacao, Vignette,
 };
 use serde_json::Value;
 
 fn f(v: &Value, k: &str) -> f32 {
-    v[k].as_f64().unwrap_or_else(|| panic!("falta o campo `{k}`")) as f32
+    v[k].as_f64()
+        .unwrap_or_else(|| panic!("falta o campo `{k}`")) as f32
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (entrada, resto) = args.split_first().expect("uso: <entrada> [LxA] <parametros.json> <saída>");
+    let (entrada, resto) = args
+        .split_first()
+        .expect("uso: <entrada> [LxA] <parametros.json> <saída>");
     let (largura, altura, rgb8): (usize, usize, Vec<u8>) = if entrada.ends_with(".rgb") {
-        let [dims, ..] = resto else { panic!("entrada .rgb pede LARGURAxALTURA") };
+        let [dims, ..] = resto else {
+            panic!("entrada .rgb pede LARGURAxALTURA")
+        };
         let (l, a) = dims.split_once('x').expect("LARGURAxALTURA");
-        (l.parse().unwrap(), a.parse().unwrap(), fs::read(entrada).unwrap())
+        (
+            l.parse().unwrap(),
+            a.parse().unwrap(),
+            fs::read(entrada).unwrap(),
+        )
     } else {
         let img = image::open(entrada).expect("abrir a imagem").to_rgb8();
         (img.width() as usize, img.height() as usize, img.into_raw())
     };
-    let resto = if entrada.ends_with(".rgb") { &resto[1..] } else { resto };
-    let [json, saida, ..] = resto else { panic!("faltam parametros.json e a pasta de saída") };
+    let resto = if entrada.ends_with(".rgb") {
+        &resto[1..]
+    } else {
+        resto
+    };
+    let [json, saida, ..] = resto else {
+        panic!("faltam parametros.json e a pasta de saída")
+    };
     let p: Value = serde_json::from_str(&fs::read_to_string(json).unwrap()).unwrap();
     fs::create_dir_all(saida).unwrap();
 
     let tub = Tubulacao::nova();
-    let original: Vec<Rgb> = rgb8.as_chunks::<3>().0.iter().map(|c| tub.entrar(*c)).collect();
+    let original: Vec<Rgb> = rgb8
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|c| tub.entrar(*c))
+        .collect();
 
     let pe = &p["exposure"];
-    let ex = Exposure { black: f(pe, "black"), exposure: f(pe, "exposure") };
+    let ex = Exposure {
+        black: f(pe, "black"),
+        exposure: f(pe, "exposure"),
+    };
     let ps = &p["shadhi"];
     let sh = ShadowsHighlights {
         radius: f(ps, "radius"),
@@ -58,9 +81,18 @@ fn main() {
         flags: ps["flags"].as_u64().unwrap() as u32,
         low_approximation: f(ps, "low_approximation"),
     };
-    assert_eq!(ps["shadhi_algo"].as_i64(), Some(1), "só o algoritmo bilateral está portado");
+    assert_eq!(
+        ps["shadhi_algo"].as_i64(),
+        Some(1),
+        "só o algoritmo bilateral está portado"
+    );
     let pm = &p["monochrome"];
-    let mo = Monochrome { a: f(pm, "a"), b: f(pm, "b"), size: f(pm, "size"), highlights: f(pm, "highlights") };
+    let mo = Monochrome {
+        a: f(pm, "a"),
+        b: f(pm, "b"),
+        size: f(pm, "size"),
+        highlights: f(pm, "highlights"),
+    };
     let pv = &p["vignette"];
     let vi = Vignette {
         scale: f(pv, "scale"),
@@ -73,9 +105,17 @@ fn main() {
         shape: f(pv, "shape"),
         unbound: pv["unbound"].as_i64() == Some(1),
     };
-    assert_eq!(pv["dithering"].as_i64(), Some(0), "pontilhamento não está portado");
+    assert_eq!(
+        pv["dithering"].as_i64(),
+        Some(0),
+        "pontilhamento não está portado"
+    );
     let pc = &p["colorbalancergb"];
-    assert_eq!(pc["saturation_formula"].as_i64(), Some(1), "só a fórmula dt UCS está portada");
+    assert_eq!(
+        pc["saturation_formula"].as_i64(),
+        Some(1),
+        "só a fórmula dt UCS está portada"
+    );
     let cb = ColorBalanceRgb {
         shadows_y: f(pc, "shadows_Y"),
         shadows_c: f(pc, "shadows_C"),
@@ -130,7 +170,12 @@ fn main() {
         fs::write(Path::new(saida).join(format!("{nome}.rgb")), &bytes).unwrap();
         let arquivo = fs::File::create(Path::new(saida).join(format!("{nome}.jpg"))).unwrap();
         JpegEncoder::new_with_quality(arquivo, 95)
-            .encode(&bytes, largura as u32, altura as u32, image::ExtendedColorType::Rgb8)
+            .encode(
+                &bytes,
+                largura as u32,
+                altura as u32,
+                image::ExtendedColorType::Rgb8,
+            )
             .unwrap();
     };
 

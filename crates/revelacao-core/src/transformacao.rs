@@ -935,10 +935,7 @@ mod testes_do_enquadramento {
         // `rotate(g)` do CSS é horário em tela (y para baixo); invertê-la é
         // rodar por -g.
         let (sen, cos) = (-(corte.angulo() as f64)).to_radians().sin_cos();
-        (
-            cx + px * cos - py * sen,
-            cy + px * sen + py * cos,
-        )
+        (cx + px * cos - py * sen, cy + px * sen + py * cos)
     }
 
     /// As UVs e o CSS do editor caem no mesmo pixel da foto?

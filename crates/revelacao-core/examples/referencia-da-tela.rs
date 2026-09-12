@@ -20,8 +20,8 @@
 //! node scripts/conferir-enquadramento-da-tela.mjs   # no outro repositório
 //! ```
 use image::{Rgba, RgbaImage};
-use std::path::PathBuf;
 use revelacao_core::transformacao::{uvs_do_enquadramento, Corte};
+use std::path::PathBuf;
 
 const L: u32 = 600;
 const A: u32 = 400;
@@ -31,9 +31,14 @@ fn grade() -> RgbaImage {
     for y in 0..A {
         for x in 0..L {
             let mut p = [30u8, 30, 34];
-            if y % 40 < 4 { p = [60, 120, 255] }
-            if x % 40 < 4 { p = [255, 70, 60] }
-            if (x as i64 - (L as i64 * 2 / 5)).abs() < 30 && (y as i64 - (A as i64 / 4)).abs() < 30 {
+            if y % 40 < 4 {
+                p = [60, 120, 255]
+            }
+            if x % 40 < 4 {
+                p = [255, 70, 60]
+            }
+            if (x as i64 - (L as i64 * 2 / 5)).abs() < 30 && (y as i64 - (A as i64 / 4)).abs() < 30
+            {
                 p = [80, 230, 90]
             }
             i.put_pixel(x, y, Rgba([p[0], p[1], p[2], 255]));
@@ -51,11 +56,15 @@ fn desenhar(o: &RgbaImage, corte: &Corte) -> RgbaImage {
             let (s, t) = ((i as f32 + 0.5) / L as f32, (j as f32 + 0.5) / A as f32);
             let u = uoff[0] + ux[0] * s + uy[0] * t;
             let v = uoff[1] + ux[1] * s + uy[1] * t;
-            d.put_pixel(i, j, if (0.0..1.0).contains(&u) && (0.0..1.0).contains(&v) {
-                *o.get_pixel((u * L as f32) as u32, (v * A as f32) as u32)
-            } else {
-                Rgba([0, 0, 0, 255])
-            });
+            d.put_pixel(
+                i,
+                j,
+                if (0.0..1.0).contains(&u) && (0.0..1.0).contains(&v) {
+                    *o.get_pixel((u * L as f32) as u32, (v * A as f32) as u32)
+                } else {
+                    Rgba([0, 0, 0, 255])
+                },
+            );
         }
     }
     d
@@ -75,15 +84,25 @@ fn main() {
     let pasta = pasta();
     let o = grade();
     for angulo in [0.0f32, 45.0, -45.0] {
-        let nome = if angulo == 0.0 { "0".to_string() } else { format!("{angulo}") };
-        desenhar(&o, &Corte::novo(0.3, 0.3, 0.3, 0.3, 0, angulo, false, false))
-            .save(pasta.join(format!("ref-atual-{nome}.png")))
-            .unwrap();
+        let nome = if angulo == 0.0 {
+            "0".to_string()
+        } else {
+            format!("{angulo}")
+        };
+        desenhar(
+            &o,
+            &Corte::novo(0.3, 0.3, 0.3, 0.3, 0, angulo, false, false),
+        )
+        .save(pasta.join(format!("ref-atual-{nome}.png")))
+        .unwrap();
         // 🔑 O sinal trocado, que é a hipótese a descartar: em 0° as duas são a
         // mesma conta, e é só com ângulo que elas se separam.
-        desenhar(&o, &Corte::novo(0.3, 0.3, 0.3, 0.3, 0, -angulo, false, false))
-            .save(pasta.join(format!("ref-invertido-{nome}.png")))
-            .unwrap();
+        desenhar(
+            &o,
+            &Corte::novo(0.3, 0.3, 0.3, 0.3, 0, -angulo, false, false),
+        )
+        .save(pasta.join(format!("ref-invertido-{nome}.png")))
+        .unwrap();
     }
     println!("referências em {}", pasta.display());
 }

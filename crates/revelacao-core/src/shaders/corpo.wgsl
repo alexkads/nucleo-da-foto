@@ -201,15 +201,27 @@ struct Params {
     dt_cb_vibrance: f32,
     dt_cb_grey_fulcrum: f32,
     dt_cb_contrast: f32,
+    dt_shadhi_ativo: f32,
+    dt_shadhi_radius: f32,
+    dt_shadhi_shadows: f32,
+    dt_shadhi_whitepoint: f32,
+    dt_shadhi_highlights: f32,
+    dt_shadhi_compress: f32,
+    dt_shadhi_shadows_ccorrect: f32,
+    dt_shadhi_highlights_ccorrect: f32,
+    dt_shadhi_flags: f32,
+    dt_monochrome_ativo: f32,
+    dt_monochrome_a: f32,
+    dt_monochrome_b: f32,
+    dt_monochrome_size: f32,
+    dt_monochrome_highlights: f32,
     // 🔑 Enchimento, e não campo: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
-    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 157
-    // `f32` dão 628. O Rust continua mandando 628 bytes num buffer de 640
-    // (`TAMANHO_DO_UNIFORM`); estes três nunca são lidos. Ficam DEPOIS dos 157
-    // para não deslocar nenhuma posição — e o teste que compara os nomes com o
-    // `Ajustes` ignora o que começa com `_`.
+    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 171
+    // `f32` dão 684. O Rust continua mandando 684 bytes num buffer de 688
+    // (`TAMANHO_DO_UNIFORM`); este nunca é lido. Fica DEPOIS dos 171 para não
+    // deslocar nenhuma posição — e o teste que compara os nomes com o `Ajustes`
+    // ignora o que começa com `_`.
     _enchimento_a: f32,
-    _enchimento_b: f32,
-    _enchimento_c: f32,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
@@ -593,7 +605,9 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     //
     // Desligado, nenhum dos três módulos toca o pixel — nem a ida e volta ao
     // espaço linear, que custaria arredondamento à toa.
-    if (params.dt_exposure_ativo != 0.0 || params.dt_vignette_ativo != 0.0 || params.dt_cb_ativo != 0.0) {
+    if (params.dt_exposure_ativo != 0.0 || params.dt_shadhi_ativo != 0.0
+        || params.dt_monochrome_ativo != 0.0 || params.dt_vignette_ativo != 0.0
+        || params.dt_cb_ativo != 0.0) {
         let dt_saida = dt_estagio(vec3<f32>(r, g, b), coord, dims);
         r = dt_saida.r;
         g = dt_saida.g;
