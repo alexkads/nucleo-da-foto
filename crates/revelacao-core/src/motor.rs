@@ -952,6 +952,104 @@ mod testes {
         }
     }
 
+    /// A curva por ponto age, é monótona, e no neutro devolve a foto intacta.
+    ///
+    /// # As três coisas que ela precisa provar
+    ///
+    /// 🚨 **1. Que age.** Era o maior buraco da importação de presets — 321 de
+    /// 400 comerciais usam curva por ponto —, e um campo que chega ao `uniform`
+    /// sem código que o leia já aconteceu aqui (17/ago/2026, os 46 campos).
+    ///
+    /// 🚨 **2. Que não inverte nem oscila.** É o defeito clássico de curva de
+    /// tom: spline cúbica comum passa por fora dos pontos, e dois nós quase no
+    /// mesmo nível fazem a interpolação subir acima dos dois e voltar — uma
+    /// faixa clara atravessando um degradê liso. Por isso a interpolação é
+    /// Hermite monótono (Fritsch–Carlson), e por isso este teste varre os 256
+    /// níveis com uma curva feita de propósito para oscilar.
+    ///
+    /// 🚨 **3. Que o neutro é a identidade.** A curva neutra não é zero: é a
+    /// reta `y = x`. Se ela fosse zero, toda revelação gravada antes de
+    /// 2026-09-12 abriria preta — o `serde(default)` completa o campo ausente, e
+    /// o que ele completa tem de ser "sem curva".
+    #[test]
+    fn a_curva_por_ponto_age_e_nunca_inverte() {
+        let mut motor = motor_pronto();
+        let posicao = |nome: &str| {
+            Ajustes::NOMES
+                .iter()
+                .position(|n| *n == nome)
+                .unwrap_or_else(|| panic!("`{nome}` não está em NOMES"))
+        };
+
+        // 3. O neutro devolve a rampa intacta.
+        let rampa = rampa();
+        let neutro = revelar_e_colher(&mut motor, rampa.clone(), Ajustes::default());
+        for (i, pixel) in neutro.chunks_exact(4).take(256).enumerate() {
+            assert!(
+                (pixel[0] as i32 - i as i32).abs() <= 1,
+                "a curva neutra mexeu no nível {i}: saiu {}",
+                pixel[0]
+            );
+        }
+
+        // 1. Um S no mestre muda a foto — e escurece embaixo, clareia em cima.
+        let s_forte = com_campos(&[
+            (posicao("curva_m1"), 12.0),
+            (posicao("curva_m2"), 40.0),
+            (posicao("curva_m3"), 80.0),
+            (posicao("curva_m5"), 180.0),
+            (posicao("curva_m6"), 215.0),
+            (posicao("curva_m7"), 240.0),
+        ]);
+        let curvada = revelar_e_colher(&mut motor, rampa.clone(), s_forte);
+        assert_ne!(curvada, neutro, "a curva por ponto não fez efeito nenhum");
+        assert!(
+            curvada[64 * 4] < neutro[64 * 4],
+            "o S devia escurecer o quarto de tom: {} contra {}",
+            curvada[64 * 4],
+            neutro[64 * 4]
+        );
+        assert!(
+            curvada[192 * 4] > neutro[192 * 4],
+            "o S devia clarear os três quartos: {} contra {}",
+            curvada[192 * 4],
+            neutro[192 * 4]
+        );
+
+        // 2. Monotonicidade, na curva mais hostil que cabe nos nove pontos:
+        // três nós no mesmo nível seguidos de um salto — é onde a spline comum
+        // sobe acima dos dois vizinhos e volta.
+        let degrau = com_campos(&[
+            (posicao("curva_m1"), 30.0),
+            (posicao("curva_m2"), 30.0),
+            (posicao("curva_m3"), 30.0),
+            (posicao("curva_m4"), 220.0),
+            (posicao("curva_m5"), 225.0),
+            (posicao("curva_m6"), 226.0),
+            (posicao("curva_m7"), 226.0),
+        ]);
+        let dura = revelar_e_colher(&mut motor, rampa.clone(), degrau);
+        let mut anterior = -1i32;
+        for (i, pixel) in dura.chunks_exact(4).take(256).enumerate() {
+            let v = pixel[0] as i32;
+            assert!(
+                v >= anterior - 1,
+                "a curva inverteu no nível {i}: {v} depois de {anterior}"
+            );
+            anterior = v;
+        }
+
+        // E o canal sozinho: um preset de filme levanta o preto **só no azul**.
+        let so_o_azul = com_campo(posicao("curva_b0"), 40.0);
+        let azulada = revelar_e_colher(&mut motor, rampa.clone(), so_o_azul);
+        assert!(
+            azulada[2] > neutro[2] && azulada[0] == neutro[0],
+            "o levantamento do azul devia tocar só o azul: {:?} contra {:?}",
+            &azulada[0..3],
+            &neutro[0..3]
+        );
+    }
+
     /// Os 21 controles de 2026-09-12 chegam ao shader **e fazem efeito**.
     ///
     /// # Por que este teste, e por que assim

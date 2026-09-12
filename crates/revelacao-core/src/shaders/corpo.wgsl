@@ -115,10 +115,48 @@ struct Params {
     bw_blue: f32,
     bw_purple: f32,
     bw_magenta: f32,
+    // Curva por ponto: nove alturas em x fixo, por canal. Ver `ajustes.rs`
+    // para por que são nove alturas e não pontos livres.
+    curva_m0: f32,
+    curva_m1: f32,
+    curva_m2: f32,
+    curva_m3: f32,
+    curva_m4: f32,
+    curva_m5: f32,
+    curva_m6: f32,
+    curva_m7: f32,
+    curva_m8: f32,
+    curva_r0: f32,
+    curva_r1: f32,
+    curva_r2: f32,
+    curva_r3: f32,
+    curva_r4: f32,
+    curva_r5: f32,
+    curva_r6: f32,
+    curva_r7: f32,
+    curva_r8: f32,
+    curva_g0: f32,
+    curva_g1: f32,
+    curva_g2: f32,
+    curva_g3: f32,
+    curva_g4: f32,
+    curva_g5: f32,
+    curva_g6: f32,
+    curva_g7: f32,
+    curva_g8: f32,
+    curva_b0: f32,
+    curva_b1: f32,
+    curva_b2: f32,
+    curva_b3: f32,
+    curva_b4: f32,
+    curva_b5: f32,
+    curva_b6: f32,
+    curva_b7: f32,
+    curva_b8: f32,
     // 🔑 Enchimento, e não campo: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
-    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 74
-    // `f32` dão 296. O Rust continua mandando 296 bytes num buffer de 304
-    // (`TAMANHO_DO_UNIFORM`); estes dois nunca são lidos. Ficam DEPOIS dos 74
+    // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 110
+    // `f32` dão 440. O Rust continua mandando 440 bytes num buffer de 448
+    // (`TAMANHO_DO_UNIFORM`); estes dois nunca são lidos. Ficam DEPOIS dos 110
     // para não deslocar nenhuma posição — e o teste que compara os nomes com o
     // `Ajustes` ignora o que começa com `_`.
     _enchimento_a: f32,
@@ -214,6 +252,64 @@ fn para_hsv(cor: vec3<f32>) -> vec3<f32> {
         if (h < 0.0) { h = h + 360.0; }
     }
     return vec3<f32>(h, croma / max(mx, 0.0001), mx);
+}
+
+/// Hermite **monótono** entre nove alturas igualmente espaçadas em 0–255.
+///
+/// # Por que não é spline nem reta
+///
+/// 🚨 **Spline cúbica comum oscila**, e numa curva de tom isso é visível: dois
+/// pontos vizinhos quase no mesmo nível fazem a interpolação subir acima dos
+/// dois e voltar, e o resultado é uma faixa clara atravessando um degradê liso.
+/// É o defeito clássico de curva de tom implementada com Catmull-Rom.
+///
+/// 🚨 **E reta dá faceta.** Nove pontos ligados por segmentos deixam a derivada
+/// saltar em cada nó; num céu, cada salto vira uma banda.
+///
+/// A saída é Fritsch–Carlson: a inclinação de cada nó é a média harmônica das
+/// duas secantes vizinhas, e ela vai a zero quando as secantes trocam de sinal.
+/// Isso garante que o trecho entre dois pontos **nunca saia do intervalo entre
+/// eles** — a curva não inventa um tom que nenhum dos dois nós pediu.
+fn curva_por_ponto(valor: f32, p: array<f32, 9>) -> f32 {
+    let x = clamp(valor, 0.0, 255.0) / 255.0 * 8.0;
+    let i = min(u32(floor(x)), 7u);
+    let t = x - f32(i);
+
+    // As secantes dos três trechos em volta (o passo em x é 1 nesta escala).
+    var pontos = p;
+    let y0 = pontos[i];
+    let y1 = pontos[i + 1u];
+    let d = y1 - y0;
+    let d_ant = select(d, y0 - pontos[i - 1u], i > 0u);
+    let d_prox = select(d, pontos[i + 2u] - y1, i < 7u);
+
+    // Fritsch–Carlson: zero quando as secantes se opõem, média harmônica quando
+    // concordam. É o que impede a curva de passar por fora dos dois pontos.
+    var m0 = 0.0;
+    if (d_ant * d > 0.0) { m0 = 2.0 * d_ant * d / (d_ant + d); }
+    var m1 = 0.0;
+    if (d * d_prox > 0.0) { m1 = 2.0 * d * d_prox / (d + d_prox); }
+
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    let h10 = t3 - 2.0 * t2 + t;
+    let h01 = -2.0 * t3 + 3.0 * t2;
+    let h11 = t3 - t2;
+    return clamp(h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1, 0.0, 255.0);
+}
+
+/// A curva está no neutro? Nove alturas na reta `y = x` não mexem em nada, e
+/// pular o trecho inteiro poupa 12 avaliações por pixel na foto que não a usa —
+/// que é a maioria.
+fn curva_e_neutra(p: array<f32, 9>) -> bool {
+    var pontos = p;
+    for (var i = 0u; i < 9u; i = i + 1u) {
+        if (abs(pontos[i] - f32(i) * 31.875) > 0.01) {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn luminancia(cor: vec3<f32>) -> f32 {
@@ -674,6 +770,37 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
     }
     
+    // 16. Curva por ponto — depois da paramétrica, como no Lightroom.
+    //
+    // 🚨 **Era o maior buraco da importação de presets**: 321 de 400 presets
+    // comerciais usam curva por ponto, e até 2026-09-12 ela era descartada — o
+    // preset chegava sem o pé de contraste que o define, e o operador concluía
+    // que o importador estava quebrado.
+    //
+    // 🔑 **Os canais primeiro, o mestre depois**, que é a ordem da Adobe. Um
+    // preset de filme costuma levantar o preto só no azul (a "sombra fria") e
+    // depois aplicar um S no mestre; invertida, a ordem faz o S comer o
+    // levantamento e a foto sai sem o virado de cor.
+    //
+    // ⚠️ **Os quatro são pulados quando estão na identidade.** São doze
+    // avaliações de Hermite por pixel, e a maioria das fotos não usa curva
+    // nenhuma — pagar isso em toda revelação seria desperdício puro.
+    {
+        let mestre = array<f32, 9>(params.curva_m0, params.curva_m1, params.curva_m2, params.curva_m3, params.curva_m4, params.curva_m5, params.curva_m6, params.curva_m7, params.curva_m8);
+        let vermelho = array<f32, 9>(params.curva_r0, params.curva_r1, params.curva_r2, params.curva_r3, params.curva_r4, params.curva_r5, params.curva_r6, params.curva_r7, params.curva_r8);
+        let verde = array<f32, 9>(params.curva_g0, params.curva_g1, params.curva_g2, params.curva_g3, params.curva_g4, params.curva_g5, params.curva_g6, params.curva_g7, params.curva_g8);
+        let azul = array<f32, 9>(params.curva_b0, params.curva_b1, params.curva_b2, params.curva_b3, params.curva_b4, params.curva_b5, params.curva_b6, params.curva_b7, params.curva_b8);
+
+        if (!curva_e_neutra(vermelho)) { r = curva_por_ponto(r, vermelho); }
+        if (!curva_e_neutra(verde)) { g = curva_por_ponto(g, verde); }
+        if (!curva_e_neutra(azul)) { b = curva_por_ponto(b, azul); }
+        if (!curva_e_neutra(mestre)) {
+            r = curva_por_ponto(r, mestre);
+            g = curva_por_ponto(g, mestre);
+            b = curva_por_ponto(b, mestre);
+        }
+    }
+
     // HSL: saturation, hue and luminance, per color band.
     //
     // Hue and luminance were dead until 2026-08-17: the fields existed in the

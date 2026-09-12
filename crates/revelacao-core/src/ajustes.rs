@@ -1,4 +1,4 @@
-//! Os 74 ajustes, no layout que o WGSL espera.
+//! Os 110 ajustes, no layout que o WGSL espera.
 
 use serde::{Deserialize, Serialize};
 
@@ -142,17 +142,73 @@ pub struct Ajustes {
     pub bw_blue: f32,
     pub bw_purple: f32,
     pub bw_magenta: f32,
+    // ---------------------------------------------------- Curva por ponto
+    // 🚨 **O maior buraco da importação de presets**: numa amostra de 400
+    // presets comerciais, **321 usavam curva por ponto** — e até 2026-09-12 ela
+    // era ignorada inteira, o que fazia um preset de filme chegar sem o pé de
+    // contraste que o define.
+    //
+    // 🔑 **Nove alturas em x fixo, e não pontos livres.** A revelação é gravada
+    // como um mapa plano de número por nome (é o mesmo formato do `corte_*`), e
+    // uma lista de pontos de tamanho variável não cabe nele sem inventar um
+    // segundo formato. Nove alturas cabem, não podem sair de ordem no eixo x, e
+    // o shader as interpola com Hermite monótono — que por construção não
+    // oscila entre dois pontos, o defeito clássico de spline em curva de tom.
+    //
+    // ⚠️ **O neutro não é zero: é a identidade.** O ponto `i` vale `i·255/8`,
+    // que é a reta que devolve a foto como ela entrou. Ver `Ajustes::default`.
+    // Canal mestre.
+    pub curva_m0: f32,
+    pub curva_m1: f32,
+    pub curva_m2: f32,
+    pub curva_m3: f32,
+    pub curva_m4: f32,
+    pub curva_m5: f32,
+    pub curva_m6: f32,
+    pub curva_m7: f32,
+    pub curva_m8: f32,
+    // Canal vermelho.
+    pub curva_r0: f32,
+    pub curva_r1: f32,
+    pub curva_r2: f32,
+    pub curva_r3: f32,
+    pub curva_r4: f32,
+    pub curva_r5: f32,
+    pub curva_r6: f32,
+    pub curva_r7: f32,
+    pub curva_r8: f32,
+    // Canal verde.
+    pub curva_g0: f32,
+    pub curva_g1: f32,
+    pub curva_g2: f32,
+    pub curva_g3: f32,
+    pub curva_g4: f32,
+    pub curva_g5: f32,
+    pub curva_g6: f32,
+    pub curva_g7: f32,
+    pub curva_g8: f32,
+    // Canal azul.
+    pub curva_b0: f32,
+    pub curva_b1: f32,
+    pub curva_b2: f32,
+    pub curva_b3: f32,
+    pub curva_b4: f32,
+    pub curva_b5: f32,
+    pub curva_b6: f32,
+    pub curva_b7: f32,
+    pub curva_b8: f32,
 }
 
 /// Quantos campos a struct tem — e quantos `f32` o vetor posicional carrega.
 ///
-/// ⚠️ **Eram 46 até 2026-09-06, e 53 até 2026-09-12.** A Tonalização (5) e o
+/// ⚠️ **Eram 46 até 2026-09-06, e 53 até 2026-09-12** (a Calibração, o Color
+/// Grading completo e o mixer P&B levaram a 74; a curva por ponto, a 110). A Tonalização (5) e o
 /// Grão (2) entraram primeiro; depois a Calibração de câmera (7), os eixos que
 /// faltavam do Color Grading (5) e o mixer de preto e branco (9). **Todos no
 /// fim da lista**, e não perto do que se parece com eles: a posição de um campo
 /// é o contrato com o shader, e mover `nr_luminance` para junto do grão faria
 /// toda revelação já gravada ler o campo do vizinho.
-pub const QUANTIDADE: usize = 74;
+pub const QUANTIDADE: usize = 110;
 
 /// O tamanho do buffer de `uniform`, arredondado para múltiplo de 16 bytes.
 ///
@@ -205,12 +261,65 @@ impl Default for Ajustes {
         // Color Grading abre em 50 na Adobe; em 0 as três faixas teriam borda
         // dura, e uma foto que ninguém tocou já sairia diferente.
         neutro.split_blending = 50.0;
+        // 🚨 **O quarto neutro que não é zero, e o maior deles.** A curva
+        // neutra é a IDENTIDADE — o ponto `i` devolve `i·255/8` —, e não uma
+        // reta em zero: zerada, ela apagaria a foto. Quem tem revelação
+        // gravada antes de 2026-09-12 não tem estes campos no JSON, e o
+        // `serde(default)` os completa com esta reta, que é o mesmo que "sem
+        // curva".
+        let identidade = Self::CURVA_NEUTRA;
+        neutro.curva_m0 = identidade[0];
+        neutro.curva_m1 = identidade[1];
+        neutro.curva_m2 = identidade[2];
+        neutro.curva_m3 = identidade[3];
+        neutro.curva_m4 = identidade[4];
+        neutro.curva_m5 = identidade[5];
+        neutro.curva_m6 = identidade[6];
+        neutro.curva_m7 = identidade[7];
+        neutro.curva_m8 = identidade[8];
+        neutro.curva_r0 = identidade[0];
+        neutro.curva_r1 = identidade[1];
+        neutro.curva_r2 = identidade[2];
+        neutro.curva_r3 = identidade[3];
+        neutro.curva_r4 = identidade[4];
+        neutro.curva_r5 = identidade[5];
+        neutro.curva_r6 = identidade[6];
+        neutro.curva_r7 = identidade[7];
+        neutro.curva_r8 = identidade[8];
+        neutro.curva_g0 = identidade[0];
+        neutro.curva_g1 = identidade[1];
+        neutro.curva_g2 = identidade[2];
+        neutro.curva_g3 = identidade[3];
+        neutro.curva_g4 = identidade[4];
+        neutro.curva_g5 = identidade[5];
+        neutro.curva_g6 = identidade[6];
+        neutro.curva_g7 = identidade[7];
+        neutro.curva_g8 = identidade[8];
+        neutro.curva_b0 = identidade[0];
+        neutro.curva_b1 = identidade[1];
+        neutro.curva_b2 = identidade[2];
+        neutro.curva_b3 = identidade[3];
+        neutro.curva_b4 = identidade[4];
+        neutro.curva_b5 = identidade[5];
+        neutro.curva_b6 = identidade[6];
+        neutro.curva_b7 = identidade[7];
+        neutro.curva_b8 = identidade[8];
         neutro
     }
 }
 
 impl Ajustes {
-    /// Os 74 nomes, na ordem do `uniform`.
+    /// A curva que devolve a foto como ela entrou — a reta `y = x`, amostrada
+    /// nos nove x fixos.
+    ///
+    /// 🔑 **Escrita uma vez, e lida pelo `Default` e pelo site.** Dois lugares
+    /// decidindo o que é "sem curva" dariam duas fotos diferentes para a mesma
+    /// revelação gravada.
+    pub const CURVA_NEUTRA: [f32; 9] = [
+        0.0, 31.875, 63.75, 95.625, 127.5, 159.375, 191.25, 223.125, 255.0,
+    ];
+
+    /// Os 110 nomes, na ordem do `uniform`.
     ///
     /// 🔑 É a ordem que o vetor posicional ([`Ajustes::como_vetor`]) segue, a
     /// que o `struct Params` do WGSL declara, e a que o site recebe em
@@ -290,6 +399,42 @@ impl Ajustes {
         "bw_blue",
         "bw_purple",
         "bw_magenta",
+        "curva_m0",
+        "curva_m1",
+        "curva_m2",
+        "curva_m3",
+        "curva_m4",
+        "curva_m5",
+        "curva_m6",
+        "curva_m7",
+        "curva_m8",
+        "curva_r0",
+        "curva_r1",
+        "curva_r2",
+        "curva_r3",
+        "curva_r4",
+        "curva_r5",
+        "curva_r6",
+        "curva_r7",
+        "curva_r8",
+        "curva_g0",
+        "curva_g1",
+        "curva_g2",
+        "curva_g3",
+        "curva_g4",
+        "curva_g5",
+        "curva_g6",
+        "curva_g7",
+        "curva_g8",
+        "curva_b0",
+        "curva_b1",
+        "curva_b2",
+        "curva_b3",
+        "curva_b4",
+        "curva_b5",
+        "curva_b6",
+        "curva_b7",
+        "curva_b8",
     ];
 
     /// Os 46 valores, por posição — o que a GPU recebe, como `f32`.
@@ -339,7 +484,7 @@ mod testes {
         assert_eq!(neutro.saturation, 0.0);
     }
 
-    /// O layout que vai para a GPU tem os 74 campos, de quatro bytes cada.
+    /// O layout que vai para a GPU tem os 110 campos, de quatro bytes cada.
     ///
     /// Campo a mais desloca **todos** os seguintes na leitura do shader, e o
     /// sintoma é a saturação virando nitidez.
@@ -347,12 +492,12 @@ mod testes {
     /// ⚠️ **O número do `uniform` é escrito à mão de propósito.** Derivá-lo aqui
     /// (`size_of().next_multiple_of(16)`) faria o teste concordar com qualquer
     /// mudança, inclusive com a errada — e é justamente o alinhamento de 16
-    /// bytes do WebGL2 que já derrubou este shader uma vez. 74 × 4 = 296, e o
-    /// próximo múltiplo de 16 é 304.
+    /// bytes do WebGL2 que já derrubou este shader uma vez. 110 × 4 = 440, e o
+    /// próximo múltiplo de 16 é 448.
     #[test]
     fn o_layout_tem_os_campos_de_quatro_bytes() {
         assert_eq!(std::mem::size_of::<Ajustes>(), QUANTIDADE * 4);
-        assert_eq!(TAMANHO_DO_UNIFORM, 304);
+        assert_eq!(TAMANHO_DO_UNIFORM, 448);
     }
 
     /// Os nomes do `struct Params` do WGSL, na ordem em que ele os declara.
@@ -444,7 +589,14 @@ mod testes {
         // Color Grading abre em 50, como na Adobe. Em 0 as três faixas teriam
         // borda dura e uma foto intocada já sairia diferente.
         assert_eq!(neutro[posicao("split_blending")], 50.0);
-        assert_eq!(neutro.iter().filter(|v| **v != 0.0).count(), 3);
+        // 🚨 **A curva neutra é a IDENTIDADE, e não uma reta em zero.** São
+        // oito alturas não-nulas por canal (a nona é o próprio zero), nos
+        // quatro canais: 32 valores que existem justamente para a foto sair
+        // como entrou. Zerá-los apagaria a imagem.
+        assert_eq!(neutro[posicao("curva_m8")], 255.0);
+        assert_eq!(neutro[posicao("curva_b4")], 127.5);
+        assert_eq!(neutro[posicao("curva_r0")], 0.0);
+        assert_eq!(neutro.iter().filter(|v| **v != 0.0).count(), 3 + 32);
 
         let com_matiz = Ajustes {
             hsl_green_hue: 33.0,
