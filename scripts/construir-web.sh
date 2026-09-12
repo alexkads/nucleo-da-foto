@@ -43,15 +43,16 @@ rustup target add wasm32-unknown-unknown >/dev/null
 echo "→ wasm-pack build (perfil release-web)"
 # `--profile` é o do cargo (`[profile.release-web]` no Cargo.toml do workspace);
 # não se passa `--release` junto, o wasm-pack recusa os dois.
+RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+simd128" \
 wasm-pack build crates/revelacao-web \
     --target web \
     --profile release-web \
     --out-dir "../../$SAIDA" \
     --out-name revelacao_web
 
-echo "→ wasm-opt -Oz"
+echo "→ wasm-opt -O3"
 mkdir -p "$PUBLICO" "$FONTE"
-wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
+wasm-opt -O3 --enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int \
     -o "$PUBLICO/revelacao_web_bg.wasm" "$SAIDA/revelacao_web_bg.wasm"
 cp "$SAIDA/revelacao_web.js" "$PUBLICO/revelacao_web.js"
 cp "$SAIDA/revelacao_web.d.ts" "$FONTE/revelacao_web.d.ts"
