@@ -896,6 +896,99 @@ mod testes_do_enquadramento {
         amostrar(&img, u * w - 0.5, v * h - 0.5).0
     }
 
+    /// Onde o **editor** põe o pixel, calculado como o navegador o calcula.
+    ///
+    /// # Por que um terceiro juiz
+    ///
+    /// 🚨 **`aplicar` e `uvs_do_enquadramento` podiam estar de acordo e as duas
+    /// erradas.** Elas saem da mesma conta, e um sinal trocado na origem
+    /// aparece igual nas duas — o teste ao lado passaria, o arquivo sairia
+    /// torto e a única pessoa a notar seria o dono, no balcão. Foi o que
+    /// aconteceu em 2026-09-12: o defeito estava na tela do cliente, e eu
+    /// levei a manhã comparando as duas contas que **concordavam**.
+    ///
+    /// Este juiz não vem daqui: é a composição de `transform` do CSS que o
+    /// preview do editor monta em `palco.ts` — a imagem que o operador vê
+    /// enquanto arrasta, e o único enquadramento que ele julga. Se as três
+    /// concordam, o que ele vê é o que o cliente vê e é o que o arquivo tem.
+    ///
+    /// A lista do `montarPalco` (com `inteiro: false`, que é a janela do
+    /// arquivo), na ordem em que o CSS a aplica:
+    ///
+    /// ```text
+    /// scale(e) translate(-rx,-ry) translate(cx,cy) rotate(ângulo) translate(-cx,-cy)
+    /// ```
+    ///
+    /// Aplicada a um ponto do espaço girado dá o ponto na tela; aqui ela é
+    /// **invertida**, porque o caminho do enquadramento é o de volta — do pixel
+    /// de saída ao pixel da textura. `e` não entra: a escala só decide o
+    /// tamanho na janela, e comparar em pixels da fonte a dispensa.
+    fn pelo_css_do_editor(corte: &Corte, l: u32, a: u32, s: f64, t: f64) -> (f64, f64) {
+        let (sw, sh) = corte.dimensoes_de_saida(l, a);
+        let (rx, ry, _, _) = corte.retangulo(l, a);
+        let (cx, cy) = (l as f64 / 2.0, a as f64 / 2.0);
+        // O pixel de saída, em pixels de tela sem a escala — é o que sobra da
+        // lista depois de `scale(e)`.
+        let (qx, qy) = (s * sw as f64, t * sh as f64);
+        // `translate(-rx,-ry)` desfeito, e a rotação desfeita em torno do centro.
+        let (px, py) = (qx + rx as f64 - cx, qy + ry as f64 - cy);
+        // `rotate(g)` do CSS é horário em tela (y para baixo); invertê-la é
+        // rodar por -g.
+        let (sen, cos) = (-(corte.angulo() as f64)).to_radians().sin_cos();
+        (
+            cx + px * cos - py * sen,
+            cy + px * sen + py * cos,
+        )
+    }
+
+    /// As UVs e o CSS do editor caem no mesmo pixel da foto?
+    ///
+    /// A folga é de 1 px porque `Corte::retangulo` **arredonda** e o ramo com
+    /// ângulo das UVs não (ele parte do retângulo normalizado, sem passar pelo
+    /// arredondamento) — meio pixel de cada lado. Um erro de sinal, de centro
+    /// ou de aspecto move o ponto dezenas de pixels, muito além disso.
+    fn confere_com_o_editor(corte: &Corte, caso: &str) {
+        let (l, a) = (600u32, 400u32);
+        let (lg, ag) = corte.dimensoes_giradas(l, a);
+        let uvs = uvs_do_enquadramento(l, a, corte);
+        let (ux, uy, uoff) = uvs;
+        for i in 0..=4 {
+            for j in 0..=4 {
+                let (s, t) = (i as f64 / 4.0, j as f64 / 4.0);
+                let u = (uoff[0] + ux[0] * s as f32 + uy[0] * t as f32) as f64 * lg as f64;
+                let v = (uoff[1] + ux[1] * s as f32 + uy[1] * t as f32) as f64 * ag as f64;
+                let (ex, ey) = pelo_css_do_editor(corte, lg, ag, s, t);
+                let (dx, dy) = ((u - ex).abs(), (v - ey).abs());
+                assert!(
+                    dx <= 1.0 && dy <= 1.0,
+                    "{caso}: em (s,t)=({s},{t}) as UVs levam a ({u:.2},{v:.2}) \
+                     e o preview do editor a ({ex:.2},{ey:.2}) — \
+                     diferença de ({dx:.2},{dy:.2}) px"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn o_enquadramento_das_uvs_e_o_que_o_editor_mostra() {
+        // 🚨 Os ângulos são os que o dono usou no balcão em 2026-09-12, com o
+        // retângulo que o selo de desenvolvimento registrou naquele print:
+        // `0.333,0.177 0.457×0.685`. O de -45° é o limite da faixa.
+        for angulo in [0.0, -6.1, 28.9, -37.3, -45.0, 45.0] {
+            let corte = Corte::novo(0.333, 0.177, 0.457, 0.685, 0, angulo, false, false);
+            confere_com_o_editor(&corte, &format!("retângulo do balcão a {angulo}°"));
+        }
+        // E o retângulo colado na borda, que é onde as proteções do editor o
+        // deixam: foi a hipótese do dono, e ela merece teste mesmo tendo sido
+        // descartada.
+        for angulo in [-45.0, -20.0, 20.0, 45.0] {
+            let corte = Corte::novo(0.0, 0.0, 1.0, 1.0, 0, angulo, false, false);
+            confere_com_o_editor(&corte, &format!("foto inteira a {angulo}°"));
+            let corte = Corte::novo(0.6, 0.7, 0.4, 0.3, 0, angulo, false, false);
+            confere_com_o_editor(&corte, &format!("canto inferior direito a {angulo}°"));
+        }
+    }
+
     /// O que a tela do cliente mostra tem de ser o que o arquivo tem.
     ///
     /// 🚨 É a prova do que o dono relatou em 2026-09-12: a revelação e a
