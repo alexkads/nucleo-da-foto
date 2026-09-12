@@ -732,14 +732,19 @@ pub(crate) fn uvs_do_enquadramento(
 /// só quem interpola — aqui o amostrador, no arquivo a bilinear do core.
 fn montar_uniforme(camada: &Camada, janela: (f32, f32), alfa: f32, zoom: f32) -> CamadaUniforme {
     let corte = &camada.corte;
-    let (lg, ag) = corte.dimensoes_giradas(camada.largura, camada.altura);
-    let (_rx, _ry, rw, rh) = corte.retangulo(lg, ag);
 
     // 1. Encaixe: a foto enquadrada cabe inteira na janela, sem cortar nada.
+    //
+    // 🚨 **O tamanho vem de `dimensoes_de_saida`, e não do retângulo.** Com
+    // ângulo os dois divergem — o endireitamento reamostra para a saída pedida,
+    // sem o `min` da borda —, e usar o retângulo ali deixava a foto endireitada
+    // com a proporção errada na tela do cliente enquanto o arquivo saía certo.
+    // É a outra metade do defeito de 2026-09-12; a primeira estava nas UVs.
+    let (sw, sh) = corte.dimensoes_de_saida(camada.largura, camada.altura);
     let (jw, jh) = janela;
-    let escala = (jw / rw.max(1) as f32).min(jh / rh.max(1) as f32) * zoom;
-    let largura_na_tela = rw as f32 * escala;
-    let altura_na_tela = rh as f32 * escala;
+    let escala = (jw / sw.max(1) as f32).min(jh / sh.max(1) as f32) * zoom;
+    let largura_na_tela = sw as f32 * escala;
+    let altura_na_tela = sh as f32 * escala;
 
     // 2. As UVs — a conta pura, testada em `uvs_do_enquadramento`.
     let (ux, uy, uoff) =

@@ -201,35 +201,47 @@ pub fn uvs_do_enquadramento(
     corte: &Corte,
 ) -> ([f32; 2], [f32; 2], [f32; 2]) {
     let (lg, ag) = corte.dimensoes_giradas(largura, altura);
-    let (rx, ry, rw, rh) = corte.retangulo(lg, ag);
 
-    // Do quad (0..1) para o pedaço que o retângulo marca, no espaço girado.
-    let (mut ux, mut uy, mut uoff) = (
-        [rw as f32 / lg as f32, 0.0],
-        [0.0, rh as f32 / ag as f32],
-        [rx as f32 / lg as f32, ry as f32 / ag as f32],
-    );
-
-    // O endireitamento gira em torno do centro do espaço girado, como em
-    // [`aplicar`].
-    if corte.angulo() != 0.0 {
-        let r = corte.angulo().to_radians();
-        let (sen, cos) = r.sin_cos();
-        // Em UV o espaço não é quadrado: gira em pixels e volta.
-        let gira = |v: [f32; 2]| {
-            let (x, y) = (v[0] * lg as f32, v[1] * ag as f32);
+    // 1. Do quad (0..1) ao ponto normalizado no **espaço girado** — o recorte e,
+    //    quando houver, o endireitamento.
+    let (mut ux, mut uy, mut uoff) = if corte.angulo() == 0.0 {
+        // Reto: o retângulo em pixels, como `recortar_reto` o recorta — é o
+        // arredondamento dele que decide os limites, e dividir por lg/ag depois
+        // mantém as duas contas no mesmo pixel.
+        let (rx, ry, rw, rh) = corte.retangulo(lg, ag);
+        (
+            [rw as f32 / lg as f32, 0.0],
+            [0.0, rh as f32 / ag as f32],
+            [rx as f32 / lg as f32, ry as f32 / ag as f32],
+        )
+    } else {
+        // 🚨 **Com ângulo, a conta é a de `endireitar_e_recortar`, e ela não é
+        // "girar o retângulo".**
+        //
+        // Lá, cada pixel da saída vira um ponto normalizado dentro do recorte,
+        // é centrado em 0,5, **corrigido pelo aspecto** (o espaço normalizado
+        // não é quadrado: sem isso, endireitar uma foto deitada gira demais na
+        // vertical), rotacionado por **−ângulo** e devolvido a pixel.
+        //
+        // A versão anterior girava o canto do retângulo em torno de 0,5 e
+        // reaproveitava os vetores — o que dá o mesmo resultado só quando o
+        // recorte é a foto inteira e o aspecto é 1. Era o defeito que o dono viu
+        // em 2026-09-12: o editor mostrava a foto endireitada e a tela do
+        // cliente, reta.
+        let aspecto = lg as f32 / ag as f32;
+        let (sen, cos) = (-corte.angulo().to_radians()).sin_cos();
+        let (cx, cy) = (corte.x() - 0.5, corte.y() - 0.5);
+        (
+            // ∂/∂s: o lado do recorte, girado
+            [corte.largura() * cos, corte.largura() * aspecto * sen],
+            // ∂/∂t: o outro lado, girado — o aspecto entra invertido aqui
+            [-corte.altura() * sen / aspecto, corte.altura() * cos],
             [
-                (x * cos - y * sen) / lg as f32,
-                (x * sen + y * cos) / ag as f32,
-            ]
-        };
-        let centro = [0.5, 0.5];
-        let canto = [uoff[0] - centro[0], uoff[1] - centro[1]];
-        let girado = gira(canto);
-        uoff = [girado[0] + centro[0], girado[1] + centro[1]];
-        ux = gira(ux);
-        uy = gira(uy);
-    }
+                0.5 + cx * cos - cy * sen / aspecto,
+                0.5 + cx * aspecto * sen + cy * cos,
+            ],
+        )
+    };
 
     // Giro de 90° e espelhos: uma troca de eixos e um sinal.
     let quartos = ((corte.giro_90() % 4) + 4) % 4;
@@ -843,7 +855,7 @@ mod testes {
 
 #[cfg(test)]
 mod testes_do_enquadramento {
-    use super::{aplicar, uvs_do_enquadramento, Corte};
+    use super::{amostrar, aplicar, uvs_do_enquadramento, Corte};
 
     /// Uma foto **retangular** com cada pixel identificável pela cor.
     ///
@@ -863,6 +875,13 @@ mod testes_do_enquadramento {
     }
 
     /// Amostra a textura pela UV que o shader calcularia para `(s, t)`.
+    ///
+    /// 🔑 **Interpola como a GPU, e não pega o pixel mais próximo.** O
+    /// amostrador em modo linear mistura os quatro vizinhos a partir do centro
+    /// do texel (`uv · tamanho − 0,5`), que é exatamente o que
+    /// [`amostrar`] faz no caminho com ângulo. Comparar bilinear com "vizinho
+    /// mais próximo" acusaria diferença em toda foto endireitada — e esconderia
+    /// a diferença de verdade no meio do ruído de arredondamento.
     fn pela_uv(
         origem: &image::DynamicImage,
         uvs: ([f32; 2], [f32; 2], [f32; 2]),
@@ -874,10 +893,7 @@ mod testes_do_enquadramento {
         let v = uoff[1] + ux[1] * s + uy[1] * t;
         let img = origem.to_rgba8();
         let (w, h) = (img.width() as f32, img.height() as f32);
-        // O amostrador da GPU lê o centro do pixel; aqui é o mesmo arredondamento.
-        let x = ((u * w).floor().max(0.0) as u32).min(img.width() - 1);
-        let y = ((v * h).floor().max(0.0) as u32).min(img.height() - 1);
-        img.get_pixel(x, y).0
+        amostrar(&img, u * w - 0.5, v * h - 0.5).0
     }
 
     /// O que a tela do cliente mostra tem de ser o que o arquivo tem.
@@ -886,6 +902,18 @@ mod testes_do_enquadramento {
     /// biblioteca giravam certo e a tela do cliente, não. O juiz é o
     /// `transformacao::aplicar` do core — a mesma função que recorta o JPEG.
     fn confere(corte: &Corte, caso: &str) {
+        confere_com(corte, caso, 0);
+    }
+
+    /// `folga` é quanto cada canal pode diferir.
+    ///
+    /// ⚠️ **Zero no caminho reto, e alguma folga no endireitado.** Sem ângulo as
+    /// duas contas caem no mesmo pixel e a igualdade é exata. Com ângulo, as
+    /// duas interpolam a partir de coordenadas calculadas em ordens diferentes
+    /// (a GPU em UV, o core em pixel), e o último bit não tem por que bater —
+    /// o que precisa bater é a **posição**, e um erro de posição move o pixel
+    /// inteiro, muito além da folga.
+    fn confere_com(corte: &Corte, caso: &str, folga: i32) {
         let origem = foto();
         let esperada = aplicar(&origem, corte, true).to_rgba8();
         let uvs = uvs_do_enquadramento(origem.width(), origem.height(), corte);
@@ -896,8 +924,9 @@ mod testes_do_enquadramento {
                 let t = (j as f32 + 0.5) / esperada.height() as f32;
                 let vista = pela_uv(&origem, uvs, s, t);
                 let arquivo = esperada.get_pixel(i, j).0;
-                assert_eq!(
-                    vista, arquivo,
+                let longe = (0..3).any(|c| (vista[c] as i32 - arquivo[c] as i32).abs() > folga);
+                assert!(
+                    !longe,
                     "{caso}: em ({i},{j}) a tela do cliente mostra {vista:?} e o arquivo tem {arquivo:?}"
                 );
             }
@@ -939,6 +968,30 @@ mod testes_do_enquadramento {
                 &corte(giro, false, true),
                 &format!("giro {giro} + espelho v"),
             );
+        }
+    }
+
+    #[test]
+    fn o_endireitamento_bate_com_o_arquivo() {
+        // 🚨 O caso que o dono viu em 2026-09-12: no editor a foto aparece
+        // endireitada e na tela do cliente, reta. Os testes de giro de 90°
+        // passavam porque nenhum deles tinha ângulo.
+        for grau in [-8.0, -3.0, 3.0, 8.0] {
+            let c = Corte::novo(0.1, 0.1, 0.8, 0.8, 0, grau, false, false);
+            // Folga de 1: as duas interpolam, em ordens diferentes.
+            confere_com(&c, &format!("endireitamento {grau}°"), 1);
+        }
+    }
+
+    #[test]
+    fn endireitamento_com_giro_e_espelho_bate_com_o_arquivo() {
+        // 🚨 O caso completo, e o que o balcão faz de verdade: girar um quarto
+        // de volta e endireitar o horizonte na mesma foto.
+        for giro in [0, 1, 2, 3] {
+            for espelho in [false, true] {
+                let c = Corte::novo(0.15, 0.1, 0.7, 0.75, giro, -6.0, espelho, false);
+                confere_com(&c, &format!("giro {giro} + 6° + espelho {espelho}"), 1);
+            }
         }
     }
 
