@@ -1578,6 +1578,14 @@ impl GradeParaGpu {
         }
     }
 
+    /// A grade espalhada numa imagem reduzida `passo` vezes, com o sigma espacial
+    /// devolvido à escala da imagem que o shader fatia.
+    fn de_reduzida(g: &Bilateral, passo: usize) -> Self {
+        let mut grade = Self::de(g);
+        grade.sigma_s *= passo as f32;
+        grade
+    }
+
     pub fn largura_do_atlas(&self) -> u32 {
         self.size_x * self.size_z
     }
@@ -1606,6 +1614,59 @@ pub struct GradesDoEstagio {
 /// `escala` é a razão entre esta imagem e a foto original — 1 na exportação em
 /// tamanho cheio. É ela que faz o raio de 100 px do `shadhi` significar a mesma
 /// região da foto numa cópia de trabalho de 2048 px.
+/// De quantos em quantos pixels a grade pode ser espalhada sem mudar o que diz.
+///
+/// # Por que reduzir
+///
+/// 🔑 **A grade tem uma célula a cada `sigma_s` pixels** — 100 px no `shadhi` do
+/// estilo, 20 no `monochrome`, na foto inteira. Espalhar os 24 milhões de pixels
+/// de uma foto de 6016×4016 para preencher dezenas de milhares de células custava
+/// 1,9 s por foto na exportação (medido em 2026-09-12), e é o trabalho em CPU do
+/// estágio que o navegador faz numa thread só.
+///
+/// ⚠️ **O passo fica em no máximo 1/8 da célula**, e a imagem reduzida com pelo
+/// menos 256 px no lado menor: a grade continua vendo as bordas que ela preserva,
+/// e imagem pequena (a carta dos testes, a cópia do celular) segue exata.
+fn passo_da_grade(sigma_s: f32, largura: usize, altura: usize) -> usize {
+    let pelo_raio = (sigma_s / 8.0).floor().max(1.0) as usize;
+    let pelo_tamanho = (largura.min(altura) / 256).max(1);
+    pelo_raio.min(pelo_tamanho)
+}
+
+/// A imagem reduzida `passo` vezes pela média de cada bloco, em RGB linear —
+/// onde média de luz é luz. Com `passo` 1, a própria imagem, sem cópia.
+fn reduzir(
+    px: &[Rgb],
+    largura: usize,
+    altura: usize,
+    passo: usize,
+) -> (std::borrow::Cow<'_, [Rgb]>, usize, usize) {
+    if passo <= 1 {
+        return (std::borrow::Cow::Borrowed(px), largura, altura);
+    }
+    let (lr, ar) = (largura.div_ceil(passo), altura.div_ceil(passo));
+    let mut soma = vec![[0.0f32; 3]; lr * ar];
+    let mut conta = vec![0u32; lr * ar];
+    for y in 0..altura {
+        let linha = (y / passo) * lr;
+        for x in 0..largura {
+            let i = linha + x / passo;
+            let c = px[y * largura + x];
+            soma[i][0] += c[0];
+            soma[i][1] += c[1];
+            soma[i][2] += c[2];
+            conta[i] += 1;
+        }
+    }
+    for (s, n) in soma.iter_mut().zip(&conta) {
+        let n = *n as f32;
+        s[0] /= n;
+        s[1] /= n;
+        s[2] /= n;
+    }
+    (std::borrow::Cow::Owned(soma), lr, ar)
+}
+
 pub fn grades_do_estagio(
     rgba: &[u8],
     largura: usize,
@@ -1643,13 +1704,26 @@ pub fn grades_do_estagio(
         exposure(&mut px, Exposure::de(a));
     }
 
+    let com_shadhi = a.dt_shadhi_ativo != 0.0;
     let com_monochrome = a.dt_monochrome_ativo != 0.0;
+    let sigma_shadhi = ShadowsHighlights::de(a).radius.max(0.1) * escala;
+    let sigma_monochrome = 20.0 / (1.0 / escala).max(1.0);
+    // 🔑 **Uma redução só para os dois, a do passo menor**: o `monochrome` filtra
+    // a imagem que sai do `shadhi`, e os dois têm de olhar a mesma imagem.
+    let passo = match (com_shadhi, com_monochrome) {
+        (true, true) => passo_da_grade(sigma_shadhi.min(sigma_monochrome), largura, altura),
+        (true, false) => passo_da_grade(sigma_shadhi, largura, altura),
+        (false, true) => passo_da_grade(sigma_monochrome, largura, altura),
+        (false, false) => 1,
+    };
+    let (px, largura, altura) = reduzir(&px, largura, altura, passo);
+
     // O Lab que sai do `shadhi`, quando o `monochrome` precisa dele.
     let mut lab_depois_do_shadhi: Option<Vec<Rgb>> = None;
     let mut shadhi_grade = None;
-    if a.dt_shadhi_ativo != 0.0 {
+    if com_shadhi {
         let p = ShadowsHighlights::de(a);
-        let mut g = Bilateral::nova(largura, altura, p.radius.max(0.1) * escala, 100.0);
+        let mut g = Bilateral::nova(largura, altura, sigma_shadhi / passo as f32, 100.0);
         if com_monochrome {
             // O filtro do `monochrome` é tirado da imagem **depois** do `shadhi`:
             // a conta roda aqui, sobre o Lab e a grade que já estão prontos.
@@ -1664,7 +1738,7 @@ pub fn grades_do_estagio(
             g.espalhar(&l);
             g.borrar();
         }
-        shadhi_grade = Some(GradeParaGpu::de(&g));
+        shadhi_grade = Some(GradeParaGpu::de_reduzida(&g, passo));
     }
 
     let mut monochrome_grade = None;
@@ -1681,10 +1755,10 @@ pub fn grades_do_estagio(
                 .map(|c| filtro_monochrome(tub.para_lab(*c), p, sigma2))
                 .collect(),
         };
-        let mut g = Bilateral::nova(largura, altura, 20.0 / (1.0 / escala).max(1.0), 250.0);
+        let mut g = Bilateral::nova(largura, altura, sigma_monochrome / passo as f32, 250.0);
         g.espalhar(&filtro);
         g.borrar();
-        monochrome_grade = Some(GradeParaGpu::de(&g));
+        monochrome_grade = Some(GradeParaGpu::de_reduzida(&g, passo));
     }
     GradesDoEstagio {
         shadhi: shadhi_grade,
@@ -1695,6 +1769,30 @@ pub fn grades_do_estagio(
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// O passo só reduz foto grande com grade larga — a carta dos testes e a
+    /// cópia de trabalho com o `monochrome` continuam exatas.
+    #[test]
+    fn o_passo_so_reduz_foto_grande_com_grade_larga() {
+        assert_eq!(passo_da_grade(100.0, 6016, 4016), 12);
+        assert_eq!(passo_da_grade(20.0, 6016, 4016), 2);
+        assert_eq!(passo_da_grade(100.0, 64, 40), 1);
+        assert_eq!(passo_da_grade(34.0, 2048, 1367), 4);
+        assert_eq!(passo_da_grade(6.8, 2048, 1367), 1);
+    }
+
+    #[test]
+    fn reduzir_e_a_media_de_cada_bloco_inclusive_na_borda() {
+        let px: Vec<Rgb> = (0..6).map(|i| [i as f32, 0.0, 1.0]).collect();
+        // 3×2 em blocos de 2: [0,1,3,4] e a borda [2,5].
+        let (r, lr, ar) = reduzir(&px, 3, 2, 2);
+        assert_eq!((lr, ar), (2, 1));
+        assert_eq!(r.as_ref(), &[[2.0, 0.0, 1.0], [3.5, 0.0, 1.0]]);
+        assert!(matches!(
+            reduzir(&px, 3, 2, 1).0,
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
 
     /// 🔑 **As grades do caminho rápido são as do gabarito.** O caminho rápido
     /// decodifica o sRGB por tabela, espalha só o L e tira o filtro do
