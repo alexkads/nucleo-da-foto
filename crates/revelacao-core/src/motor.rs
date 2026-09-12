@@ -984,7 +984,7 @@ mod testes {
         // 3. O neutro devolve a rampa intacta.
         let rampa = rampa();
         let neutro = revelar_e_colher(&mut motor, rampa.clone(), Ajustes::default());
-        for (i, pixel) in neutro.chunks_exact(4).take(256).enumerate() {
+        for (i, pixel) in neutro.as_chunks::<4>().0.iter().take(256).enumerate() {
             assert!(
                 (pixel[0] as i32 - i as i32).abs() <= 1,
                 "a curva neutra mexeu no nível {i}: saiu {}",
@@ -1030,7 +1030,7 @@ mod testes {
         ]);
         let dura = revelar_e_colher(&mut motor, rampa.clone(), degrau);
         let mut anterior = -1i32;
-        for (i, pixel) in dura.chunks_exact(4).take(256).enumerate() {
+        for (i, pixel) in dura.as_chunks::<4>().0.iter().take(256).enumerate() {
             let v = pixel[0] as i32;
             assert!(
                 v >= anterior - 1,

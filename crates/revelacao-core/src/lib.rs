@@ -23,6 +23,7 @@
 //! `o_fragmento_revela_o_mesmo_pixel_que_o_compute`, em [`motor`].
 
 pub mod ajustes;
+pub mod darktable;
 pub mod jpeg;
 pub mod motor;
 pub mod transformacao;
