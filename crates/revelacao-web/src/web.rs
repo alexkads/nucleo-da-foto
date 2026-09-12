@@ -44,6 +44,9 @@ pub struct Motor {
     /// A cópia de trabalho, por `Arc`: o core sobe a textura só quando o
     /// ponteiro muda, e um arrasto de slider não sobe nada.
     trabalho: Option<(Arc<Vec<u8>>, u32, u32)>,
+    /// A razão entre a cópia de trabalho e a foto original — ver
+    /// [`escala_do_original`].
+    escala_do_trabalho: f32,
     backend: &'static str,
 }
 
@@ -376,6 +379,7 @@ pub async fn abrir(canvas: web_sys::HtmlCanvasElement) -> Result<Motor, JsValue>
         formato,
         canvas,
         trabalho: None,
+        escala_do_trabalho: 1.0,
         backend,
     })
 }
@@ -407,7 +411,18 @@ impl Motor {
 
     /// Sobe a cópia de trabalho (RGBA, 4 bytes por pixel) e ajusta o canvas ao
     /// tamanho dela.
-    pub fn carregar(&mut self, largura: u32, altura: u32, rgba: &[u8]) -> Result<(), JsValue> {
+    ///
+    /// `lado_original` é o maior lado da foto original, em pixels. Os módulos
+    /// locais do darktable (shadows and highlights, monochrome) medem em
+    /// pixels **dela**: sem ele, a cópia mostra um estilo e a exportação sai
+    /// com outro. Ausente, vale a própria cópia.
+    pub fn carregar(
+        &mut self,
+        largura: u32,
+        altura: u32,
+        rgba: &[u8],
+        lado_original: Option<u32>,
+    ) -> Result<(), JsValue> {
         if largura == 0 || altura == 0 {
             return Err(erro("imagem sem tamanho"));
         }
@@ -441,6 +456,7 @@ impl Motor {
             },
         );
         self.trabalho = Some((Arc::new(rgba.to_vec()), largura, altura));
+        self.escala_do_trabalho = escala_do_original(largura, altura, lado_original);
         Ok(())
     }
 
@@ -466,6 +482,8 @@ impl Motor {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.motor
+            .definir_escala_do_original(self.escala_do_trabalho);
+        self.motor
             .desenhar(&pixels, largura, altura, &ajustes, &vista, self.formato)
             .ok_or_else(|| erro("o motor não desenhou"))?;
         quadro.present();
@@ -483,6 +501,7 @@ impl Motor {
     /// enquadramento vem **depois** — é o que `image_exporter.rs` faz no
     /// desktop. Inverter daria uma vinheta centrada no quadro cortado em vez de
     /// no original.
+    #[allow(clippy::too_many_arguments)]
     pub async fn exportar_jpeg(
         &mut self,
         largura: u32,
@@ -491,6 +510,7 @@ impl Motor {
         ajustes: &[f32],
         corte: &[f32],
         qualidade: u8,
+        lado_original: Option<u32>,
     ) -> Result<Vec<u8>, JsValue> {
         let limite = self.limite_de_textura();
         revelar_e_codificar(
@@ -502,8 +522,23 @@ impl Motor {
             ajustes,
             corte,
             qualidade,
+            lado_original,
         )
         .await
+    }
+}
+
+/// A razão entre esta imagem e a foto original, pelo maior lado.
+///
+/// 🚨 **Os raios do darktable são em pixels da foto original.** O `shadows and
+/// highlights` do estilo borra com raio de 100 px: numa exportação reduzida ao
+/// limite de textura, ou na cópia de 2048 px, isso é outro pedaço da foto, e o
+/// estilo sairia diferente do que o darktable dá. Sem `lado_original` (ou com
+/// um valor sem sentido), vale 1 — a imagem é a original.
+fn escala_do_original(largura: u32, altura: u32, lado_original: Option<u32>) -> f32 {
+    match lado_original {
+        Some(lado) if lado > 0 => (largura.max(altura) as f32 / lado as f32).min(1.0),
+        _ => 1.0,
     }
 }
 
@@ -528,6 +563,7 @@ async fn revelar_e_codificar(
     ajustes: &[f32],
     corte: &[f32],
     qualidade: u8,
+    lado_original: Option<u32>,
 ) -> Result<Vec<u8>, JsValue> {
     let corte = corte_de_vetor(corte)?;
     let ajustes = Ajustes::de_vetor(ajustes).ok_or_else(|| {
@@ -546,6 +582,7 @@ async fn revelar_e_codificar(
         )));
     }
 
+    motor.definir_escala_do_original(escala_do_original(largura, altura, lado_original));
     let pixels = Arc::new(rgba.to_vec());
     let revelada = motor
         .revelar_async(&pixels, largura, altura, &ajustes)
@@ -612,6 +649,7 @@ impl Exportador {
     ///
     /// É o mesmo caminho de `Motor::exportar_jpeg`, byte a byte: as duas
     /// chamam [`revelar_e_codificar`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn exportar_jpeg(
         &mut self,
         largura: u32,
@@ -620,6 +658,7 @@ impl Exportador {
         ajustes: &[f32],
         corte: &[f32],
         qualidade: u8,
+        lado_original: Option<u32>,
     ) -> Result<Vec<u8>, JsValue> {
         let limite = self.limite_de_textura();
         revelar_e_codificar(
@@ -631,6 +670,7 @@ impl Exportador {
             ajustes,
             corte,
             qualidade,
+            lado_original,
         )
         .await
     }

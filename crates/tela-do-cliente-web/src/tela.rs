@@ -63,6 +63,8 @@ struct Camada {
     altura: u32,
     ajustes: Ajustes,
     corte: Corte,
+    /// A razão entre estes pixels e a foto original (ver `Tela::mostrar`).
+    escala: f32,
     /// A foto **revelada**, do tamanho dela. É o que o compositor amostra; a
     /// vista é recriada para revelar porque `TextureView` não se clona, e o
     /// empréstimo de `self.camadas[i]` não sobrevive à chamada ao motor.
@@ -321,6 +323,7 @@ impl Tela {
     /// Os pixels vêm decodificados do JavaScript (RGBA), que é onde o
     /// decodificador nativo está. `ajustes` são os 53 na ordem do `uniform` e
     /// `corte` os 8 do enquadramento — os mesmos vetores do editor.
+    /// `lado_original` é o maior lado da foto original; ausente, vale a cópia.
     pub fn mostrar(
         &mut self,
         largura: u32,
@@ -328,6 +331,7 @@ impl Tela {
         rgba: &[u8],
         ajustes: &[f32],
         corte: &[f32],
+        lado_original: Option<u32>,
     ) -> Result<(), JsValue> {
         if largura == 0 || altura == 0 {
             return Err(erro("imagem sem tamanho"));
@@ -348,7 +352,14 @@ impl Tela {
         let ajustes = ajustes_de(ajustes)?;
         let corte = corte_de(corte)?;
 
-        let camada = self.nova_camada(largura, altura, rgba, ajustes, corte);
+        let mut camada = self.nova_camada(largura, altura, rgba, ajustes, corte);
+        // 🔑 Os módulos locais do darktable medem em pixels da foto original;
+        // a tela recebe a cópia de trabalho, como o editor, e precisa da mesma
+        // escala para mostrar o mesmo estilo.
+        camada.escala = match lado_original {
+            Some(lado) if lado > 0 => (largura.max(altura) as f32 / lado as f32).min(1.0),
+            _ => 1.0,
+        };
         // A que estava no ar começa a se despedir **do alfa em que está**.
         if let Some(anterior) = self.camadas.last_mut() {
             anterior.saindo = Some(Saida {
@@ -424,10 +435,11 @@ impl Tela {
             .map(|(i, _)| i)
             .collect();
         for i in sujas {
-            let (pixels, largura, altura, ajustes) = {
+            let (pixels, largura, altura, ajustes, escala) = {
                 let c = &self.camadas[i];
-                (c.pixels.clone(), c.largura, c.altura, c.ajustes)
+                (c.pixels.clone(), c.largura, c.altura, c.ajustes, c.escala)
             };
+            self.motor.definir_escala_do_original(escala);
             let vista = self.camadas[i]
                 .textura
                 .create_view(&wgpu::TextureViewDescriptor::default());
@@ -576,6 +588,7 @@ impl Tela {
         });
 
         Camada {
+            escala: 1.0,
             pixels: Arc::new(rgba.to_vec()),
             largura,
             altura,
