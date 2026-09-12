@@ -996,6 +996,24 @@ mod testes_do_enquadramento {
     }
 
     #[test]
+    fn angulo_grande_com_recorte_pequeno_e_deslocado() {
+        // 🚨 O caso do print do dono em 2026-09-12: −45° com um retângulo
+        // pequeno, longe do centro. Os testes anteriores iam até 8° com recortes
+        // grandes — e um erro que cresce com o ângulo e com a distância do
+        // centro passaria por eles inteiro.
+        for grau in [-45.0, -30.0, 22.5, 45.0] {
+            for (x, y, l, a) in [
+                (0.55, 0.55, 0.2, 0.2),
+                (0.05, 0.6, 0.25, 0.3),
+                (0.4, 0.05, 0.3, 0.2),
+            ] {
+                let c = Corte::novo(x, y, l, a, 0, grau, false, false);
+                confere_com(&c, &format!("{grau}° em ({x},{y}) {l}×{a}"), 1);
+            }
+        }
+    }
+
+    #[test]
     fn recorte_com_giro_bate_com_o_arquivo() {
         // Meio quadro, girado: recorte e giro se compõem, e é onde um erro de
         // normalização desloca a imagem em vez de distorcê-la.

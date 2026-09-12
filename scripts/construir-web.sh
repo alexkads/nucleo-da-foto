@@ -27,7 +27,16 @@
 # novo simplesmente não entra. Isso custou uma ida e volta com o dono em
 # 2026-09-12 — ele testou uma correção três vezes contra o binário velho.
 #
+#   docker compose -f docker-compose.dev.yml exec web \
+#     sh -c 'rm -rf /app/.next/dev/cache /app/.next/dev/static /app/.next/dev/server'
 #   docker compose -f docker-compose.dev.yml restart web
+#
+# 🚨 **E o `restart` sozinho não basta** — provado em 2026-09-12. Depois dele o
+# HTML do servidor já vinha com o `?v=` novo e o **chunk do cliente** continuava
+# sendo o antigo, vindo do cache do Turbopack: o selo de desenvolvimento da tela
+# do cliente mostrava o commit velho enquanto o log do contêiner mostrava o
+# novo. Só apagando `.next/dev` o chunk velho desaparece — e vale um
+# `Cmd+Shift+R` na janela, que pode ter o dela em cache.
 #
 # Em produção não acontece: a Vercel constrói do zero a cada deploy.
 set -euo pipefail
