@@ -492,38 +492,215 @@ impl Motor {
         corte: &[f32],
         qualidade: u8,
     ) -> Result<Vec<u8>, JsValue> {
-        let corte = corte_de_vetor(corte)?;
-        let ajustes = Ajustes::de_vetor(ajustes).ok_or_else(|| {
+        let limite = self.limite_de_textura();
+        revelar_e_codificar(
+            &mut self.motor,
+            limite,
+            largura,
+            altura,
+            rgba,
+            ajustes,
+            corte,
+            qualidade,
+        )
+        .await
+    }
+}
+
+/// Revela, enquadra e codifica — o miolo da exportação, **sem canvas**.
+///
+/// 🔑 **Livre da tela de propósito**: é o que permite [`Exportador`] existir, e
+/// com ele a fila de exportação rodar dentro de um Worker. O [`Motor`] da tela
+/// chama daqui também, para não haver duas versões da mesma sequência — duas
+/// ordens divergiriam num `ALTER` de shader e o arquivo deixaria de ser o que a
+/// tela mostrou.
+///
+/// 🔑 **A ordem é a da tela**: o shader devolve a foto inteira e o
+/// enquadramento vem **depois** — é o que `image_exporter.rs` faz no desktop.
+/// Inverter daria uma vinheta centrada no quadro cortado em vez de no original.
+#[allow(clippy::too_many_arguments)]
+async fn revelar_e_codificar(
+    motor: &mut revelacao_core::Motor,
+    limite: u32,
+    largura: u32,
+    altura: u32,
+    rgba: &[u8],
+    ajustes: &[f32],
+    corte: &[f32],
+    qualidade: u8,
+) -> Result<Vec<u8>, JsValue> {
+    let corte = corte_de_vetor(corte)?;
+    let ajustes = Ajustes::de_vetor(ajustes).ok_or_else(|| {
+        erro(format!(
+            "esperava {} ajustes, recebi {}",
+            revelacao_core::QUANTIDADE,
+            ajustes.len()
+        ))
+    })?;
+    if rgba.len() != (largura as usize) * (altura as usize) * 4 {
+        return Err(erro("os bytes não batem com largura × altura × 4"));
+    }
+    if largura > limite || altura > limite {
+        return Err(erro(format!(
+            "{largura}×{altura} passa do limite de textura deste dispositivo ({limite} px)"
+        )));
+    }
+
+    let pixels = Arc::new(rgba.to_vec());
+    let revelada = motor
+        .revelar_async(&pixels, largura, altura, &ajustes)
+        .await
+        .ok_or_else(|| erro("a GPU não devolveu a imagem revelada"))?;
+    drop(pixels);
+
+    let enquadrada = revelacao_core::transformacao::aplicar(&revelada, &corte, true);
+    drop(revelada);
+
+    revelacao_core::jpeg::codificar(&enquadrada, qualidade.clamp(1, 100))
+        .map_err(|e| erro(format!("o JPEG não codificou: {e}")))
+}
+
+/// O motor **sem tela**: revela e codifica, não desenha.
+///
+/// # Por que ele existe
+///
+/// 🔑 **Para a exportação sair da frente do operador.** No balcão o cliente
+/// está escolhendo as fotos enquanto o pós-venda salva as anteriores; revelar e
+/// codificar 24 MP segura a thread principal por segundos, e é a mesma thread
+/// que desenha a galeria que o cliente está olhando. Com este motor dentro de
+/// um Worker, o trabalho acontece no tempo em que o cliente decide — que é como
+/// o Lightroom exporta.
+///
+/// # Como ele consegue, se não há `<canvas>` num Worker
+///
+/// 🚨 **A superfície nunca foi necessária para exportar.** O [`Motor`] da tela
+/// guarda uma porque o *preview* desenha nela; `revelar_async` não a toca — ele
+/// renderiza para textura e lê de volta. Então:
+///
+/// - **WebGPU** dispensa canvas por inteiro: `request_adapter` sem
+///   `compatible_surface` já devolve o adaptador, e é só pedir o dispositivo.
+/// - **WebGL2** não: o backend nasce de um contexto de canvas, e sem superfície
+///   `request_adapter` responde `None` num navegador que tem WebGL2 de sobra
+///   (é a mesma armadilha documentada em [`abrir`]). A saída é um
+///   `OffscreenCanvas` de 1×1 — que **existe dentro do Worker**, ao contrário
+///   de `document.createElement`. Ninguém desenha nele; ele é o passaporte do
+///   adaptador.
+#[wasm_bindgen]
+pub struct Exportador {
+    motor: revelacao_core::Motor,
+    backend: &'static str,
+}
+
+#[wasm_bindgen]
+impl Exportador {
+    /// O backend que respondeu: `webgpu` ou `webgl`.
+    pub fn backend(&self) -> String {
+        self.backend.to_string()
+    }
+
+    /// O maior lado que este dispositivo aceita numa textura.
+    ///
+    /// ⚠️ **Pode ser diferente do limite do motor da tela** — é outro
+    /// adaptador, e num navegador sem WebGPU o software dá 8192 onde a GPU dava
+    /// 16384. Quem enfileira precisa perguntar a **este**, senão manda uma foto
+    /// que a fila não consegue revelar.
+    pub fn limite_de_textura(&self) -> u32 {
+        self.motor.limites().max_texture_dimension_2d
+    }
+
+    /// Revela a foto inteira com estes ajustes e devolve o JPEG.
+    ///
+    /// É o mesmo caminho de `Motor::exportar_jpeg`, byte a byte: as duas
+    /// chamam [`revelar_e_codificar`].
+    pub async fn exportar_jpeg(
+        &mut self,
+        largura: u32,
+        altura: u32,
+        rgba: &[u8],
+        ajustes: &[f32],
+        corte: &[f32],
+        qualidade: u8,
+    ) -> Result<Vec<u8>, JsValue> {
+        let limite = self.limite_de_textura();
+        revelar_e_codificar(
+            &mut self.motor,
+            limite,
+            largura,
+            altura,
+            rgba,
+            ajustes,
+            corte,
+            qualidade,
+        )
+        .await
+    }
+}
+
+/// Abre um [`Exportador`] — dentro de um Worker, ou fora dele.
+///
+/// A negociação é a de [`abrir`], pelo mesmo motivo e na mesma ordem: pergunta
+/// ao WebGPU **sem** tocar em canvas nenhum, e só cai para WebGL2 quando ele não
+/// responde.
+#[wasm_bindgen]
+pub async fn abrir_sem_tela() -> Result<Exportador, JsValue> {
+    console_error_panic_hook::set_once();
+
+    let sem_superficie = wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    };
+
+    let instancia = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::BROWSER_WEBGPU,
+        ..Default::default()
+    });
+
+    let (adaptador, backend) = match instancia.request_adapter(&sem_superficie).await {
+        Some(adaptador) => (adaptador, "webgpu"),
+        None => {
+            let instancia = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::GL,
+                ..Default::default()
+            });
+            // 1×1 porque ninguém desenha nele: o que se quer é o contexto que
+            // faz o adaptador WebGL2 existir.
+            let tela = web_sys::OffscreenCanvas::new(1, 1)
+                .map_err(|e| erro(format!("o Worker não deu um OffscreenCanvas: {e:?}")))?;
+            let superficie = instancia
+                .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(tela))
+                .map_err(|e| erro(format!("o OffscreenCanvas não virou superfície: {e}")))?;
+            let adaptador = instancia
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    compatible_surface: Some(&superficie),
+                    ..sem_superficie
+                })
+                .await
+                .ok_or_else(|| erro("nenhum adaptador de GPU: nem WebGPU nem WebGL2"))?;
+            // A superfície fica para trás de propósito: ela existiu para o
+            // adaptador nascer, e nada mais é desenhado nela.
+            (adaptador, "webgl")
+        }
+    };
+
+    let info = adaptador.get_info();
+    web_sys::console::log_1(&JsValue::from_str(&format!(
+        "[Revelação] exportador: {} ({backend}, {:?})",
+        info.name, info.device_type
+    )));
+
+    // Os limites são os do adaptador, como em `abrir` — `Limits::default()` é o
+    // piso de uma GPU de verdade e o adaptador de software não o alcança.
+    let limites = adaptador.limits();
+    let motor = revelacao_core::Motor::abrir_com(&adaptador, Entrada::Fragmento, limites)
+        .await
+        .map_err(|e| {
             erro(format!(
-                "esperava {} ajustes, recebi {}",
-                revelacao_core::QUANTIDADE,
-                ajustes.len()
+                "o adaptador respondeu, mas o dispositivo não abriu: {e}"
             ))
         })?;
-        if rgba.len() != (largura as usize) * (altura as usize) * 4 {
-            return Err(erro("os bytes não batem com largura × altura × 4"));
-        }
-        let limite = self.limite_de_textura();
-        if largura > limite || altura > limite {
-            return Err(erro(format!(
-                "{largura}×{altura} passa do limite de textura deste dispositivo ({limite} px)"
-            )));
-        }
 
-        let pixels = Arc::new(rgba.to_vec());
-        let revelada = self
-            .motor
-            .revelar_async(&pixels, largura, altura, &ajustes)
-            .await
-            .ok_or_else(|| erro("a GPU não devolveu a imagem revelada"))?;
-        drop(pixels);
-
-        let enquadrada = revelacao_core::transformacao::aplicar(&revelada, &corte, true);
-        drop(revelada);
-
-        revelacao_core::jpeg::codificar(&enquadrada, qualidade.clamp(1, 100))
-            .map_err(|e| erro(format!("o JPEG não codificou: {e}")))
-    }
+    Ok(Exportador { motor, backend })
 }
 
 impl Motor {
