@@ -173,6 +173,177 @@ impl Corte {
             )
         }
     }
+
+    /// O quadro do arquivo que sai, visto do pixel **revelado** — onde cada
+    /// pixel da foto inteira cai dentro do recorte.
+    ///
+    /// # Por que existe
+    ///
+    /// 🚨 **A vinheta é do recorte, e o shader revela a foto inteira.** O
+    /// enquadramento vem depois da revelação ([`aplicar`]), e é bom que venha:
+    /// as grades bilaterais do `shadows and highlights` e a vizinhança do ruído
+    /// e da nitidez leem a foto inteira, e a prévia do editor do site desenha a
+    /// foto inteira com o recorte feito por CSS. Mas a vinheta calculada sobre o
+    /// quadro inteiro ficava centrada na foto e com a proporção dela: numa foto
+    /// 3:2 recortada em 3:4, as laterais do recorte saíam limpas e só o topo e a
+    /// base escureciam (dono, 2026-09-13: *"as vinhetas não estão respeitando o
+    /// formato do corte"*). No darktable o `vignette` vem **depois** do `crop`
+    /// no pipeline, e no Lightroom a vinheta que o preset usa se chama
+    /// *post-crop*.
+    ///
+    /// 🔑 **Então a ordem fica, e a vinheta recebe o quadro.** Espelhos, giro de
+    /// 90°, endireitamento e recorte são todos afins, e a composição deles
+    /// também: seis números levam o pixel `(x, y)` da foto revelada ao pixel
+    /// `(X, Y)` do arquivo, que tem [`Quadro::largura`] × [`Quadro::altura`].
+    ///
+    /// ⚠️ **É o inverso exato de [`aplicar`]**, e não uma aproximação: sem
+    /// ângulo, `(X, Y)` é o índice inteiro do pixel no arquivo; com ângulo, é a
+    /// conta de `endireitar_e_recortar` desfeita passo a passo. Quem prende é
+    /// `o_quadro_devolve_o_pixel_que_o_arquivo_tem`.
+    ///
+    /// Sem enquadramento é a identidade com as dimensões da própria foto — e a
+    /// vinheta sai bit a bit a de antes.
+    pub fn quadro(&self, largura: u32, altura: u32) -> Quadro {
+        if e_identidade(self) {
+            return Quadro::inteiro(largura, altura);
+        }
+
+        // Da foto revelada ao espaço girado: espelhos, depois o giro — a ordem
+        // de `espelhar_e_girar`, pixel a pixel como o `image` os copia.
+        let (mut l, mut a) = (largura as f64, altura as f64);
+        let mut m = IDENTIDADE;
+        if self.espelho_h {
+            m = compor([-1.0, 0.0, l - 1.0, 0.0, 1.0, 0.0], m);
+        }
+        if self.espelho_v {
+            m = compor([1.0, 0.0, 0.0, 0.0, -1.0, a - 1.0], m);
+        }
+        match self.giro_90.rem_euclid(4) {
+            // `rotate90`: (x, y) → (a − 1 − y, x), e os lados trocam.
+            1 => {
+                m = compor([0.0, -1.0, a - 1.0, 1.0, 0.0, 0.0], m);
+                std::mem::swap(&mut l, &mut a);
+            }
+            2 => m = compor([-1.0, 0.0, l - 1.0, 0.0, -1.0, a - 1.0], m),
+            // `rotate270`: (x, y) → (y, l − 1 − x), e os lados trocam.
+            3 => {
+                m = compor([0.0, 1.0, 0.0, -1.0, 0.0, l - 1.0], m);
+                std::mem::swap(&mut l, &mut a);
+            }
+            _ => {}
+        }
+
+        let (sw, sh) = self.dimensoes_de_saida(largura, altura);
+        let do_girado: Afim = if self.angulo == 0.0 {
+            // Reto: o arquivo é uma cópia do retângulo, pixel por pixel.
+            let (rx, ry, _, _) = self.retangulo(l as u32, a as u32);
+            [1.0, 0.0, -(rx as f64), 0.0, 1.0, -(ry as f64)]
+        } else {
+            // Endireitado: `endireitar_e_recortar` ao contrário. Lá o pixel
+            // `(i, j)` do arquivo vira ponto normalizado no recorte, é corrigido
+            // pelo aspecto, girado por −ângulo e devolvido a pixel com meio pixel
+            // de deslocamento; aqui cada passo é desfeito, do último ao primeiro.
+            let aspecto = l / a;
+            let (sen, cos) = (-(self.angulo as f64).to_radians()).sin_cos();
+            let (cx, cy) = (self.x as f64, self.y as f64);
+            let (cw, ch) = (self.largura as f64, self.altura as f64);
+            let (swf, shf) = (sw as f64, sh as f64);
+            let volta = |xg: f64, yg: f64| {
+                let rx = ((xg + 0.5) / l - 0.5) * aspecto;
+                let ry = (yg + 0.5) / a - 0.5;
+                // A rotação inversa é a transposta da de lá.
+                let px = rx * cos + ry * sen;
+                let py = -rx * sen + ry * cos;
+                let (fx, fy) = (px / aspecto + 0.5, py + 0.5);
+                ((fx - cx) / cw * swf - 0.5, (fy - cy) / ch * shf - 0.5)
+            };
+            // A conta é afim: três pontos a determinam inteira.
+            let (x0, y0) = volta(0.0, 0.0);
+            let (x1, y1) = volta(1.0, 0.0);
+            let (x2, y2) = volta(0.0, 1.0);
+            [x1 - x0, x2 - x0, x0, y1 - y0, y2 - y0, y0]
+        };
+        let m = compor(do_girado, m);
+
+        Quadro {
+            largura: sw as f32,
+            altura: sh as f32,
+            m: m.map(|v| v as f32),
+        }
+    }
+}
+
+/// Uma transformação afim do plano: `[a, b, c, d, e, f]` leva `(x, y)` a
+/// `(a·x + b·y + c, d·x + e·y + f)`. Em `f64` enquanto se compõe, para o
+/// arredondamento só acontecer uma vez, no fim.
+type Afim = [f64; 6];
+
+const IDENTIDADE: Afim = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+
+/// `depois ∘ antes`: primeiro `antes`, depois `depois`.
+fn compor(depois: Afim, antes: Afim) -> Afim {
+    let [a, b, c, d, e, f] = depois;
+    let [p, q, r, s, t, u] = antes;
+    [
+        a * p + b * s,
+        a * q + b * t,
+        a * r + b * u + c,
+        d * p + e * s,
+        d * q + e * t,
+        d * r + e * u + f,
+    ]
+}
+
+/// O quadro do arquivo que sai, visto do pixel revelado — ver [`Corte::quadro`].
+///
+/// É o que as duas vinhetas do shader recebem (`QuadroDeSaida` no WGSL), e o
+/// que a vinheta do darktable em CPU recebe
+/// ([`crate::darktable::vignette_no_quadro`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Quadro {
+    /// O tamanho do arquivo que sai, em pixels — [`Corte::dimensoes_de_saida`].
+    pub largura: f32,
+    pub altura: f32,
+    /// `X = m[0]·x + m[1]·y + m[2]` e `Y = m[3]·x + m[4]·y + m[5]`: do pixel da
+    /// foto revelada ao pixel do arquivo.
+    pub m: [f32; 6],
+}
+
+impl Quadro {
+    /// A foto sem enquadramento: a identidade, com as dimensões dela.
+    pub fn inteiro(largura: u32, altura: u32) -> Self {
+        Self {
+            largura: largura as f32,
+            altura: altura as f32,
+            m: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        }
+    }
+
+    /// Onde o pixel `(x, y)` da foto revelada cai no arquivo.
+    ///
+    /// 🔑 **A conta é a do WGSL, na mesma ordem** (`no_quadro`, em
+    /// `corpo.wgsl`). Na identidade, `1·x + 0·y + 0` é `x` exato — e é isso que
+    /// deixa a vinheta sem enquadramento bit a bit a de antes.
+    pub fn no_quadro(&self, x: f32, y: f32) -> (f32, f32) {
+        let m = &self.m;
+        (m[0] * x + m[1] * y + m[2], m[3] * x + m[4] * y + m[5])
+    }
+
+    /// Como a GPU recebe: duas linhas `vec4`, `[m0, m1, m2, largura]` e
+    /// `[m3, m4, m5, altura]`.
+    pub fn para_gpu(&self) -> [f32; 8] {
+        let m = &self.m;
+        [
+            m[0],
+            m[1],
+            m[2],
+            self.largura,
+            m[3],
+            m[4],
+            m[5],
+            self.altura,
+        ]
+    }
 }
 
 /// As UVs que levam do quad da tela ao pixel da textura — o enquadramento
@@ -1111,5 +1282,143 @@ mod testes_do_enquadramento {
             let c = Corte::novo(0.25, 0.25, 0.5, 0.5, giro, 0.0, false, false);
             confere(&c, &format!("recorte + giro {giro}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod testes_do_quadro {
+    use super::{aplicar, Corte, Quadro};
+    use image::{DynamicImage, Rgba, RgbaImage};
+
+    /// Quantos níveis de cor cada coluna e cada linha andam em [`enderecada`].
+    const PASSO_X: u32 = 4;
+    const PASSO_Y: u32 = 6;
+
+    /// Uma foto em que cada pixel diz de onde veio: vermelho conta a coluna,
+    /// verde conta a linha. 64×40 — retangular, pelo mesmo motivo de
+    /// `testes_do_enquadramento::foto`: num quadrado, trocar os eixos do giro
+    /// daria certo por acidente.
+    fn enderecada() -> DynamicImage {
+        DynamicImage::ImageRgba8(RgbaImage::from_fn(64, 40, |x, y| {
+            Rgba([(x * PASSO_X) as u8, (y * PASSO_Y) as u8, 0, 255])
+        }))
+    }
+
+    /// 🚨 **O quadro é o inverso exato do enquadramento.**
+    ///
+    /// É o que as vinhetas usam para se medir no recorte sem que a foto seja
+    /// recortada antes de revelar. Se ele errasse um espelho ou um giro, a
+    /// vinheta sairia deslocada no arquivo — e nada falharia, só ficaria feio.
+    /// O juiz é [`aplicar`], a função que recorta o JPEG: para cada pixel do
+    /// arquivo, a cor diz de que pixel da foto ele veio, e o quadro tem de
+    /// levar esse pixel de volta ao mesmo lugar do arquivo.
+    #[test]
+    fn o_quadro_devolve_o_pixel_que_o_arquivo_tem() {
+        let origem = enderecada();
+        let casos = [
+            (
+                "recorte 3:4 no centro",
+                Corte::novo(0.25, 0.0, 0.5, 1.0, 0, 0.0, false, false),
+            ),
+            (
+                "recorte deslocado",
+                Corte::novo(0.5, 0.25, 0.4, 0.5, 0, 0.0, false, false),
+            ),
+            (
+                "giro 90 com recorte",
+                Corte::novo(0.1, 0.2, 0.5, 0.6, 1, 0.0, false, false),
+            ),
+            (
+                "giro 180 com espelho h",
+                Corte::novo(0.0, 0.25, 0.8, 0.5, 2, 0.0, true, false),
+            ),
+            (
+                "giro 270 com espelho v",
+                Corte::novo(0.3, 0.1, 0.6, 0.7, 3, 0.0, false, true),
+            ),
+            (
+                "os dois espelhos, foto inteira",
+                Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, true, true),
+            ),
+        ];
+        for (rotulo, corte) in casos {
+            let arquivo = aplicar(&origem, &corte, true).to_rgba8();
+            let quadro = corte.quadro(64, 40);
+            assert_eq!(
+                (quadro.largura, quadro.altura),
+                (arquivo.width() as f32, arquivo.height() as f32),
+                "`{rotulo}`: o quadro tem de ter o tamanho do arquivo"
+            );
+            for (i, j, p) in arquivo.enumerate_pixels() {
+                let (x, y) = (p.0[0] as u32 / PASSO_X, p.0[1] as u32 / PASSO_Y);
+                assert_eq!(
+                    quadro.no_quadro(x as f32, y as f32),
+                    (i as f32, j as f32),
+                    "`{rotulo}`: o pixel ({x},{y}) da foto está em ({i},{j}) no arquivo"
+                );
+            }
+        }
+    }
+
+    /// Com ângulo o arquivo **interpola**, e o quadro tem de cair na posição
+    /// interpolada.
+    ///
+    /// ⚠️ **Folga de meio pixel**, e só por arredondamento: a cor de cada pixel
+    /// do arquivo é a posição de origem arredondada a um nível (3 por coluna, 5
+    /// por linha), o que dá no máximo 0,17 px de erro. Um sinal trocado na
+    /// rotação, um aspecto esquecido ou o centro errado movem o ponto dezenas de
+    /// pixels.
+    #[test]
+    fn com_angulo_o_quadro_desfaz_o_endireitamento() {
+        let (w, h) = (80u32, 48u32);
+        let origem =
+            DynamicImage::ImageRgba8(RgbaImage::from_fn(w, h, |x, y| {
+                Rgba([(x * 3) as u8, (y * 5) as u8, 0, 255])
+            }));
+        // Retângulos que, girados, continuam dentro da foto: fora dela o
+        // arquivo gruda na borda, e a cor deixaria de dizer a posição.
+        let casos = [
+            (
+                "8° no meio",
+                Corte::novo(0.2, 0.2, 0.6, 0.6, 0, 8.0, false, false),
+            ),
+            (
+                "−12° com giro de 90 e espelho",
+                Corte::novo(0.25, 0.2, 0.5, 0.6, 1, -12.0, true, false),
+            ),
+            (
+                "30° fora do centro",
+                Corte::novo(0.45, 0.4, 0.3, 0.3, 0, 30.0, false, false),
+            ),
+        ];
+        for (rotulo, corte) in casos {
+            let arquivo = aplicar(&origem, &corte, true).to_rgba8();
+            let quadro = corte.quadro(w, h);
+            assert_eq!(
+                (quadro.largura, quadro.altura),
+                (arquivo.width() as f32, arquivo.height() as f32),
+                "`{rotulo}`: o quadro tem de ter o tamanho do arquivo"
+            );
+            for (i, j, p) in arquivo.enumerate_pixels() {
+                let (x, y) = (p.0[0] as f32 / 3.0, p.0[1] as f32 / 5.0);
+                let (qi, qj) = quadro.no_quadro(x, y);
+                assert!(
+                    (qi - i as f32).abs() <= 0.5 && (qj - j as f32).abs() <= 0.5,
+                    "`{rotulo}`: o arquivo leu ({x:.2},{y:.2}) da foto em ({i},{j}), \
+                     e o quadro leva esse ponto a ({qi:.2},{qj:.2})"
+                );
+            }
+        }
+    }
+
+    /// Sem enquadramento, o quadro é a identidade com o tamanho da foto — e com
+    /// a mesma folga de [`Corte::e_inteiro`], para a foto que voltou do banco
+    /// com `0.99999`.
+    #[test]
+    fn sem_enquadramento_o_quadro_e_a_identidade() {
+        assert_eq!(Corte::inteiro().quadro(120, 80), Quadro::inteiro(120, 80));
+        let quase = Corte::novo(0.00001, 0.0, 0.99999, 1.0, 0, 0.0, false, false);
+        assert_eq!(quase.quadro(120, 80), Quadro::inteiro(120, 80));
+        assert_eq!(Quadro::inteiro(120, 80).no_quadro(7.0, 3.0), (7.0, 3.0));
     }
 }

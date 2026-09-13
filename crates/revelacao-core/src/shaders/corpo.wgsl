@@ -227,6 +227,38 @@ struct Params {
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
+// O quadro do arquivo que sai, visto do pixel revelado — `Quadro::para_gpu`.
+//
+// 🔑 **É o que deixa as vinhetas no recorte.** O shader revela a foto inteira e
+// o enquadramento vem depois (`transformacao::aplicar`); as duas vinhetas — a
+// de lente e a do darktable — levam o pixel a este quadro antes de medir
+// centro, proporção e escala. Sem enquadramento, é a identidade com as
+// dimensões da foto, e as duas saem bit a bit as de antes.
+struct QuadroDeSaida {
+    // m0, m1, m2, largura do arquivo
+    linha_x: vec4<f32>,
+    // m3, m4, m5, altura do arquivo
+    linha_y: vec4<f32>,
+}
+
+@group(0) @binding(6) var<uniform> quadro_de_saida: QuadroDeSaida;
+
+/// Onde o pixel `coord` da foto revelada cai no arquivo — `Quadro::no_quadro`,
+/// na mesma ordem de operações.
+fn no_quadro(coord: vec2<u32>) -> vec2<f32> {
+    let x = f32(coord.x);
+    let y = f32(coord.y);
+    return vec2<f32>(
+        quadro_de_saida.linha_x.x * x + quadro_de_saida.linha_x.y * y + quadro_de_saida.linha_x.z,
+        quadro_de_saida.linha_y.x * x + quadro_de_saida.linha_y.y * y + quadro_de_saida.linha_y.z,
+    );
+}
+
+/// O tamanho do arquivo que sai, em pixels.
+fn tamanho_do_quadro() -> vec2<f32> {
+    return vec2<f32>(quadro_de_saida.linha_x.w, quadro_de_saida.linha_y.w);
+}
+
 /// A cor pura de um matiz em graus, em 0.0–1.0 — saturação cheia, meio-tom.
 ///
 /// É o mesmo `c`/`x`/`m` da conversão HSL do fim deste arquivo, com `sat = 1.0`
@@ -608,7 +640,7 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     if (params.dt_exposure_ativo != 0.0 || params.dt_shadhi_ativo != 0.0
         || params.dt_monochrome_ativo != 0.0 || params.dt_vignette_ativo != 0.0
         || params.dt_cb_ativo != 0.0) {
-        let dt_saida = dt_estagio(vec3<f32>(r, g, b), coord, dims);
+        let dt_saida = dt_estagio(vec3<f32>(r, g, b), coord);
         r = dt_saida.r;
         g = dt_saida.g;
         b = dt_saida.b;
@@ -1188,9 +1220,16 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     // darkened corners into highlights, shadows and HSL — the band a pixel falls
     // into would depend on its position in the frame, and two pixels of the same
     // color would be treated as different colors.
+    //
+    // 🔑 **Medida no quadro do arquivo que sai, e não no da foto revelada**
+    // (`no_quadro`). É a vinheta *post-crop* do Lightroom — o `PostCropVignette`
+    // que os presets trazem —, e pós-corte quer dizer relativa ao recorte: numa
+    // foto 3:2 recortada em 3:4, medi-la na foto inteira deixava as laterais do
+    // recorte limpas (dono, 2026-09-13). Sem enquadramento o quadro é a
+    // identidade, e a conta é a de antes.
     if (params.lens_vignette_amount != 0.0) {
-        let centro = vec2<f32>(f32(dims.x), f32(dims.y)) * 0.5;
-        let aqui = vec2<f32>(f32(coord.x), f32(coord.y));
+        let centro = tamanho_do_quadro() * 0.5;
+        let aqui = no_quadro(coord);
         // 1.0 at the corner, 0.0 at the center.
         let distancia = length(aqui - centro) / max(length(centro), 1.0);
 

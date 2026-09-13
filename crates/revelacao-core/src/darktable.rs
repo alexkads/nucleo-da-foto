@@ -36,6 +36,7 @@
 
 use std::f32::consts::PI;
 
+use crate::transformacao::Quadro;
 use crate::Ajustes;
 
 /// Um pixel no espaço de trabalho: RGB linear Rec.2020, branco D50.
@@ -368,13 +369,42 @@ pub struct Vignette {
     pub unbound: bool,
 }
 
-/// `src/iop/vignette.c:694–841`, sem pontilhamento (desligado no estilo).
+/// `src/iop/vignette.c:694–841`, sem pontilhamento (desligado no estilo), sobre
+/// a foto **sem enquadramento** — ver [`vignette_no_quadro`].
 ///
 /// 🔑 **Brilho positivo SOMA, negativo multiplica** (`vignette.c:816–827`). É o
 /// que permite a vinheta branca do `RecordarFotos P&B`, e o que o nosso controle
 /// de vinheta não faz.
 pub fn vignette(pixels: &mut [Rgb], largura: usize, altura: usize, p: Vignette) {
-    let (w, h) = (largura as f32, altura as f32);
+    vignette_no_quadro(
+        pixels,
+        largura,
+        altura,
+        p,
+        &Quadro::inteiro(largura as u32, altura as u32),
+    );
+}
+
+/// A vinheta medida no **quadro do arquivo que sai**, e não no da foto revelada.
+///
+/// 🚨 **No darktable o `vignette` vem depois do `crop`**: centro, proporção
+/// automática e escala são as do recorte, porque o buffer que chega ao módulo
+/// já é o recortado. Aqui a foto é revelada inteira e recortada depois
+/// ([`crate::transformacao::aplicar`]), então cada pixel é levado ao quadro
+/// ([`Quadro::no_quadro`]) antes da conta — e a conta é, linha a linha, a de
+/// antes. Sem isto, uma foto 3:2 recortada em 3:4 recebia a vinheta da foto
+/// inteira: laterais limpas, topo e base escuros (dono, 2026-09-13).
+///
+/// `largura` e `altura` são as da foto revelada (o tamanho de `pixels`); o
+/// tamanho que a vinheta enxerga é o do quadro.
+pub fn vignette_no_quadro(
+    pixels: &mut [Rgb],
+    largura: usize,
+    altura: usize,
+    p: Vignette,
+    quadro: &Quadro,
+) {
+    let (w, h) = (quadro.largura, quadro.altura);
     let centro = [
         w * 0.5 + p.center[0] * w / 2.0,
         h * 0.5 + p.center[1] * h / 2.0,
@@ -398,9 +428,10 @@ pub fn vignette(pixels: &mut [Rgb], largura: usize, altura: usize, p: Vignette) 
 
     for j in 0..altura {
         for i in 0..largura {
+            let (x, y) = quadro.no_quadro(i as f32, j as f32);
             let pv = [
-                (i as f32 * xscale - centro_escalado[0]).abs(),
-                (j as f32 * yscale - centro_escalado[1]).abs(),
+                (x * xscale - centro_escalado[0]).abs(),
+                (y * yscale - centro_escalado[1]).abs(),
             ];
             let cplen = (pv[0].powf(exp1) + pv[1].powf(exp1)).powf(exp2);
             let mut peso = 0.0;
@@ -2098,6 +2129,254 @@ mod testes {
             "o canto foi em direção ao branco: {:?}",
             px[0]
         );
+    }
+
+    /// A conta de [`vignette`] **como era até 2026-09-13**, antes do quadro —
+    /// congelada aqui, linha a linha, como gabarito.
+    ///
+    /// 🔑 É o que prova que sem enquadramento nada mudou: comparar `vignette`
+    /// com `vignette_no_quadro` provaria só que uma chama a outra.
+    fn vinheta_de_antes(pixels: &mut [Rgb], largura: usize, altura: usize, p: Vignette) {
+        let (w, h) = (largura as f32, altura as f32);
+        let centro = [
+            w * 0.5 + p.center[0] * w / 2.0,
+            h * 0.5 + p.center[1] * h / 2.0,
+        ];
+        let (xscale, yscale) = if p.autoratio {
+            (2.0 / w, 2.0 / h)
+        } else {
+            let base = 2.0 / w.max(h);
+            if p.whratio <= 1.0 {
+                (base / p.whratio, base)
+            } else {
+                (base, base / (2.0 - p.whratio))
+            }
+        };
+        let dscale = p.scale / 100.0;
+        let min_falloff = 100.0 / w.min(h);
+        let fscale = p.falloff_scale.max(min_falloff) / 100.0;
+        let shape = p.shape.max(0.001);
+        let (exp1, exp2) = (2.0 / shape, shape / 2.0);
+        let centro_escalado = [centro[0] * xscale, centro[1] * yscale];
+        for j in 0..altura {
+            for i in 0..largura {
+                let pv = [
+                    (i as f32 * xscale - centro_escalado[0]).abs(),
+                    (j as f32 * yscale - centro_escalado[1]).abs(),
+                ];
+                let cplen = (pv[0].powf(exp1) + pv[1].powf(exp1)).powf(exp2);
+                let mut peso = 0.0;
+                if cplen >= dscale {
+                    peso = ((cplen - dscale) / fscale).clamp(0.0, 1.0);
+                }
+                if peso <= 0.0 {
+                    continue;
+                }
+                let col = &mut pixels[j * largura + i];
+                if p.brightness < 0.0 {
+                    let f = 1.0 + peso * p.brightness;
+                    for c in col.iter_mut() {
+                        *c *= f;
+                    }
+                } else {
+                    let f = peso * p.brightness;
+                    for c in col.iter_mut() {
+                        *c += f;
+                    }
+                }
+                if !p.unbound {
+                    for c in col.iter_mut() {
+                        *c = c.clamp(0.0, 1.0);
+                    }
+                }
+                let mv = (col[0] + col[1] + col[2]) / 3.0;
+                let wss = peso * p.saturation;
+                for c in col.iter_mut() {
+                    *c -= (mv - *c) * wss;
+                    if !p.unbound {
+                        *c = c.clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cor que muda com a coluna e com a linha, para a saturação e o `clamp`
+    /// terem onde agir.
+    fn carta_linear(largura: usize, altura: usize) -> Vec<Rgb> {
+        let mut px = Vec::with_capacity(largura * altura);
+        for j in 0..altura {
+            for i in 0..largura {
+                px.push([
+                    0.05 + 0.9 * i as f32 / largura as f32,
+                    0.5,
+                    0.1 + 0.8 * j as f32 / altura as f32,
+                ]);
+            }
+        }
+        px
+    }
+
+    /// Uma vinheta escura, com a queda no meio da borda — onde a proporção do
+    /// quadro aparece.
+    fn vinheta_escura() -> Vignette {
+        Vignette {
+            scale: 60.0,
+            falloff_scale: 80.0,
+            brightness: -0.8,
+            saturation: 0.0,
+            center: [0.0, 0.0],
+            autoratio: true,
+            whratio: 1.0,
+            shape: 1.0,
+            unbound: false,
+        }
+    }
+
+    /// 🚨 **Sem enquadramento, a vinheta é bit a bit a de antes.**
+    ///
+    /// É a garantia de que o conserto de 2026-09-13 não moveu o estilo
+    /// `RecordarFotos P&B`, medido contra o darktable-cli, em foto nenhuma sem
+    /// corte. Com os parâmetros do estilo e com os ramos que ele não usa
+    /// (proporção manual, centro deslocado, brilho negativo, `unbound`).
+    #[test]
+    fn sem_enquadramento_a_vinheta_e_a_de_antes() {
+        use crate::transformacao::Corte;
+        let (w, h) = (48usize, 32usize);
+        let casos = [
+            Vignette {
+                scale: 87.82,
+                falloff_scale: 45.51,
+                brightness: 0.99999,
+                saturation: 0.147,
+                center: [0.0, 0.0],
+                autoratio: true,
+                whratio: 1.0,
+                shape: 0.48,
+                unbound: false,
+            },
+            Vignette {
+                scale: 40.0,
+                falloff_scale: 60.0,
+                brightness: -0.7,
+                saturation: -0.5,
+                center: [0.2, -0.3],
+                autoratio: false,
+                whratio: 0.7,
+                shape: 1.0,
+                unbound: true,
+            },
+            Vignette {
+                scale: 60.0,
+                falloff_scale: 0.0,
+                brightness: -1.0,
+                saturation: 0.5,
+                center: [-0.1, 0.1],
+                autoratio: false,
+                whratio: 1.4,
+                shape: 2.5,
+                unbound: false,
+            },
+            vinheta_escura(),
+        ];
+        for (n, p) in casos.into_iter().enumerate() {
+            let mut antes = carta_linear(w, h);
+            vinheta_de_antes(&mut antes, w, h, p);
+            let mut agora = carta_linear(w, h);
+            vignette(&mut agora, w, h, p);
+            let mut sem_corte = carta_linear(w, h);
+            vignette_no_quadro(
+                &mut sem_corte,
+                w,
+                h,
+                p,
+                &Corte::inteiro().quadro(w as u32, h as u32),
+            );
+            for k in 0..w * h {
+                for c in 0..3 {
+                    assert_eq!(
+                        antes[k][c].to_bits(),
+                        agora[k][c].to_bits(),
+                        "caso {n}: pixel {k} canal {c} mudou sem enquadramento"
+                    );
+                    assert_eq!(
+                        antes[k][c].to_bits(),
+                        sem_corte[k][c].to_bits(),
+                        "caso {n}: pixel {k} canal {c} mudou com o corte inteiro"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 🚨 **A vinheta no quadro é a da foto já recortada** — o `vignette` depois
+    /// do `crop`, como no darktable.
+    ///
+    /// Revelar a foto 3:2 inteira com o quadro do corte e recortar depois tem de
+    /// dar exatamente o mesmo que recortar antes e aplicar a vinheta no
+    /// recorte. Sem ângulo as duas contas caem nos mesmos inteiros, e a
+    /// igualdade é de bit.
+    #[test]
+    fn a_vinheta_no_quadro_e_a_da_foto_ja_recortada() {
+        use crate::transformacao::Corte;
+        let (w, h) = (120usize, 80usize);
+        let p = vinheta_escura();
+        let casos = [
+            (
+                "3:4 no centro",
+                Corte::novo(0.25, 0.0, 0.5, 1.0, 0, 0.0, false, false),
+            ),
+            (
+                "deslocado",
+                Corte::novo(0.5, 0.25, 0.5, 0.5, 0, 0.0, false, false),
+            ),
+        ];
+        for (rotulo, corte) in casos {
+            let (rx, ry, rw, rh) = corte.retangulo(w as u32, h as u32);
+            let (rx, ry, rw, rh) = (rx as usize, ry as usize, rw as usize, rh as usize);
+            let base = carta_linear(w, h);
+
+            let mut inteira = base.clone();
+            vignette_no_quadro(&mut inteira, w, h, p, &corte.quadro(w as u32, h as u32));
+
+            let mut recortada = Vec::with_capacity(rw * rh);
+            for j in 0..rh {
+                for i in 0..rw {
+                    recortada.push(base[(ry + j) * w + rx + i]);
+                }
+            }
+            vignette(&mut recortada, rw, rh, p);
+
+            for j in 0..rh {
+                for i in 0..rw {
+                    assert_eq!(
+                        inteira[(ry + j) * w + rx + i],
+                        recortada[j * rw + i],
+                        "{rotulo}: ({i},{j}) do recorte"
+                    );
+                }
+            }
+            // E o que isso quer dizer na foto: o centro do recorte fica intacto,
+            // e as bordas esquerda e de cima caem juntas (a proporção automática
+            // é a do recorte, não a da foto).
+            let no_recorte = |i: usize, j: usize| inteira[(ry + j) * w + rx + i];
+            assert_eq!(
+                no_recorte(rw / 2, rh / 2),
+                base[(ry + rh / 2) * w + rx + rw / 2],
+                "{rotulo}: o centro do recorte foi tocado"
+            );
+            let (esquerda, cima) = (no_recorte(0, rh / 2), no_recorte(rw / 2, 0));
+            let (orig_e, orig_c) = (
+                base[(ry + rh / 2) * w + rx],
+                base[ry * w + rx + rw / 2],
+            );
+            assert!(
+                ((esquerda[1] / orig_e[1]) - (cima[1] / orig_c[1])).abs() < 1e-5,
+                "{rotulo}: a borda esquerda caiu {:?} e a de cima {:?}",
+                esquerda,
+                cima
+            );
+        }
     }
 
     #[test]

@@ -43,6 +43,7 @@ use image::DynamicImage;
 use lru::LruCache;
 
 use crate::ajustes::{Ajustes, TAMANHO_DO_UNIFORM};
+use crate::transformacao::{Corte, Quadro};
 
 /// O shader do desktop: o corpo mais a entrada por compute.
 const SHADER_COMPUTE: &str = concat!(
@@ -112,6 +113,9 @@ struct Recursos {
     textura_grade_mo: wgpu::Texture,
     /// Tamanho e sigmas das duas grades (`DadosDasGrades` no WGSL).
     buffer_grades: wgpu::Buffer,
+    /// O quadro do arquivo que sai (`QuadroDeSaida` no WGSL) — ver
+    /// [`Motor::definir_corte`].
+    buffer_quadro: wgpu::Buffer,
     /// O que produziu as grades em uso — ver [`ChaveDasGrades`].
     chave_das_grades: Option<ChaveDasGrades>,
     /// A última combinação pedida e quando ela chegou — ver [`adiar_as_grades`].
@@ -178,6 +182,13 @@ fn criar_recursos(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    // Duas linhas `vec4`: 32 bytes, múltiplo de 16 como o WebGL2 exige.
+    let buffer_quadro = dispositivo.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Quadro de saída"),
+        size: 32,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let grupo = montar_grupo(
         dispositivo,
         pipeline,
@@ -187,6 +198,7 @@ fn criar_recursos(
         &textura_grade_sh,
         &textura_grade_mo,
         &buffer_grades,
+        &buffer_quadro,
     );
 
     let buffer_saida = dispositivo.create_buffer(&wgpu::BufferDescriptor {
@@ -208,6 +220,7 @@ fn criar_recursos(
         textura_grade_sh,
         textura_grade_mo,
         buffer_grades,
+        buffer_quadro,
         chave_das_grades: None,
         grades_pedidas: None,
         ultimo_pedido_ms: 0.0,
@@ -244,7 +257,14 @@ fn criar_layout_do_grupo(
         },
         count: None,
     };
-    let mut entradas = vec![textura(0), uniforme(2), textura(3), textura(4), uniforme(5)];
+    let mut entradas = vec![
+        textura(0),
+        uniforme(2),
+        textura(3),
+        textura(4),
+        uniforme(5),
+        uniforme(6),
+    ];
     if estagio == wgpu::ShaderStages::COMPUTE {
         entradas.push(wgpu::BindGroupLayoutEntry {
             binding: 1,
@@ -278,6 +298,7 @@ fn montar_grupo(
     grade_sh: &wgpu::Texture,
     grade_mo: &wgpu::Texture,
     grades: &wgpu::Buffer,
+    quadro: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let vista = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
     let (v_entrada, v_saida, v_sh, v_mo) = (
@@ -306,6 +327,10 @@ fn montar_grupo(
         wgpu::BindGroupEntry {
             binding: 5,
             resource: grades.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 6,
+            resource: quadro.as_entire_binding(),
         },
     ];
     match pipeline {
@@ -468,6 +493,8 @@ pub struct Motor {
     relogio_ms: Option<f64>,
     /// Ver [`Motor::grades_pendentes`].
     grades_pendentes: bool,
+    /// O enquadramento da foto que vai ser revelada — ver [`Motor::definir_corte`].
+    corte: Corte,
 }
 
 impl Motor {
@@ -599,6 +626,7 @@ impl Motor {
             escala_do_original: 1.0,
             relogio_ms: None,
             grades_pendentes: false,
+            corte: Corte::inteiro(),
             backend: match adaptador.get_info().backend {
                 wgpu::Backend::Metal => "Metal",
                 wgpu::Backend::Vulkan => "Vulkan",
@@ -676,6 +704,24 @@ impl Motor {
         self.grades_pendentes
     }
 
+    /// O enquadramento da foto que vai ser revelada — é onde as vinhetas moram.
+    ///
+    /// 🚨 **O shader revela a foto inteira, e as vinhetas são do recorte.** Quem
+    /// recorta continua sendo [`crate::transformacao::aplicar`], depois — as
+    /// grades bilaterais, o ruído e a nitidez leem a foto inteira, e a prévia do
+    /// editor do site recorta por CSS. O corte entra aqui só para as duas
+    /// vinhetas (a de lente e a do darktable) medirem centro, proporção e escala
+    /// no quadro do arquivo ([`Corte::quadro`]). Sem isto, uma foto 3:2 recortada
+    /// em 3:4 saía com a vinheta centrada e na proporção da foto inteira —
+    /// laterais do recorte limpas (dono, 2026-09-13).
+    ///
+    /// ⚠️ **Vale até ser trocado**, como [`Motor::definir_escala_do_original`]:
+    /// quem revela fotos diferentes no mesmo motor define antes de cada uma.
+    /// Padrão: [`Corte::inteiro`], em que as vinhetas saem bit a bit as de antes.
+    pub fn definir_corte(&mut self, corte: &Corte) {
+        self.corte = corte.clone();
+    }
+
     /// Uma passada: sobe o que mudou, despacha, lê de volta.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn revelar(
@@ -697,6 +743,7 @@ impl Motor {
         ajustes: &Ajustes,
     ) -> Option<DynamicImage> {
         let escala = self.escala_do_original;
+        let quadro = self.corte.quadro(largura, altura);
         let Motor {
             dispositivo,
             fila,
@@ -715,6 +762,7 @@ impl Motor {
             ajustes,
             escala,
             None,
+            &quadro,
         );
 
         let mut encoder = dispositivo.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -816,6 +864,7 @@ impl Motor {
         }
         let escala = self.escala_do_original;
         let relogio = self.relogio_ms;
+        let quadro = self.corte.quadro(largura, altura);
         let Motor {
             dispositivo,
             fila,
@@ -834,6 +883,7 @@ impl Motor {
             ajustes,
             escala,
             relogio,
+            &quadro,
         );
         let pendentes = recursos.grades_pendentes;
 
@@ -869,6 +919,7 @@ fn preparar<'a>(
     ajustes: &Ajustes,
     escala: f32,
     relogio: Option<f64>,
+    quadro: &Quadro,
 ) -> &'a mut Recursos {
     if !cache.contains(&(largura, altura)) {
         cache.put(
@@ -968,11 +1019,17 @@ fn preparar<'a>(
                 &recursos.textura_grade_sh,
                 &recursos.textura_grade_mo,
                 &recursos.buffer_grades,
+                &recursos.buffer_quadro,
             );
             recursos.chave_das_grades = Some(chave);
         }
     }
     fila.write_buffer(&recursos.buffer_ajustes, 0, bytemuck::bytes_of(ajustes));
+    fila.write_buffer(
+        &recursos.buffer_quadro,
+        0,
+        bytemuck::cast_slice(&quadro.para_gpu()),
+    );
     recursos
 }
 
@@ -2018,6 +2075,287 @@ mod testes {
 
         assert!(canto(&escura) < 128, "vinheta negativa tem de escurecer");
         assert!(canto(&clara) > 128, "vinheta positiva tem de clarear");
+    }
+
+    /// Uma foto cinza de `largura × altura`: sem cor e sem vizinhança, o que
+    /// muda nela é só a vinheta.
+    fn cinza_retangular(largura: u32, altura: u32, valor: u8) -> Arc<Vec<u8>> {
+        Arc::new(
+            std::iter::repeat_n([valor, valor, valor, 255], (largura * altura) as usize)
+                .flatten()
+                .collect(),
+        )
+    }
+
+    /// As duas vinhetas, cada uma sozinha: a de lente (a pós-corte que os
+    /// presets do Lightroom trazem) e a do darktable (a do `RecordarFotos P&B`),
+    /// com uma queda que não satura no meio da borda. O terceiro campo diz se a
+    /// borda esquerda e a de cima caem juntas — a proporção automática do
+    /// darktable; a de lente mede distância em pixels e não tem isso.
+    fn as_duas_vinhetas() -> [(&'static str, Ajustes, bool); 2] {
+        [
+            (
+                "vinheta de lente",
+                Ajustes {
+                    lens_vignette_amount: -80.0,
+                    lens_vignette_midpoint: 0.0,
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                "vinheta do darktable",
+                Ajustes {
+                    dt_vignette_ativo: 1.0,
+                    dt_vignette_scale: 60.0,
+                    dt_vignette_falloff_scale: 80.0,
+                    dt_vignette_brightness: -0.8,
+                    dt_vignette_saturation: 0.0,
+                    dt_vignette_center_x: 0.0,
+                    dt_vignette_center_y: 0.0,
+                    dt_vignette_autoratio: 1.0,
+                    dt_vignette_whratio: 1.0,
+                    dt_vignette_shape: 1.0,
+                    dt_vignette_unbound: 0.0,
+                    ..Default::default()
+                },
+                true,
+            ),
+        ]
+    }
+
+    /// O caminho da tela e do arquivo: revela a foto inteira com o corte no
+    /// motor, e recorta depois.
+    fn revelar_e_recortar(
+        motor: &mut Motor,
+        pixels: &Arc<Vec<u8>>,
+        (largura, altura): (u32, u32),
+        ajustes: &Ajustes,
+        corte: &Corte,
+    ) -> image::RgbaImage {
+        motor.definir_corte(corte);
+        let revelada = motor
+            .revelar(pixels, largura, altura, ajustes)
+            .expect("o motor não devolveu imagem");
+        crate::transformacao::aplicar(&revelada, corte, true).into_rgba8()
+    }
+
+    /// O gabarito: recorta **antes** e revela a foto já recortada, sem corte
+    /// nenhum no motor. É a ordem do darktable, onde o `vignette` vem depois do
+    /// `crop`.
+    fn recortar_e_revelar(
+        motor: &mut Motor,
+        pixels: &Arc<Vec<u8>>,
+        (largura, altura): (u32, u32),
+        ajustes: &Ajustes,
+        corte: &Corte,
+    ) -> image::RgbaImage {
+        let foto = DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(largura, altura, pixels.to_vec()).expect("os pixels"),
+        );
+        let recortada = crate::transformacao::aplicar(&foto, corte, true).into_rgba8();
+        let (l, a) = recortada.dimensions();
+        motor.definir_corte(&Corte::inteiro());
+        motor
+            .revelar(&Arc::new(recortada.into_raw()), l, a, ajustes)
+            .expect("o motor não devolveu imagem")
+            .into_rgba8()
+    }
+
+    /// A maior diferença entre duas imagens do mesmo tamanho, em níveis, e onde.
+    fn pior_diferenca(a: &image::RgbaImage, b: &image::RgbaImage) -> (u8, (u32, u32)) {
+        assert_eq!(a.dimensions(), b.dimensions(), "tamanhos diferentes");
+        let mut pior = (0u8, (0, 0));
+        for (x, y, p) in a.enumerate_pixels() {
+            let q = b.get_pixel(x, y);
+            for c in 0..3 {
+                let d = p.0[c].abs_diff(q.0[c]);
+                if d > pior.0 {
+                    pior = (d, (x, y));
+                }
+            }
+        }
+        pior
+    }
+
+    /// Confere a vinheta de um recorte `largura × altura` já recortado: centro
+    /// intacto, cantos simétricos e escuros, e — para a do darktable — a borda
+    /// esquerda caindo junto com a de cima.
+    ///
+    /// ⚠️ **Os cantos são 1 e `largura − 1`**, e não 0 e `largura − 1`: o centro
+    /// das duas vinhetas é `largura / 2` (é a conta do darktable), e os pares
+    /// simétricos em torno dele são `i` e `largura − i`.
+    fn confere_a_vinheta_do_recorte(saida: &image::RgbaImage, rotulo: &str, bordas_juntas: bool) {
+        let (w, h) = saida.dimensions();
+        let em = |x: u32, y: u32| saida.get_pixel(x, y).0[0] as i32;
+        let centro = em(w / 2, h / 2);
+        let cantos = [em(1, 1), em(w - 1, 1), em(1, h - 1), em(w - 1, h - 1)];
+        let (menor, maior) = (
+            *cantos.iter().min().expect("quatro"),
+            *cantos.iter().max().expect("quatro"),
+        );
+        assert!(
+            maior - menor <= 1,
+            "{rotulo}: os quatro cantos do recorte saíram {cantos:?} — a vinheta não é simétrica nele"
+        );
+        assert!(
+            centro >= 157,
+            "{rotulo}: o centro do recorte escureceu para {centro} — era 160"
+        );
+        assert!(
+            maior < centro - 20,
+            "{rotulo}: os cantos {cantos:?} mal escureceram perto do centro {centro}"
+        );
+        if bordas_juntas {
+            let (esquerda, cima) = (em(0, h / 2), em(w / 2, 0));
+            assert!(
+                esquerda.abs_diff(cima) <= 1,
+                "{rotulo}: a borda esquerda saiu {esquerda} e a de cima {cima} — \
+                 a proporção automática não é a do recorte"
+            );
+        }
+    }
+
+    /// 🚨 **A vinheta é do recorte** — o defeito que o dono viu em 2026-09-13,
+    /// no passo-a-passo da nova sessão, com o `RecordarFotos P&B` e o 3:4 da
+    /// receita padrão: *"as vinhetas não estão respeitando o formato do corte"*.
+    ///
+    /// Numa foto 3:2 com recorte 3:4 no centro, a vinheta medida na foto inteira
+    /// deixava as laterais do recorte limpas e escurecia só o topo e a base. A
+    /// prova de que agora ela é do recorte é o gabarito: dá o mesmo que recortar
+    /// antes e revelar o recorte.
+    #[test]
+    fn com_corte_3_por_4_na_foto_3_por_2_a_vinheta_e_do_recorte() {
+        let mut motor = motor_pronto();
+        let tamanho = (120u32, 80u32);
+        let foto = cinza_retangular(tamanho.0, tamanho.1, 160);
+        // 3:4 no centro: 60 × 80, de x = 30 a 89.
+        let corte = Corte::novo(0.25, 0.0, 0.5, 1.0, 0, 0.0, false, false);
+
+        for (rotulo, ajustes, bordas_juntas) in as_duas_vinhetas() {
+            let saida = revelar_e_recortar(&mut motor, &foto, tamanho, &ajustes, &corte);
+            assert_eq!(saida.dimensions(), (60, 80));
+            confere_a_vinheta_do_recorte(&saida, rotulo, bordas_juntas);
+
+            let gabarito = recortar_e_revelar(&mut motor, &foto, tamanho, &ajustes, &corte);
+            let (pior, onde) = pior_diferenca(&saida, &gabarito);
+            assert!(
+                pior <= 1,
+                "{rotulo}: em {onde:?} a vinheta difere em {pior} níveis da foto recortada antes"
+            );
+        }
+    }
+
+    /// 🔑 **Com o corte fora do centro, o centro da vinheta vai junto.**
+    ///
+    /// Medida na foto inteira, a vinheta de um recorte no quadrante de baixo à
+    /// direita escurecia o centro do recorte e deixava a borda de dentro clara.
+    #[test]
+    fn com_corte_deslocado_o_centro_da_vinheta_segue_o_do_recorte() {
+        let mut motor = motor_pronto();
+        let tamanho = (120u32, 80u32);
+        let foto = cinza_retangular(tamanho.0, tamanho.1, 160);
+        // 60 × 40, de (60, 20) a (119, 59).
+        let corte = Corte::novo(0.5, 0.25, 0.5, 0.5, 0, 0.0, false, false);
+
+        for (rotulo, ajustes, bordas_juntas) in as_duas_vinhetas() {
+            let saida = revelar_e_recortar(&mut motor, &foto, tamanho, &ajustes, &corte);
+            assert_eq!(saida.dimensions(), (60, 40));
+            confere_a_vinheta_do_recorte(&saida, rotulo, bordas_juntas);
+
+            let gabarito = recortar_e_revelar(&mut motor, &foto, tamanho, &ajustes, &corte);
+            let (pior, onde) = pior_diferenca(&saida, &gabarito);
+            assert!(
+                pior <= 1,
+                "{rotulo}: em {onde:?} a vinheta difere em {pior} níveis da foto recortada antes"
+            );
+        }
+    }
+
+    /// Com giro de 90°, espelho e endireitamento, a vinheta continua sendo a da
+    /// foto recortada antes.
+    ///
+    /// ⚠️ **Folga de 3 níveis com ângulo**, e só por interpolação: o arquivo
+    /// endireitado amostra a revelação entre pixels, e o gabarito revela no
+    /// pixel exato. Uma vinheta no lugar errado erra dezenas de níveis.
+    #[test]
+    fn com_giro_e_endireitamento_a_vinheta_ainda_e_do_recorte() {
+        let mut motor = motor_pronto();
+        let tamanho = (120u32, 80u32);
+        let foto = cinza_retangular(tamanho.0, tamanho.1, 160);
+        let casos = [
+            (
+                "giro 270 com espelho v",
+                Corte::novo(0.2, 0.3, 0.4, 0.4, 3, 0.0, false, true),
+                1u8,
+            ),
+            (
+                "giro 90, espelho h e 8°",
+                Corte::novo(0.25, 0.25, 0.5, 0.5, 1, 8.0, true, false),
+                3u8,
+            ),
+        ];
+        for (caso, corte, folga) in casos {
+            for (rotulo, ajustes, _) in as_duas_vinhetas() {
+                let saida = revelar_e_recortar(&mut motor, &foto, tamanho, &ajustes, &corte);
+                let gabarito = recortar_e_revelar(&mut motor, &foto, tamanho, &ajustes, &corte);
+                let (pior, onde) = pior_diferenca(&saida, &gabarito);
+                assert!(
+                    pior <= folga,
+                    "{rotulo}, {caso}: em {onde:?} a vinheta difere em {pior} níveis da foto recortada antes"
+                );
+            }
+        }
+    }
+
+    /// 🚨 **Sem corte, as vinhetas são as de antes** — e trocar de corte e
+    /// voltar não deixa resto no motor.
+    ///
+    /// A de lente é conferida pela conta de antes: no canto (0, 0) de uma foto
+    /// 120×80 a distância normalizada é 1, o fator é `1 − 0,8` e o cinza 160 vira
+    /// 32. A do darktable tem o gabarito de CPU bit a bit
+    /// (`sem_enquadramento_a_vinheta_e_a_de_antes`, em `darktable.rs`) e o
+    /// estágio inteiro contra ele (`o_estagio_darktable_por_pixel_bate_com_o_oraculo`).
+    #[test]
+    fn sem_corte_as_vinhetas_sao_as_de_antes() {
+        let mut motor = motor_pronto();
+        let mut virgem = motor_pronto();
+        let (l, a) = (120u32, 80u32);
+        let foto = cinza_retangular(l, a, 160);
+
+        for (rotulo, ajustes, _) in as_duas_vinhetas() {
+            // Um motor que nunca ouviu falar de corte.
+            let nunca = virgem
+                .revelar(&foto, l, a, &ajustes)
+                .expect("o motor não devolveu imagem")
+                .into_rgba8();
+            // E um que revelou com corte e voltou para a foto inteira.
+            motor.definir_corte(&Corte::novo(0.5, 0.25, 0.5, 0.5, 1, 10.0, true, false));
+            let _ = motor.revelar(&foto, l, a, &ajustes);
+            motor.definir_corte(&Corte::inteiro());
+            let depois = motor
+                .revelar(&foto, l, a, &ajustes)
+                .expect("o motor não devolveu imagem")
+                .into_rgba8();
+            assert!(
+                nunca.as_raw() == depois.as_raw(),
+                "{rotulo}: voltar para a foto inteira não devolveu a revelação sem corte"
+            );
+            assert!(
+                nunca.get_pixel(l / 2, a / 2).0[0] >= 157,
+                "{rotulo}: o centro da foto escureceu"
+            );
+        }
+
+        let lente = virgem
+            .revelar(&foto, l, a, &as_duas_vinhetas()[0].1)
+            .expect("o motor não devolveu imagem")
+            .into_rgba8();
+        let canto = lente.get_pixel(0, 0).0[0];
+        assert!(
+            canto.abs_diff(32) <= 1,
+            "vinheta de lente sem corte: o canto saiu {canto}, e a conta de antes dá 32"
+        );
     }
 
     /// ✅ **Os 16 sliders de matiz e luminância do HSL movem a foto.**

@@ -64,9 +64,15 @@ fn dt_exposure(t: vec3<f32>) -> vec3<f32> {
 // ------------------------------------------------------------------- vignette
 
 /// `vignette.c:694–841`, sem pontilhamento. Brilho positivo SOMA.
-fn dt_vignette(t: vec3<f32>, coord: vec2<u32>, dims: vec2<u32>) -> vec3<f32> {
-    let w = f32(dims.x);
-    let h = f32(dims.y);
+///
+/// 🔑 **Medida no quadro do arquivo que sai** (`no_quadro`, em `corpo.wgsl`), e
+/// não no da foto revelada: no darktable a vinheta vem depois do `crop`. Sem
+/// enquadramento o quadro é a identidade com as dimensões da foto, e a conta é
+/// a de antes. O gabarito é `vignette_no_quadro`, em `darktable.rs`.
+fn dt_vignette(t: vec3<f32>, coord: vec2<u32>) -> vec3<f32> {
+    let tamanho = tamanho_do_quadro();
+    let w = tamanho.x;
+    let h = tamanho.y;
     let centro = vec2<f32>(
         w * 0.5 + params.dt_vignette_center_x * w / 2.0,
         h * 0.5 + params.dt_vignette_center_y * h / 2.0,
@@ -89,9 +95,10 @@ fn dt_vignette(t: vec3<f32>, coord: vec2<u32>, dims: vec2<u32>) -> vec3<f32> {
     let forma = max(params.dt_vignette_shape, 0.001);
     let exp1 = 2.0 / forma;
     let exp2 = forma / 2.0;
+    let aqui = no_quadro(coord);
     let pv = vec2<f32>(
-        abs(f32(coord.x) * xscale - centro.x * xscale),
-        abs(f32(coord.y) * yscale - centro.y * yscale),
+        abs(aqui.x * xscale - centro.x * xscale),
+        abs(aqui.y * yscale - centro.y * yscale),
     );
     // Bases e expoentes positivos: `pv` é valor absoluto e `exp1`, `exp2` > 0.
     let cplen = pow(pow(pv.x, exp1) + pow(pv.y, exp1), exp2);
@@ -694,7 +701,7 @@ fn dt_monochrome(t: vec3<f32>, coord: vec2<u32>) -> vec3<f32> {
 ///
 /// 🔑 **A ordem é a do `iop_order` do darktable 5.6**: exposure, shadows and
 /// highlights, monochrome, vignetting, color balance rgb.
-fn dt_estagio(rgb255: vec3<f32>, coord: vec2<u32>, dims: vec2<u32>) -> vec3<f32> {
+fn dt_estagio(rgb255: vec3<f32>, coord: vec2<u32>) -> vec3<f32> {
     let linear = vec3<f32>(
         dt_srgb_para_linear(rgb255.r),
         dt_srgb_para_linear(rgb255.g),
@@ -711,7 +718,7 @@ fn dt_estagio(rgb255: vec3<f32>, coord: vec2<u32>, dims: vec2<u32>) -> vec3<f32>
         t = dt_monochrome(t, coord);
     }
     if (params.dt_vignette_ativo != 0.0) {
-        t = dt_vignette(t, coord, dims);
+        t = dt_vignette(t, coord);
     }
     if (params.dt_cb_ativo != 0.0) {
         t = dt_color_balance_rgb(t);

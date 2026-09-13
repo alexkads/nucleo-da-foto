@@ -436,11 +436,22 @@ impl Tela {
             .collect();
         let mut grades_pendentes = false;
         for i in sujas {
-            let (pixels, largura, altura, ajustes, escala) = {
+            let (pixels, largura, altura, ajustes, escala, corte) = {
                 let c = &self.camadas[i];
-                (c.pixels.clone(), c.largura, c.altura, c.ajustes, c.escala)
+                (
+                    c.pixels.clone(),
+                    c.largura,
+                    c.altura,
+                    c.ajustes,
+                    c.escala,
+                    c.corte.clone(),
+                )
             };
             self.motor.definir_escala_do_original(escala);
+            // 🔑 As vinhetas são do recorte, e o motor revela a foto inteira: sem
+            // o corte desta camada, o cliente veria a vinheta centrada na foto
+            // inteira, e não a que o editor mostra e o arquivo tem.
+            self.motor.definir_corte(&corte);
             // O editor manda um aviso por quadro de arrasto: as grades RGB esperam
             // ele parar, como no editor.
             self.motor.definir_relogio(Some(agora));

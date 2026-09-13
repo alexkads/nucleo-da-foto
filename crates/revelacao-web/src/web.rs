@@ -47,6 +47,8 @@ pub struct Motor {
     /// A razão entre a cópia de trabalho e a foto original — ver
     /// [`escala_do_original`].
     escala_do_trabalho: f32,
+    /// O enquadramento da foto na tela — ver [`Motor::definir_corte`].
+    corte: Corte,
     backend: &'static str,
 }
 
@@ -380,6 +382,7 @@ pub async fn abrir(canvas: web_sys::HtmlCanvasElement) -> Result<Motor, JsValue>
         canvas,
         trabalho: None,
         escala_do_trabalho: 1.0,
+        corte: Corte::inteiro(),
         backend,
     })
 }
@@ -460,6 +463,22 @@ impl Motor {
         Ok(())
     }
 
+    /// O enquadramento da foto na tela: `[x, y, largura, altura, giro_90,
+    /// angulo, espelho_h, espelho_v]`, o mesmo vetor da exportação.
+    ///
+    /// 🔑 **O canvas continua mostrando a foto inteira** — quem recorta a prévia
+    /// é o CSS do editor (`palco.ts`). O corte entra aqui só para as duas
+    /// vinhetas serem medidas no recorte, como no arquivo: sem ele, a prévia de
+    /// uma foto 3:2 recortada em 3:4 mostrava a vinheta da foto inteira, com as
+    /// laterais do recorte limpas (dono, 2026-09-13).
+    ///
+    /// Vale para os próximos [`Motor::aplicar`], até ser trocado. Padrão: a foto
+    /// inteira.
+    pub fn definir_corte(&mut self, corte: &[f32]) -> Result<(), JsValue> {
+        self.corte = corte_de_vetor(corte)?;
+        Ok(())
+    }
+
     /// Aplica os ajustes à cópia de trabalho e desenha no canvas.
     ///
     /// `agora` é o relógio de quem arrasta (`performance.now()`): com ele, as
@@ -488,6 +507,9 @@ impl Motor {
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.motor
             .definir_escala_do_original(self.escala_do_trabalho);
+        // 🔑 A cada desenho, e não só em `definir_corte`: `exportar_jpeg` usa o
+        // mesmo motor com o corte **da foto exportada**, que pode ser outra.
+        self.motor.definir_corte(&self.corte);
         self.motor.definir_relogio(agora);
         self.motor
             .desenhar(&pixels, largura, altura, &ajustes, &vista, self.formato)
@@ -505,8 +527,8 @@ impl Motor {
     ///
     /// 🔑 **A ordem é a da tela**: o shader devolve a foto inteira e o
     /// enquadramento vem **depois** — é o que `image_exporter.rs` faz no
-    /// desktop. Inverter daria uma vinheta centrada no quadro cortado em vez de
-    /// no original.
+    /// desktop. O corte vai ao motor antes, só para as vinhetas serem medidas
+    /// no recorte (ver `revelar_e_codificar`).
     #[allow(clippy::too_many_arguments)]
     pub async fn exportar_jpeg(
         &mut self,
@@ -558,7 +580,13 @@ fn escala_do_original(largura: u32, altura: u32, lado_original: Option<u32>) -> 
 ///
 /// 🔑 **A ordem é a da tela**: o shader devolve a foto inteira e o
 /// enquadramento vem **depois** — é o que `image_exporter.rs` faz no desktop.
-/// Inverter daria uma vinheta centrada no quadro cortado em vez de no original.
+/// As grades e a vizinhança do ruído e da nitidez leem a foto inteira, como na
+/// prévia do editor.
+///
+/// 🚨 **Mas as vinhetas são do recorte**, e por isso o corte vai ao motor antes
+/// da revelação (`Motor::definir_corte`). Até 2026-09-13 ele não ia, e a vinheta
+/// saía centrada na foto inteira e com a proporção dela — a foto 3:2 recortada
+/// em 3:4 pela receita padrão chegava à galeria com as laterais limpas.
 #[allow(clippy::too_many_arguments)]
 async fn revelar_e_codificar(
     motor: &mut revelacao_core::Motor,
@@ -589,6 +617,7 @@ async fn revelar_e_codificar(
     }
 
     motor.definir_escala_do_original(escala_do_original(largura, altura, lado_original));
+    motor.definir_corte(&corte);
     let pixels = Arc::new(rgba.to_vec());
     let revelada = motor
         .revelar_async(&pixels, largura, altura, &ajustes)

@@ -614,6 +614,17 @@ impl Ajustes {
         }
         Some(bytemuck::pod_read_unaligned(bytemuck::cast_slice(valores)))
     }
+
+    /// Alguma das duas vinhetas está ligada — a de lente (a pós-corte do
+    /// Lightroom) ou a do estilo darktable?
+    ///
+    /// 🔑 **São os únicos ajustes que dependem do enquadramento** (ver
+    /// `Motor::definir_corte`): sem nenhuma delas, mudar o corte não muda pixel
+    /// revelado nenhum. Quem reprocessaria a cada arrasto de alça pergunta aqui
+    /// antes.
+    pub fn vinheta_ligada(&self) -> bool {
+        self.lens_vignette_amount != 0.0 || self.dt_vignette_ativo != 0.0
+    }
 }
 
 #[cfg(test)]
