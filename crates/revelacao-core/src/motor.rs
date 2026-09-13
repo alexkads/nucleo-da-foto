@@ -764,7 +764,19 @@ impl Motor {
         fatia.map_async(wgpu::MapMode::Read, move |r| {
             let _ = avisa.send(r);
         });
-        esperar_o_mapeamento(dispositivo, espera).await?;
+        // 🚨 **Mapeamento que falhou desmapeia antes de sair.** O `map_async`
+        // marca o buffer como mapeado na hora do pedido, e só o `unmap` desfaz
+        // a marca. Com o `?` direto, a GPU perdida (driver que reinicia, device
+        // lost) deixava o buffer marcado, e a foto SEGUINTE batia no
+        // `assert_eq!(initial_range, 0..0, "Buffer is already mapped")` do wgpu:
+        // pânico, `RuntimeError: unreachable`, e o wasm inteiro morto até
+        // recarregar a página. Achado pelo estresse `gpu-perdida` do e-commerce
+        // (2026-09-13). Assim a falha volta como `None` — erro de uma foto,
+        // que quem chama pode tratar reabrindo o motor.
+        if esperar_o_mapeamento(dispositivo, espera).await.is_none() {
+            recursos.buffer_saida.unmap();
+            return None;
+        }
 
         let dados = fatia.get_mapped_range();
         // A GPU devolve cada linha alinhada em 256 bytes; a imagem não tem esse
