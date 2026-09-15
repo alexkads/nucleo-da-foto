@@ -102,11 +102,14 @@ fi
 # e com `Cache-Control: immutable` e o service worker servindo cache-first, a
 # URL igual devolvia o motor velho. Só "Desviar para rede" no DevTools passava.
 # Com o hash, arquivo novo é URL nova, sempre — que é o que `immutable` promete.
-VERSAO="$VERSAO-$(cat "$PUBLICO/tela_do_cliente_web.js" "$PUBLICO/tela_do_cliente_web_bg.wasm" | shasum -a 256 | cut -c1-8)"
+# Um pedaço por arquivo, glue primeiro e .wasm depois: o service worker do site
+# confere cada um pelo seu antes de guardar, e `versao-dos-motores.test.ts` do
+# e-commerce recusa a build em que VERSAO e arquivos não batem.
+VERSAO="$VERSAO-$(shasum -a 256 < "$PUBLICO/tela_do_cliente_web.js" | cut -c1-8)$(shasum -a 256 < "$PUBLICO/tela_do_cliente_web_bg.wasm" | cut -c1-8)"
 echo "$VERSAO" > "$PUBLICO/VERSAO"
 cat > "$FONTE/versao.ts" <<TS
 // Gerado por scripts/construir-tela-do-cliente.sh do VintageLightbox-Rust — não editar.
-// É o commit da tela do cliente que está em public/tela-do-cliente/, e vai na URL dos
+// É o commit e o hash do conteúdo da tela do cliente que está em public/tela-do-cliente/, e vai na URL dos
 // dois arquivos (\`?v=\`) para o glue e o .wasm nunca descasarem no cache.
 export const VERSAO = "$VERSAO";
 TS
