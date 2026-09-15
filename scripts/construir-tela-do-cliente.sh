@@ -97,6 +97,12 @@ VERSAO="$(git rev-parse --short HEAD)"
 if [[ -n "$(git status --porcelain crates/tela-do-cliente-web crates/revelacao-core)" ]]; then
     VERSAO="$VERSAO-sujo"
 fi
+# 🚨 **O conteúdo entra na VERSAO, e não só o commit** (2026-09-15). Recompilar
+# sobre a mesma árvore suja dava o mesmo `?v=…-sujo` para um `.wasm` diferente —
+# e com `Cache-Control: immutable` e o service worker servindo cache-first, a
+# URL igual devolvia o motor velho. Só "Desviar para rede" no DevTools passava.
+# Com o hash, arquivo novo é URL nova, sempre — que é o que `immutable` promete.
+VERSAO="$VERSAO-$(cat "$PUBLICO/tela_do_cliente_web.js" "$PUBLICO/tela_do_cliente_web_bg.wasm" | shasum -a 256 | cut -c1-8)"
 echo "$VERSAO" > "$PUBLICO/VERSAO"
 cat > "$FONTE/versao.ts" <<TS
 // Gerado por scripts/construir-tela-do-cliente.sh do VintageLightbox-Rust — não editar.
