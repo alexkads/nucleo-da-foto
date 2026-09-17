@@ -1031,7 +1031,7 @@ pub fn constantes_wgsl() -> String {
     s += &matriz("DT_LMS_2006_PARA_XYZ_D65", &LMS_2006_PARA_XYZ_D65);
     let lut = tabela_de_gamut(&para_xyz_d65);
     s += "\n// `dt_UCS_22_build_gamut_LUT` sobre o Rec.2020 linear: M² da borda, por matiz.\n";
-    s += &format!("var<private> DT_GAMUT: array<f32, {LUT_ELEM}> = array<f32, {LUT_ELEM}>(\n");
+    s += &format!("const DT_GAMUT: array<f32, {LUT_ELEM}> = array<f32, {LUT_ELEM}>(\n");
     for bloco in lut.chunks(6) {
         s += "    ";
         s += &bloco

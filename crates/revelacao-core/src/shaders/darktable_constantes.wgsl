@@ -48,7 +48,7 @@ const DT_LMS_2006_PARA_XYZ_D65: array<vec3<f32>, 3> = array<vec3<f32>, 3>(
 );
 
 // `dt_UCS_22_build_gamut_LUT` sobre o Rec.2020 linear: M² da borda, por matiz.
-var<private> DT_GAMUT: array<f32, 512> = array<f32, 512>(
+const DT_GAMUT: array<f32, 512> = array<f32, 512>(
     4.7116066e-4, 4.67493e-4, 4.627856e-4, 4.5827206e-4, 4.5397456e-4, 4.4988384e-4,
     4.459917e-4, 4.4226652e-4, 4.3870375e-4, 4.3532284e-4, 4.3211778e-4, 4.290829e-4,
     4.261934e-4, 4.2346603e-4, 4.2089671e-4, 4.1846343e-4, 4.1618195e-4, 4.1404864e-4,
