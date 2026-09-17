@@ -461,6 +461,14 @@ pub fn aplicar(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> DynamicI
     let base = espelhar_e_girar(imagem, corte);
 
     if !recortar {
+        // 🚨 **No Enquadrar a foto aparece inteira e já inclinada**, com o
+        // retângulo por cima — é o `montarPalco` do site (`rotate(angulo)` em
+        // torno do centro do espaço girado). Até 2026-09-17 este caminho
+        // devolvia a foto reta: o controle Endireitar mudava o número e a foto
+        // na tela ficava parada ("o endireitar no Enquadrar não funciona").
+        if corte.angulo() != 0.0 {
+            return inclinar_inteira(&base, corte.angulo());
+        }
         return base;
     }
 
@@ -586,6 +594,33 @@ fn endireitar_e_recortar(base: &DynamicImage, corte: &Corte) -> DynamicImage {
     DynamicImage::ImageRgba8(destino)
 }
 
+/// A foto inteira girada `angulo` graus em torno do centro, no mesmo tamanho,
+/// com os cantos que ficam de fora **transparentes** (o palco aparece por trás,
+/// como no site).
+///
+/// É a mesma rotação de [`endireitar_e_recortar`] — o sentido e o centro —, só
+/// que sem recortar: a tela do Enquadrar desenha o retângulo por cima.
+pub fn inclinar_inteira(base: &DynamicImage, angulo: f32) -> DynamicImage {
+    let origem = base.to_rgba8();
+    let (largura, altura) = origem.dimensions();
+    let (cx, cy) = (largura as f32 / 2., altura as f32 / 2.);
+    let (sin, cos) = (-angulo.to_radians()).sin_cos();
+    let mut destino = RgbaImage::new(largura, altura);
+    for j in 0..altura {
+        for i in 0..largura {
+            let px = i as f32 + 0.5 - cx;
+            let py = j as f32 + 0.5 - cy;
+            let u = cx + px * cos - py * sin - 0.5;
+            let v = cy + px * sin + py * cos - 0.5;
+            if u < -0.5 || v < -0.5 || u > largura as f32 - 0.5 || v > altura as f32 - 0.5 {
+                continue;
+            }
+            destino.put_pixel(i, j, amostrar(&origem, u, v));
+        }
+    }
+    DynamicImage::ImageRgba8(destino)
+}
+
 /// Amostragem bilinear, grudando na borda quando cai fora.
 ///
 /// ⚠️ **Grudar, e não deixar transparente**: o canto que o endireitamento puxa de
@@ -624,6 +659,26 @@ fn amostrar(origem: &RgbaImage, u: f32, v: f32) -> Rgba<u8> {
     }
 
     Rgba(canais)
+}
+
+#[cfg(test)]
+mod testes_da_foto_inclinada {
+    use super::*;
+
+    /// 🚨 No Enquadrar, o ângulo tem de aparecer na foto inteira.
+    #[test]
+    fn a_foto_inteira_inclina_no_enquadrar() {
+        let mut foto = RgbaImage::from_pixel(40, 20, Rgba([200, 10, 10, 255]));
+        foto.put_pixel(0, 0, Rgba([0, 0, 255, 255]));
+        let base = DynamicImage::ImageRgba8(foto);
+        let corte = Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 10.0, false, false);
+        let saida = aplicar(&base, &corte, false).to_rgba8();
+        assert_eq!(saida.dimensions(), (40, 20), "inteira, sem recorte");
+        assert_eq!(saida.get_pixel(0, 0).0[3], 0, "o canto sai de fora da foto");
+        assert_eq!(saida.get_pixel(20, 10).0, [200, 10, 10, 255], "o centro fica");
+        let reta = aplicar(&base, &Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, false, false), false);
+        assert_eq!(reta.to_rgba8().get_pixel(0, 0).0, [0, 0, 255, 255]);
+    }
 }
 
 #[cfg(test)]
