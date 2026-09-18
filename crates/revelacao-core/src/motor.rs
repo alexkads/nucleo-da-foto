@@ -821,7 +821,10 @@ impl Motor {
         // recarregar a página. Achado pelo estresse `gpu-perdida` do e-commerce
         // (2026-09-13). Assim a falha volta como `None` — erro de uma foto,
         // que quem chama pode tratar reabrindo o motor.
-        if esperar_o_mapeamento(dispositivo, espera).await.is_none() {
+        if esperar_o_mapeamento(dispositivo, fila, espera)
+            .await
+            .is_none()
+        {
             recursos.buffer_saida.unmap();
             return None;
         }
@@ -1135,10 +1138,52 @@ fn pipeline_de_fragmento(
 /// O resultado do `map_async`, do jeito que cada lado consegue esperar.
 type Mapeamento = Result<(), wgpu::BufferAsyncError>;
 
+/// 🚨 **O flush do contexto WebGL2, emprestado por quem tem o canvas.**
+///
+/// Sem ele a revelação **dentro de um Worker** no WebGL2 não termina nunca
+/// (balcão do dono, Firefox, 18/set/2026). O navegador diz o motivo:
+///
+/// ```text
+/// WebGL warning: getSyncParameter: ClientWaitSync with timeout=0 … called 100
+///   times without SYNC_FLUSH_COMMANDS_BIT. If you do not flush, this sync
+///   object is not guaranteed to ever complete.
+/// ```
+///
+/// O `poll` do wgpu pergunta ao fence **sem** mandar os comandos para a GPU. Na
+/// thread da tela o compositor do navegador faz esse envio a cada quadro — é
+/// por isso que o editor revela normalmente na mesma máquina. Num Worker não há
+/// compositor, e o fence espera um trabalho que nunca saiu da fila.
+///
+/// ⚠️ **O wgpu não expõe o flush** (um `submit` vazio não basta: medido), então
+/// quem tem o `OffscreenCanvas` — `revelacao-web` — registra aqui a chamada
+/// `gl.flush()` do contexto de verdade. Sem registro, nada muda: é o caso do
+/// WebGPU, onde o `Promise` do `mapAsync` resolve sozinho.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static FLUSH_DA_GPU: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Registra o flush do contexto WebGL2 desta thread (ver [`FLUSH_DA_GPU`]).
+#[cfg(target_arch = "wasm32")]
+pub fn registrar_flush_da_gpu(flush: Box<dyn Fn()>) {
+    FLUSH_DA_GPU.with(|guardado| *guardado.borrow_mut() = Some(flush));
+}
+
+#[cfg(target_arch = "wasm32")]
+fn flush_da_gpu() {
+    FLUSH_DA_GPU.with(|guardado| {
+        if let Some(flush) = guardado.borrow().as_ref() {
+            flush();
+        }
+    });
+}
+
 /// No desktop, bloqueia até a GPU terminar: o callback dispara dentro do `poll`.
 #[cfg(not(target_arch = "wasm32"))]
 async fn esperar_o_mapeamento(
     dispositivo: &wgpu::Device,
+    _fila: &wgpu::Queue,
     espera: futures_channel::oneshot::Receiver<Mapeamento>,
 ) -> Option<()> {
     dispositivo.poll(wgpu::Maintain::Wait);
@@ -1149,12 +1194,40 @@ async fn esperar_o_mapeamento(
 /// fences **entre tarefas** do laço de eventos. Então: um `poll` sem esperar,
 /// e se o callback ainda não veio, ceder a vez ao navegador e tentar de novo.
 /// No WebGPU o callback vem pelo `Promise` do `mapAsync`, e o mesmo laço serve.
+///
+/// # 🚨 O `submit` vazio a cada volta, e por que ele existe
+///
+/// Sem ele, **a revelação dentro de um Worker no WebGL2 nunca termina**
+/// (balcão do dono, Firefox, 18/set/2026). O próprio navegador diz o motivo:
+///
+/// ```text
+/// WebGL warning: getSyncParameter: ClientWaitSync with timeout=0 … called 100
+///   times without SYNC_FLUSH_COMMANDS_BIT. If you do not flush, this sync
+///   object is not guaranteed to ever complete.
+/// ```
+///
+/// O `poll` do wgpu pergunta ao fence sem mandar os comandos para a GPU. Na
+/// thread da tela isso passa despercebido porque o compositor faz o flush a
+/// cada quadro — é por isso que o editor revela normalmente na mesma máquina.
+/// Dentro de um Worker não há compositor, ninguém dá flush, e o fence fica
+/// esperando um trabalho que nunca saiu da fila: a foto não volta, e o prazo de
+/// dois minutos da tela só troca o sintoma de lugar.
+///
+/// 🔑 **Um `submit` vazio é o flush que o wgpu não expõe.** Ele não desenha
+/// nada; o que importa é o que o backend GL faz por baixo dele — empurrar os
+/// comandos pendentes. Custa uma chamada por volta do laço, e só é feito
+/// enquanto o resultado não chegou.
 #[cfg(target_arch = "wasm32")]
 async fn esperar_o_mapeamento(
     dispositivo: &wgpu::Device,
+    fila: &wgpu::Queue,
     mut espera: futures_channel::oneshot::Receiver<Mapeamento>,
 ) -> Option<()> {
     loop {
+        // O `submit` vazio sozinho **não** resolve (medido no Firefox sem
+        // WebGPU): quem manda os comandos para a GPU é o `flush` do contexto.
+        fila.submit(std::iter::empty());
+        flush_da_gpu();
         dispositivo.poll(wgpu::Maintain::Poll);
         match espera.try_recv() {
             Ok(Some(resultado)) => return resultado.ok(),

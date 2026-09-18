@@ -18,7 +18,13 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 # `OffscreenCanvas` é o que dá superfície ao WebGL2 **dentro de um Worker**,
 # onde não existe `document` nem `<canvas>` — ver `abrir_sem_tela`.
-web-sys = { version = "0.3", features = ["HtmlCanvasElement", "OffscreenCanvas", "console"] }
+web-sys = { version = "0.3", features = [
+  "HtmlCanvasElement",
+  "OffscreenCanvas",
+  "console",
+  # 🚨 O `flush()` do contexto — ver `registrar_flush_da_gpu` no core.
+  "WebGl2RenderingContext",
+] }
 # Um `panic` vira mensagem legível no console em vez de `unreachable executed`.
 console_error_panic_hook = "0.1"
 serde_json.workspace = true

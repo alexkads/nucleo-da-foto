@@ -29,5 +29,10 @@ pub mod motor;
 pub mod transformacao;
 
 pub use ajustes::{Ajustes, QUANTIDADE};
+/// 🚨 O flush do contexto WebGL2 — quem tem o canvas registra, e a espera do
+/// mapeamento chama. Sem ele a revelação não termina dentro de um Worker; ver
+/// `motor::registrar_flush_da_gpu`.
+#[cfg(target_arch = "wasm32")]
+pub use motor::registrar_flush_da_gpu;
 pub use motor::{Entrada, Motor};
 pub use transformacao::Corte;

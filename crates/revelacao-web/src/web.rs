@@ -742,8 +742,23 @@ pub async fn abrir_sem_tela() -> Result<Exportador, JsValue> {
             // faz o adaptador WebGL2 existir.
             let tela = web_sys::OffscreenCanvas::new(1, 1)
                 .map_err(|e| erro(format!("o Worker não deu um OffscreenCanvas: {e:?}")))?;
+            // 🚨 **O flush do contexto, para a revelação terminar dentro de um
+            // Worker** (balcão do dono, Firefox, 18/set/2026). O `poll` do wgpu
+            // pergunta ao fence sem mandar os comandos; na thread da tela o
+            // compositor faz isso a cada quadro, aqui não há compositor. Ver
+            // `revelacao_core::registrar_flush_da_gpu`.
+            //
+            // 🔑 `get_context` devolve **o mesmo** contexto que o wgpu vai usar:
+            // o navegador cria um por canvas, e a segunda chamada é a mesma
+            // coisa. Sem contexto, segue sem flush — é o caminho do WebGPU.
+            if let Ok(Some(objeto)) = tela.get_context("webgl2") {
+                use wasm_bindgen::JsCast as _;
+                if let Ok(gl) = objeto.dyn_into::<web_sys::WebGl2RenderingContext>() {
+                    revelacao_core::registrar_flush_da_gpu(Box::new(move || gl.flush()));
+                }
+            }
             let superficie = instancia
-                .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(tela))
+                .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(tela.clone()))
                 .map_err(|e| erro(format!("o OffscreenCanvas não virou superfície: {e}")))?;
             let adaptador = instancia
                 .request_adapter(&wgpu::RequestAdapterOptions {
