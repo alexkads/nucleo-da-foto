@@ -2366,10 +2366,7 @@ mod testes {
                 "{rotulo}: o centro do recorte foi tocado"
             );
             let (esquerda, cima) = (no_recorte(0, rh / 2), no_recorte(rw / 2, 0));
-            let (orig_e, orig_c) = (
-                base[(ry + rh / 2) * w + rx],
-                base[ry * w + rx + rw / 2],
-            );
+            let (orig_e, orig_c) = (base[(ry + rh / 2) * w + rx], base[ry * w + rx + rw / 2]);
             assert!(
                 ((esquerda[1] / orig_e[1]) - (cima[1] / orig_c[1])).abs() < 1e-5,
                 "{rotulo}: a borda esquerda caiu {:?} e a de cima {:?}",

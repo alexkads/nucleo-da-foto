@@ -2014,6 +2014,69 @@ mod testes {
         assert_ne!(vinheta, neutro, "Lente — a vinheta não moveu nada");
     }
 
+    /// 🚨 **Nenhum efeito pode manchar um preto chapado** (dono, 18/set/2026:
+    /// *"alguns efeitos estão com o preto manchado de roxo na revelação, de
+    /// forma aleatória"* — numa máquina que não é a de desenvolvimento).
+    ///
+    /// # O que o teste mede, e por que é a medida certa
+    ///
+    /// Uma foto de um valor só sai de um valor só: seja qual for o ajuste, e
+    /// por mais que ele clareie, escureça ou **colora** o preto (a tonalização
+    /// faz isso de propósito), todos os pixels têm de sair **iguais entre si**.
+    /// Mancha é heterogeneidade — e é o que `NaN` e `Inf` produzem: eles não
+    /// sobrevivem ao `clamp` de forma definida, e cada GPU resolve o
+    /// indefinido do jeito dela. É por isso que o defeito aparece numa máquina
+    /// e não na outra.
+    ///
+    /// ⚠️ **Quatro ajustes variam com a posição por construção** e ficam de
+    /// fora: a distorção e a vinheta da lente, a vinheta do darktable e o grão.
+    /// Eles são espaciais — manchar o quadro é o trabalho deles.
+    #[test]
+    fn nenhum_efeito_mancha_um_preto_chapado() {
+        let mut motor = motor_pronto();
+        let preto = cinza(16, 0);
+
+        // Os índices dos quatro que desenham no quadro, e não na cor.
+        let nomes = Ajustes::NOMES;
+        let espacial = |i: usize| {
+            let nome = nomes[i];
+            nome.starts_with("lens_")
+                || nome.starts_with("grain_")
+                || nome.starts_with("dt_vignette_")
+        };
+
+        let neutro = Ajustes::default().como_vetor();
+        for indice in 0..crate::ajustes::QUANTIDADE {
+            if espacial(indice) {
+                continue;
+            }
+            // Os dois extremos de cada slider, mais um valor fora da faixa: é
+            // fora dela que a conta estoura, e a tela deixa chegar (a receita
+            // vem do banco, e o banco tem o que outra versão gravou).
+            for valor in [-100.0, -1.0, 1.0, 100.0, 255.0] {
+                if neutro[indice] == valor {
+                    continue;
+                }
+                let saida = revelar_e_colher(&mut motor, preto.clone(), com_campo(indice, valor));
+                let primeiro = &saida[..4];
+                let manchado = saida
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .enumerate()
+                    .find(|(_, pixel)| pixel.as_slice() != primeiro);
+                assert!(
+                    manchado.is_none(),
+                    "'{}' em {valor} manchou o preto: o pixel {} saiu {:?}, e o primeiro {:?}",
+                    nomes[indice],
+                    manchado.expect("achado acima").0,
+                    manchado.expect("achado acima").1,
+                    primeiro,
+                );
+            }
+        }
+    }
+
     /// 🚨 **A vinheta escurece o canto e deixa o centro em paz.**
     ///
     /// É o que separa "vinheta" de "exposição": um fator aplicado à foto inteira

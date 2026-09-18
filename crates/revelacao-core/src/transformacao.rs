@@ -675,8 +675,16 @@ mod testes_da_foto_inclinada {
         let saida = aplicar(&base, &corte, false).to_rgba8();
         assert_eq!(saida.dimensions(), (40, 20), "inteira, sem recorte");
         assert_eq!(saida.get_pixel(0, 0).0[3], 0, "o canto sai de fora da foto");
-        assert_eq!(saida.get_pixel(20, 10).0, [200, 10, 10, 255], "o centro fica");
-        let reta = aplicar(&base, &Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, false, false), false);
+        assert_eq!(
+            saida.get_pixel(20, 10).0,
+            [200, 10, 10, 255],
+            "o centro fica"
+        );
+        let reta = aplicar(
+            &base,
+            &Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, false, false),
+            false,
+        );
         assert_eq!(reta.to_rgba8().get_pixel(0, 0).0, [0, 0, 255, 255]);
     }
 }
@@ -1426,10 +1434,9 @@ mod testes_do_quadro {
     #[test]
     fn com_angulo_o_quadro_desfaz_o_endireitamento() {
         let (w, h) = (80u32, 48u32);
-        let origem =
-            DynamicImage::ImageRgba8(RgbaImage::from_fn(w, h, |x, y| {
-                Rgba([(x * 3) as u8, (y * 5) as u8, 0, 255])
-            }));
+        let origem = DynamicImage::ImageRgba8(RgbaImage::from_fn(w, h, |x, y| {
+            Rgba([(x * 3) as u8, (y * 5) as u8, 0, 255])
+        }));
         // Retângulos que, girados, continuam dentro da foto: fora dela o
         // arquivo gruda na borda, e a cor deixaria de dizer a posição.
         let casos = [

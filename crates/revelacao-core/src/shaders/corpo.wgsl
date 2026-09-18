@@ -1286,10 +1286,42 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         b += delta;
     }
 
-    // Clamp values to 0-255 and convert back to 0.0-1.0
-    r = clamp(r, 0.0, 255.0) / 255.0;
-    g = clamp(g, 0.0, 255.0) / 255.0;
-    b = clamp(b, 0.0, 255.0) / 255.0;
-    
+    // A faixa 0–255 de volta para 0,0–1,0 — e nada de `NaN` chegando à tela.
+    r = na_faixa(r) / 255.0;
+    g = na_faixa(g) / 255.0;
+    b = na_faixa(b) / 255.0;
+
     return vec4<f32>(r, g, b, a);
+}
+
+/// Prende o valor em 0–255 — **inclusive quando ele não é um número**.
+///
+/// # 🚨 `clamp(NaN, 0, 255)` não é preto em lugar nenhum, e é outra coisa em
+/// cada GPU
+///
+/// O WGSL define `clamp(x, lo, hi)` como `min(max(x, lo), hi)` e deixa o caso
+/// do `NaN` **indeterminado**: uma placa devolve `lo`, outra `hi`, outra o
+/// próprio `NaN` — que vai para a textura e aparece como mancha colorida. É o
+/// que o dono viu em 18/set/2026, *"o preto manchado de roxo, de forma
+/// aleatória"*, numa máquina que não é a de desenvolvimento: o mesmo binário,
+/// a mesma foto e a mesma receita, com um desfecho por hardware.
+///
+/// Aqui não há indeterminação: `NaN` falha em **toda** comparação, então ele
+/// não entra em nenhum dos dois ramos e cai no `0.0` do fim. `+∞` vira 255,
+/// `-∞` vira 0, e todo número normal atravessa igual — os testes do gabarito
+/// (`o_estagio_darktable_por_pixel_bate_com_o_oraculo`) continuam batendo.
+///
+/// ⚠️ **Isto é a rede, e não o conserto.** Um `NaN` aqui quer dizer que alguma
+/// conta lá atrás dividiu por zero ou elevou um negativo — e o lugar de achar
+/// isso é `nenhum_efeito_mancha_um_preto_chapado`, em `motor.rs`, que varre os
+/// 171 ajustes. A rede existe porque o desfecho sem ela é o pior possível: a
+/// foto do cliente com uma mancha roxa, na máquina do balcão, e nada no log.
+fn na_faixa(x: f32) -> f32 {
+    if (x >= 255.0) {
+        return 255.0;
+    }
+    if (x > 0.0) {
+        return x;
+    }
+    return 0.0;
 }
