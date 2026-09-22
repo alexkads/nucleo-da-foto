@@ -17,6 +17,8 @@
 //! O `revelacao_core::jpeg` continua existindo e apontando para cá: quem já
 //! chamava, chama igual.
 
+pub mod orientacao;
+
 use image::codecs::jpeg::{JpegEncoder, PixelDensity};
 use image::{DynamicImage, ExtendedColorType, ImageError};
 

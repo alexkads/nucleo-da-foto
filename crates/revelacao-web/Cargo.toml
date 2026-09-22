@@ -10,6 +10,8 @@ description = "O motor de revelação compilado para o navegador: wasm-bindgen s
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# A regra de abrir a foto de pé, a mesma do desktop.
+foto-codec = { path = "../foto-codec" }
 # O `webgl` é para o navegador sem WebGPU (Safari e Firefox antigos, Android).
 revelacao-core = { path = "../revelacao-core", features = ["webgl"] }
 wgpu = "23.0"

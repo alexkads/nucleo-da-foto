@@ -204,7 +204,9 @@ pub fn formatos_de_saida() -> String {
 pub fn decodificar_imagem(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
 
-    let imagem = image::load_from_memory(bytes).map_err(|e| {
+    // De pé: a mesma regra do desktop e do `createImageBitmap` com
+    // `imageOrientation: "from-image"` — `foto_codec::orientacao`.
+    let imagem = foto_codec::orientacao::decodificar_de_pe(bytes).map_err(|e| {
         erro(format!(
             "este arquivo não abriu ({e}). Formatos aceitos: JPEG, PNG, TIFF, WebP, BMP e GIF"
         ))
