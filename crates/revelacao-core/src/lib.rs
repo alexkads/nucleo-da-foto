@@ -25,10 +25,12 @@
 pub mod ajustes;
 pub mod darktable;
 pub mod jpeg;
+pub mod locais;
 pub mod motor;
 pub mod transformacao;
 
 pub use ajustes::{Ajustes, QUANTIDADE};
+pub use locais::ReceitaLocal;
 /// 🚨 O flush do contexto WebGL2 — quem tem o canvas registra, e a espera do
 /// mapeamento chama. Sem ele a revelação não termina dentro de um Worker; ver
 /// `motor::registrar_flush_da_gpu`.
