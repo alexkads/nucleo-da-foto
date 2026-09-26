@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use revelacao_core::{Ajustes, Corte, Entrada};
+use revelacao_core::{Ajustes, Corte, Entrada, ReceitaLocal};
 use wasm_bindgen::prelude::*;
 
 /// O motor aberto sobre um `<canvas>`.
@@ -49,11 +49,25 @@ pub struct Motor {
     escala_do_trabalho: f32,
     /// O enquadramento da foto na tela — ver [`Motor::definir_corte`].
     corte: Corte,
+    /// Máscaras e retoques da foto na tela — ver [`Motor::definir_locais`].
+    locais: ReceitaLocal,
     backend: &'static str,
 }
 
 fn erro(mensagem: impl Into<String>) -> JsValue {
     JsValue::from_str(&mensagem.into())
+}
+
+/// A receita local vinda do JavaScript, como o desktop a grava
+/// (`ReceitaLocal::em_json`). `None` ou texto vazio é "sem máscara".
+///
+/// 🚨 **Versão mais nova ou JSON inválido é erro**, e não receita vazia: revelar
+/// sem as máscaras que a foto tem seria entregar outra foto, calado.
+fn locais_de_json(json: Option<&str>) -> Result<ReceitaLocal, JsValue> {
+    match json.map(str::trim).filter(|j| !j.is_empty()) {
+        None => Ok(ReceitaLocal::default()),
+        Some(j) => ReceitaLocal::de_json(j).map_err(|e| erro(e.to_string())),
+    }
 }
 
 /// Quantos números o enquadramento carrega.
@@ -385,6 +399,7 @@ pub async fn abrir(canvas: web_sys::HtmlCanvasElement) -> Result<Motor, JsValue>
         trabalho: None,
         escala_do_trabalho: 1.0,
         corte: Corte::inteiro(),
+        locais: ReceitaLocal::default(),
         backend,
     })
 }
@@ -481,6 +496,17 @@ impl Motor {
         Ok(())
     }
 
+    /// As máscaras e os retoques da foto na tela, no JSON que o desktop grava
+    /// (`edit_locais`). `undefined`, `null` ou `""` tiram tudo.
+    ///
+    /// Vale para os próximos [`Motor::aplicar`], até ser trocada. As
+    /// coordenadas são da foto inteira, então a mesma receita serve à cópia de
+    /// trabalho e à exportação: a máscara é refeita em cada resolução.
+    pub fn definir_locais(&mut self, json: Option<String>) -> Result<(), JsValue> {
+        self.locais = locais_de_json(json.as_deref())?;
+        Ok(())
+    }
+
     /// Aplica os ajustes à cópia de trabalho e desenha no canvas.
     ///
     /// `agora` é o relógio de quem arrasta (`performance.now()`): com ele, as
@@ -512,6 +538,9 @@ impl Motor {
         // 🔑 A cada desenho, e não só em `definir_corte`: `exportar_jpeg` usa o
         // mesmo motor com o corte **da foto exportada**, que pode ser outra.
         self.motor.definir_corte(&self.corte);
+        self.motor
+            .definir_locais(&self.locais)
+            .map_err(|e| erro(e.to_string()))?;
         self.motor.definir_relogio(agora);
         self.motor
             .desenhar(&pixels, largura, altura, &ajustes, &vista, self.formato)
@@ -531,6 +560,10 @@ impl Motor {
     /// enquadramento vem **depois** — é o que `image_exporter.rs` faz no
     /// desktop. O corte vai ao motor antes, só para as vinhetas serem medidas
     /// no recorte (ver `revelar_e_codificar`).
+    ///
+    /// `locais` é a receita local em JSON (último parâmetro, opcional: o TS de
+    /// hoje continua chamando sem ele). A máscara é refeita na resolução do
+    /// arquivo, a partir dos parâmetros — o bitmap do preview não é ampliado.
     #[allow(clippy::too_many_arguments)]
     pub async fn exportar_jpeg(
         &mut self,
@@ -541,6 +574,7 @@ impl Motor {
         corte: &[f32],
         qualidade: u8,
         lado_original: Option<u32>,
+        locais: Option<String>,
     ) -> Result<Vec<u8>, JsValue> {
         let limite = self.limite_de_textura();
         revelar_e_codificar(
@@ -553,6 +587,7 @@ impl Motor {
             corte,
             qualidade,
             lado_original,
+            locais.as_deref(),
         )
         .await
     }
@@ -600,8 +635,10 @@ async fn revelar_e_codificar(
     corte: &[f32],
     qualidade: u8,
     lado_original: Option<u32>,
+    locais: Option<&str>,
 ) -> Result<Vec<u8>, JsValue> {
     let corte = corte_de_vetor(corte)?;
+    let locais = locais_de_json(locais)?;
     let ajustes = Ajustes::de_vetor(ajustes).ok_or_else(|| {
         erro(format!(
             "esperava {} ajustes, recebi {}",
@@ -620,6 +657,10 @@ async fn revelar_e_codificar(
 
     motor.definir_escala_do_original(escala_do_original(largura, altura, lado_original));
     motor.definir_corte(&corte);
+    // A máscara é refeita dos parâmetros **nesta** resolução — a do arquivo.
+    motor
+        .definir_locais(&locais)
+        .map_err(|e| erro(e.to_string()))?;
     let pixels = Arc::new(rgba.to_vec());
     let revelada = motor
         .revelar_async(&pixels, largura, altura, &ajustes)
@@ -686,6 +727,9 @@ impl Exportador {
     ///
     /// É o mesmo caminho de `Motor::exportar_jpeg`, byte a byte: as duas
     /// chamam [`revelar_e_codificar`].
+    ///
+    /// `locais` é a receita local (máscaras e retoques) em JSON, **último e
+    /// opcional**: quem chama sem ele continua exportando como antes.
     #[allow(clippy::too_many_arguments)]
     pub async fn exportar_jpeg(
         &mut self,
@@ -696,6 +740,7 @@ impl Exportador {
         corte: &[f32],
         qualidade: u8,
         lado_original: Option<u32>,
+        locais: Option<String>,
     ) -> Result<Vec<u8>, JsValue> {
         let limite = self.limite_de_textura();
         revelar_e_codificar(
@@ -708,6 +753,7 @@ impl Exportador {
             corte,
             qualidade,
             lado_original,
+            locais.as_deref(),
         )
         .await
     }

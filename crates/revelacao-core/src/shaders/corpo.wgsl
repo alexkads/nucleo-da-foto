@@ -243,6 +243,53 @@ struct QuadroDeSaida {
 
 @group(0) @binding(6) var<uniform> quadro_de_saida: QuadroDeSaida;
 
+// As máscaras locais (`mascaras.rs`): uma camada `R8Unorm` por máscara, do
+// tamanho desta imagem, e os ajustes de cada uma.
+//
+// 🔑 `quantidade.x` zero pula o bloco inteiro — a foto sem máscara sai bit a bit
+// a de antes, e a textura (1×1) nem é lida.
+struct ParamsLocais {
+    quantidade: vec4<f32>,
+    // Por camada: exposição em EV, invertida (0/1), e dois lugares livres.
+    camadas: array<vec4<f32>, 8>,
+}
+
+@group(0) @binding(7) var mascaras: texture_2d_array<f32>;
+@group(0) @binding(8) var<uniform> locais: ParamsLocais;
+
+/// sRGB (0–255) → linear, estendido: valores fora de 0–255 continuam a curva,
+/// porque o pipeline deixa passar sobra até o fim (e a exposição global cria).
+fn srgb_para_linear(v255: f32) -> f32 {
+    let x = v255 / 255.0;
+    if (x <= 0.04045) {
+        return x / 12.92;
+    }
+    return pow((x + 0.055) / 1.055, 2.4);
+}
+
+/// Linear → sRGB (0–255), o inverso exato de [`srgb_para_linear`].
+fn linear_para_srgb(v: f32) -> f32 {
+    if (v <= 0.0031308) {
+        return v * 12.92 * 255.0;
+    }
+    return (1.055 * pow(v, 1.0 / 2.4) - 0.055) * 255.0;
+}
+
+/// Quantos EV as máscaras dão a este pixel — a soma de cada camada pela
+/// cobertura dela (invertida quando a camada pede).
+fn exposicao_local(coord: vec2<u32>) -> f32 {
+    let quantas = u32(locais.quantidade.x);
+    var ev = 0.0;
+    for (var i = 0u; i < quantas; i++) {
+        var m = textureLoad(mascaras, vec2<i32>(coord), i32(i), 0).r;
+        if (locais.camadas[i].y > 0.5) {
+            m = 1.0 - m;
+        }
+        ev += locais.camadas[i].x * m;
+    }
+    return ev;
+}
+
 /// Onde o pixel `coord` da foto revelada cai no arquivo — `Quadro::no_quadro`,
 /// na mesma ordem de operações.
 fn no_quadro(coord: vec2<u32>) -> vec2<f32> {
@@ -706,6 +753,21 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         r *= factor;
         g *= factor;
         b *= factor;
+    }
+
+    // 1b. Exposição local — em RGB **linear**, pela máscara de cada camada.
+    //
+    // 🔑 Logo depois da global e antes do contraste: o resto do pipeline age
+    // sobre a luz que a máscara deu, como no Lightroom. Em linear, +1 EV dobra
+    // a luz de verdade; a global, herdada, multiplica o valor sRGB.
+    if (locais.quantidade.x > 0.5) {
+        let ev = exposicao_local(coord);
+        if (ev != 0.0) {
+            let fator = exp2(ev);
+            r = linear_para_srgb(srgb_para_linear(r) * fator);
+            g = linear_para_srgb(srgb_para_linear(g) * fator);
+            b = linear_para_srgb(srgb_para_linear(b) * fator);
+        }
     }
     
     // 2. Contrast

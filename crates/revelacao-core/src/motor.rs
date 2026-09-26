@@ -43,6 +43,8 @@ use image::DynamicImage;
 use lru::LruCache;
 
 use crate::ajustes::{Ajustes, TAMANHO_DO_UNIFORM};
+use crate::locais::ReceitaLocal;
+use crate::mascaras::{Mascaras, MedidasDosLocais, Rasterizador};
 use crate::transformacao::{Corte, Quadro};
 
 /// O shader do desktop: o corpo mais a entrada por compute.
@@ -123,6 +125,8 @@ struct Recursos {
     ultimo_pedido_ms: f64,
     /// O último desenho saiu com grades de antes.
     grades_pendentes: bool,
+    /// As máscaras locais deste tamanho — cache refeito da receita.
+    mascaras: Mascaras,
 }
 
 fn criar_recursos(
@@ -189,6 +193,7 @@ fn criar_recursos(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let mascaras = Mascaras::nova(dispositivo);
     let grupo = montar_grupo(
         dispositivo,
         pipeline,
@@ -199,6 +204,7 @@ fn criar_recursos(
         &textura_grade_mo,
         &buffer_grades,
         &buffer_quadro,
+        &mascaras,
     );
 
     let buffer_saida = dispositivo.create_buffer(&wgpu::BufferDescriptor {
@@ -225,6 +231,7 @@ fn criar_recursos(
         grades_pedidas: None,
         ultimo_pedido_ms: 0.0,
         grades_pendentes: false,
+        mascaras,
     }
 }
 
@@ -264,6 +271,18 @@ fn criar_layout_do_grupo(
         textura(4),
         uniforme(5),
         uniforme(6),
+        // As máscaras locais: uma camada `R8Unorm` por máscara, e os ajustes delas.
+        wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: estagio,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
+        uniforme(8),
     ];
     if estagio == wgpu::ShaderStages::COMPUTE {
         entradas.push(wgpu::BindGroupLayoutEntry {
@@ -299,8 +318,10 @@ fn montar_grupo(
     grade_mo: &wgpu::Texture,
     grades: &wgpu::Buffer,
     quadro: &wgpu::Buffer,
+    mascaras: &Mascaras,
 ) -> wgpu::BindGroup {
     let vista = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+    let v_mascaras = mascaras.vista();
     let (v_entrada, v_saida, v_sh, v_mo) = (
         vista(entrada),
         vista(saida),
@@ -331,6 +352,14 @@ fn montar_grupo(
         wgpu::BindGroupEntry {
             binding: 6,
             resource: quadro.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 7,
+            resource: wgpu::BindingResource::TextureView(&v_mascaras),
+        },
+        wgpu::BindGroupEntry {
+            binding: 8,
+            resource: mascaras.buffer_params.as_entire_binding(),
         },
     ];
     match pipeline {
@@ -495,7 +524,36 @@ pub struct Motor {
     grades_pendentes: bool,
     /// O enquadramento da foto que vai ser revelada — ver [`Motor::definir_corte`].
     corte: Corte,
+    /// A receita local da foto que vai ser revelada — ver [`Motor::definir_locais`].
+    locais: ReceitaLocal,
+    /// O adaptador desenha máscara (`R8Unorm` com blend) — ver `mascaras::suportado`.
+    mascaras_suportadas: bool,
+    /// Os pipelines das máscaras, criados na primeira receita que tem uma.
+    rasterizador: Option<Rasterizador>,
+    /// Ver [`Motor::medidas_dos_locais`].
+    medidas: MedidasDosLocais,
 }
+
+/// Por que o motor recusou uma receita local.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErroDeMascara {
+    /// O adaptador não desenha em `R8Unorm` com blend. Revelar sem as máscaras
+    /// seria entregar outra foto calado — quem chama decide (a exportação falha).
+    SemSuporte,
+}
+
+impl std::fmt::Display for ErroDeMascara {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErroDeMascara::SemSuporte => write!(
+                f,
+                "esta GPU não desenha máscara (R8Unorm como alvo com blend)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ErroDeMascara {}
 
 impl Motor {
     /// `None` quando não há adaptador de GPU.
@@ -627,6 +685,10 @@ impl Motor {
             relogio_ms: None,
             grades_pendentes: false,
             corte: Corte::inteiro(),
+            locais: ReceitaLocal::default(),
+            mascaras_suportadas: crate::mascaras::suportado(adaptador),
+            rasterizador: None,
+            medidas: MedidasDosLocais::default(),
             backend: match adaptador.get_info().backend {
                 wgpu::Backend::Metal => "Metal",
                 wgpu::Backend::Vulkan => "Vulkan",
@@ -722,6 +784,97 @@ impl Motor {
         self.corte = corte.clone();
     }
 
+    /// A receita local da foto que vai ser revelada: máscaras e retoques.
+    ///
+    /// 🔑 **Vale até ser trocada**, como [`Motor::definir_corte`]: quem revela
+    /// fotos diferentes no mesmo motor define antes de cada uma. Receita vazia
+    /// (o padrão) deixa o pixel bit a bit o de antes.
+    ///
+    /// As texturas de máscara são refeitas a partir dela no tamanho da imagem de
+    /// cada revelação — ver `mascaras.rs`. Devolve erro, e **não** guarda a
+    /// receita, quando a GPU não desenha máscara: a exportação falha em vez de
+    /// sair sem o que o operador pintou.
+    pub fn definir_locais(&mut self, locais: &ReceitaLocal) -> Result<(), ErroDeMascara> {
+        if !locais.camadas.is_empty() && !self.mascaras_suportadas {
+            self.locais = ReceitaLocal::default();
+            return Err(ErroDeMascara::SemSuporte);
+        }
+        if self.locais != *locais {
+            self.locais = locais.clone();
+        }
+        Ok(())
+    }
+
+    /// O que a última revelação fez com as máscaras: camadas refeitas,
+    /// componentes rasterizados e bytes em textura.
+    pub fn medidas_dos_locais(&self) -> MedidasDosLocais {
+        self.medidas
+    }
+
+    /// Se este adaptador desenha máscara — ver [`ErroDeMascara::SemSuporte`].
+    pub fn mascaras_suportadas(&self) -> bool {
+        self.mascaras_suportadas
+    }
+
+    /// Os bytes de uma camada da máscara em uso para este tamanho — para os
+    /// testes compararem a GPU com a referência em CPU.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn ler_camada_da_mascara(
+        &mut self,
+        largura: u32,
+        altura: u32,
+        camada: u32,
+    ) -> Vec<u8> {
+        let recursos = self
+            .cache
+            .get(&(largura, altura))
+            .expect("revele antes de ler");
+        let alinhado = largura.div_ceil(256) * 256;
+        let buffer = self.dispositivo.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("leitura da máscara"),
+            size: (alinhado * altura) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.dispositivo.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &recursos.mascaras.textura,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: camada,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(alinhado),
+                    rows_per_image: Some(altura),
+                },
+            },
+            wgpu::Extent3d {
+                width: largura,
+                height: altura,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.fila.submit(std::iter::once(encoder.finish()));
+        let fatia = buffer.slice(..);
+        fatia.map_async(wgpu::MapMode::Read, |_| {});
+        self.dispositivo.poll(wgpu::Maintain::Wait);
+        let dados = fatia.get_mapped_range();
+        (0..altura)
+            .flat_map(|y| {
+                let inicio = (y * alinhado) as usize;
+                dados[inicio..inicio + largura as usize].to_vec()
+            })
+            .collect()
+    }
+
     /// Uma passada: sobe o que mudou, despacha, lê de volta.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn revelar(
@@ -749,6 +902,9 @@ impl Motor {
             fila,
             pipeline,
             cache,
+            locais,
+            rasterizador,
+            medidas,
             ..
         } = self;
         let recursos = preparar(
@@ -768,6 +924,18 @@ impl Motor {
         let mut encoder = dispositivo.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Revelação Encoder"),
         });
+        atualizar_mascaras(
+            dispositivo,
+            fila,
+            pipeline,
+            &mut encoder,
+            recursos,
+            rasterizador,
+            locais,
+            largura,
+            altura,
+            medidas,
+        );
 
         let vista_de_saida = recursos
             .textura_saida
@@ -873,6 +1041,9 @@ impl Motor {
             fila,
             pipeline,
             cache,
+            locais,
+            rasterizador,
+            medidas,
             ..
         } = self;
         let recursos = preparar(
@@ -893,6 +1064,18 @@ impl Motor {
         let mut encoder = dispositivo.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Revelação Encoder (superfície)"),
         });
+        atualizar_mascaras(
+            dispositivo,
+            fila,
+            pipeline,
+            &mut encoder,
+            recursos,
+            rasterizador,
+            locais,
+            largura,
+            altura,
+            medidas,
+        );
         despachar(
             dispositivo,
             pipeline,
@@ -1023,6 +1206,7 @@ fn preparar<'a>(
                 &recursos.textura_grade_mo,
                 &recursos.buffer_grades,
                 &recursos.buffer_quadro,
+                &recursos.mascaras,
             );
             recursos.chave_das_grades = Some(chave);
         }
@@ -1034,6 +1218,51 @@ fn preparar<'a>(
         bytemuck::cast_slice(&quadro.para_gpu()),
     );
     recursos
+}
+
+/// Leva as máscaras deste tamanho a dizer o mesmo que a receita, no mesmo
+/// encoder da revelação (os passes de máscara vêm antes), e refaz o bind group
+/// quando a textura foi recriada.
+#[allow(clippy::too_many_arguments)]
+fn atualizar_mascaras(
+    dispositivo: &wgpu::Device,
+    fila: &wgpu::Queue,
+    pipeline: &Pipeline,
+    encoder: &mut wgpu::CommandEncoder,
+    recursos: &mut Recursos,
+    rasterizador: &mut Option<Rasterizador>,
+    locais: &ReceitaLocal,
+    largura: u32,
+    altura: u32,
+    medidas: &mut MedidasDosLocais,
+) {
+    if !locais.camadas.is_empty() && rasterizador.is_none() {
+        *rasterizador = Some(Rasterizador::novo(dispositivo));
+    }
+    let recriou = recursos.mascaras.atualizar(
+        dispositivo,
+        fila,
+        encoder,
+        rasterizador.as_ref(),
+        locais,
+        largura,
+        altura,
+        medidas,
+    );
+    if recriou {
+        recursos.grupo = montar_grupo(
+            dispositivo,
+            pipeline,
+            &recursos.textura_entrada,
+            &recursos.textura_saida,
+            &recursos.buffer_ajustes,
+            &recursos.textura_grade_sh,
+            &recursos.textura_grade_mo,
+            &recursos.buffer_grades,
+            &recursos.buffer_quadro,
+            &recursos.mascaras,
+        );
+    }
 }
 
 /// Grava no encoder a passada do shader — compute ou render — sobre `alvo`.
@@ -1138,26 +1367,26 @@ fn pipeline_de_fragmento(
 /// O resultado do `map_async`, do jeito que cada lado consegue esperar.
 type Mapeamento = Result<(), wgpu::BufferAsyncError>;
 
-/// 🚨 **O flush do contexto WebGL2, emprestado por quem tem o canvas.**
-///
-/// Sem ele a revelação **dentro de um Worker** no WebGL2 não termina nunca
-/// (balcão do dono, Firefox, 18/set/2026). O navegador diz o motivo:
-///
-/// ```text
-/// WebGL warning: getSyncParameter: ClientWaitSync with timeout=0 … called 100
-///   times without SYNC_FLUSH_COMMANDS_BIT. If you do not flush, this sync
-///   object is not guaranteed to ever complete.
-/// ```
-///
-/// O `poll` do wgpu pergunta ao fence **sem** mandar os comandos para a GPU. Na
-/// thread da tela o compositor do navegador faz esse envio a cada quadro — é
-/// por isso que o editor revela normalmente na mesma máquina. Num Worker não há
-/// compositor, e o fence espera um trabalho que nunca saiu da fila.
-///
-/// ⚠️ **O wgpu não expõe o flush** (um `submit` vazio não basta: medido), então
-/// quem tem o `OffscreenCanvas` — `revelacao-web` — registra aqui a chamada
-/// `gl.flush()` do contexto de verdade. Sem registro, nada muda: é o caso do
-/// WebGPU, onde o `Promise` do `mapAsync` resolve sozinho.
+// 🚨 **O flush do contexto WebGL2, emprestado por quem tem o canvas.**
+//
+// Sem ele a revelação **dentro de um Worker** no WebGL2 não termina nunca
+// (balcão do dono, Firefox, 18/set/2026). O navegador diz o motivo:
+//
+// ```text
+// WebGL warning: getSyncParameter: ClientWaitSync with timeout=0 … called 100
+//   times without SYNC_FLUSH_COMMANDS_BIT. If you do not flush, this sync
+//   object is not guaranteed to ever complete.
+// ```
+//
+// O `poll` do wgpu pergunta ao fence **sem** mandar os comandos para a GPU. Na
+// thread da tela o compositor do navegador faz esse envio a cada quadro — é
+// por isso que o editor revela normalmente na mesma máquina. Num Worker não há
+// compositor, e o fence espera um trabalho que nunca saiu da fila.
+//
+// ⚠️ **O wgpu não expõe o flush** (um `submit` vazio não basta: medido), então
+// quem tem o `OffscreenCanvas` — `revelacao-web` — registra aqui a chamada
+// `gl.flush()` do contexto de verdade. Sem registro, nada muda: é o caso do
+// WebGPU, onde o `Promise` do `mapAsync` resolve sozinho.
 #[cfg(target_arch = "wasm32")]
 thread_local! {
     static FLUSH_DA_GPU: std::cell::RefCell<Option<Box<dyn Fn()>>> =
