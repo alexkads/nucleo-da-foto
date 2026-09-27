@@ -655,8 +655,63 @@ pub struct InfoDoAdaptador {
     /// costumam dizer; Metal não).
     pub driver: String,
     pub driver_info: String,
-    /// O motor mede o tempo de GPU por timestamp query.
+    /// Os ids PCI do fabricante e da placa (0 quando o backend não diz).
+    pub fabricante_id: u32,
+    pub placa_id: u32,
+    /// O motor mede o tempo de GPU por timestamp query (no adaptador que o
+    /// motor abriu); nos da lista, se o adaptador oferece.
     pub carimbos: bool,
+}
+
+impl InfoDoAdaptador {
+    fn de(dados: &wgpu::AdapterInfo, carimbos: bool) -> Self {
+        Self {
+            nome: dados.name.clone(),
+            backend: nome_do_backend(dados.backend),
+            tipo: match dados.device_type {
+                wgpu::DeviceType::IntegratedGpu => "integrada",
+                wgpu::DeviceType::DiscreteGpu => "dedicada",
+                wgpu::DeviceType::VirtualGpu => "virtual",
+                wgpu::DeviceType::Cpu => "cpu",
+                wgpu::DeviceType::Other => "outra",
+            },
+            driver: dados.driver.clone(),
+            driver_info: dados.driver_info.clone(),
+            fabricante_id: dados.vendor,
+            placa_id: dados.device,
+            carimbos,
+        }
+    }
+}
+
+fn nome_do_backend(backend: wgpu::Backend) -> &'static str {
+    match backend {
+        wgpu::Backend::Metal => "Metal",
+        wgpu::Backend::Vulkan => "Vulkan",
+        wgpu::Backend::Dx12 => "DirectX 12",
+        wgpu::Backend::Gl => "OpenGL",
+        wgpu::Backend::BrowserWebGpu => "WebGPU",
+        wgpu::Backend::Empty => "sem GPU",
+    }
+}
+
+/// Todas as GPUs que o wgpu enxerga nesta máquina, por todos os backends.
+///
+/// 🔑 É o que separa "a máquina é fraca" de "o motor abriu na placa errada": um
+/// notebook com placa dedicada e o motor na integrada, ou no OpenGL com o
+/// Vulkan disponível. ⚠️ Custa dezenas a centenas de milissegundos (abre cada
+/// backend): chamar numa thread de fundo, uma vez.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn adaptadores_da_maquina() -> Vec<InfoDoAdaptador> {
+    let instancia = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..Default::default()
+    });
+    instancia
+        .enumerate_adapters(wgpu::Backends::all())
+        .iter()
+        .map(|a| InfoDoAdaptador::de(&a.get_info(), crate::cronometro::suportado(a)))
+        .collect()
 }
 
 /// O que a última revelação custou, por etapa.
@@ -861,29 +916,8 @@ impl Motor {
             return Err(ErroAoAbrir::Shader(erro.to_string()));
         }
 
-        let dados = adaptador.get_info();
-        let backend = match dados.backend {
-            wgpu::Backend::Metal => "Metal",
-            wgpu::Backend::Vulkan => "Vulkan",
-            wgpu::Backend::Dx12 => "DirectX 12",
-            wgpu::Backend::Gl => "OpenGL",
-            wgpu::Backend::BrowserWebGpu => "WebGPU",
-            wgpu::Backend::Empty => "sem GPU",
-        };
-        let info = InfoDoAdaptador {
-            nome: dados.name.clone(),
-            backend,
-            tipo: match dados.device_type {
-                wgpu::DeviceType::IntegratedGpu => "integrada",
-                wgpu::DeviceType::DiscreteGpu => "dedicada",
-                wgpu::DeviceType::VirtualGpu => "virtual",
-                wgpu::DeviceType::Cpu => "cpu",
-                wgpu::DeviceType::Other => "outra",
-            },
-            driver: dados.driver.clone(),
-            driver_info: dados.driver_info.clone(),
-            carimbos,
-        };
+        let info = InfoDoAdaptador::de(&adaptador.get_info(), carimbos);
+        let backend = info.backend;
         let cronometro = carimbos.then(|| crate::cronometro::Cronometro::novo(&dispositivo, &fila));
 
         Ok(Self {

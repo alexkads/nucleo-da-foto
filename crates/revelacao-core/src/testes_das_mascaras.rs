@@ -793,7 +793,11 @@ fn o_cronometro_mede_as_etapas_da_gpu_sem_mexer_na_foto() {
     let mut sem = motor(Entrada::Compute);
     sem.definir_locais(&locais).expect("máscara suportada");
     let referencia = revelar(&mut sem, &pixels, w, h, &ajustes);
-    assert_eq!(sem.ultimos_tempos().gpu, None, "sem medição ligada, sem carimbo");
+    assert_eq!(
+        sem.ultimos_tempos().gpu,
+        None,
+        "sem medição ligada, sem carimbo"
+    );
 
     let mut com = motor(Entrada::Compute);
     com.definir_locais(&locais).expect("máscara suportada");
@@ -805,7 +809,11 @@ fn o_cronometro_mede_as_etapas_da_gpu_sem_mexer_na_foto() {
     assert!(tempos.subiu_textura, "a primeira revelação sobe a foto");
     if com.info().carimbos {
         let gpu = tempos.gpu.expect("com carimbos, a GPU foi medida");
-        eprintln!("GPU {} ({}): {gpu:?} · {tempos:?}", com.info().nome, com.info().backend);
+        eprintln!(
+            "GPU {} ({}): {gpu:?} · {tempos:?}",
+            com.info().nome,
+            com.info().backend
+        );
         assert!(gpu.revelacao_ms.is_some(), "{gpu:?}");
         assert!(gpu.mascaras_ms.is_some(), "a máscara rodou: {gpu:?}");
         assert!(gpu.retoques_ms.is_some(), "o retoque rodou: {gpu:?}");

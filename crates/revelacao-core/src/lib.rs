@@ -40,6 +40,8 @@ pub use ajustes::{Ajustes, QUANTIDADE};
 pub use cronometro::TemposDaGpu;
 pub use locais::ReceitaLocal;
 pub use mascaras::MedidasDosLocais;
+#[cfg(not(target_arch = "wasm32"))]
+pub use motor::adaptadores_da_maquina;
 /// 🚨 O flush do contexto WebGL2 — quem tem o canvas registra, e a espera do
 /// mapeamento chama. Sem ele a revelação não termina dentro de um Worker; ver
 /// `motor::registrar_flush_da_gpu`.
