@@ -851,7 +851,16 @@ fn endireitar_e_recortar(base: &DynamicImage, corte: &Corte) -> DynamicImage {
 /// Meio pixel de folga na borda gruda na borda, como [`amostrar`]: senão a
 /// última coluna do recorte justo sairia com uma franja branca.
 fn aplicar_projetiva(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> DynamicImage {
-    let origem = imagem.to_rgba8();
+    // 🔑 Sem cópia da origem quando ela já é RGBA — que é o caso da revelada.
+    // O `to_rgba8` sozinho custava um terço do tempo na cópia de trabalho.
+    let convertida;
+    let origem: &RgbaImage = match imagem {
+        DynamicImage::ImageRgba8(rgba) => rgba,
+        outra => {
+            convertida = outra.to_rgba8();
+            &convertida
+        }
+    };
     let (largura, altura) = origem.dimensions();
     let (sw, sh) = if recortar {
         corte.dimensoes_de_saida(largura, altura)
@@ -859,36 +868,112 @@ fn aplicar_projetiva(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> Dy
         corte.dimensoes_giradas(largura, altura)
     };
     let m = corte.mapa(largura, altura, recortar);
-    let fora = if recortar {
-        Rgba([255, 255, 255, 255])
-    } else {
-        Rgba([0, 0, 0, 0])
+    let fora = if recortar { [255u8; 4] } else { [0u8; 4] };
+    let mut destino = vec![0u8; sw as usize * sh as usize * 4];
+    let linha = sw as usize * 4;
+    let preencher = |j0: usize, bloco: &mut [u8]| {
+        for (dj, saida) in bloco.chunks_exact_mut(linha).enumerate() {
+            linha_projetiva(origem, &m, (sw, sh), (j0 + dj) as u32, fora, saida);
+        }
     };
+    // 🔑 As linhas não dependem umas das outras: fora do navegador elas se
+    // dividem entre os núcleos. No `wasm32` não há threads, e vai uma por vez.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let nucleos = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(16);
+        let por_bloco = (sh as usize).div_ceil(nucleos).max(1);
+        std::thread::scope(|escopo| {
+            for (k, bloco) in destino.chunks_mut(por_bloco * linha).enumerate() {
+                let preencher = &preencher;
+                escopo.spawn(move || preencher(k * por_bloco, bloco));
+            }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    preencher(0, &mut destino);
+    DynamicImage::ImageRgba8(
+        RgbaImage::from_raw(sw, sh, destino).expect("o buffer tem o tamanho da saída"),
+    )
+}
+
+/// Uma linha do [`aplicar_projetiva`].
+///
+/// A linha anda somando a primeira coluna da matriz: o numerador e o
+/// denominador são lineares em `s`, e só a divisão fica por pixel. Meio pixel
+/// de folga na borda gruda na borda, como [`amostrar`].
+fn linha_projetiva(
+    origem: &RgbaImage,
+    m: &Matrix3<f64>,
+    (sw, sh): (u32, u32),
+    j: u32,
+    fora: [u8; 4],
+    saida: &mut [u8],
+) {
+    let (largura, altura) = origem.dimensions();
     let (lf, af) = (largura as f64, altura as f64);
     let (folga_u, folga_v) = (0.5 / lf, 0.5 / af);
-    let mut destino = RgbaImage::new(sw, sh);
-    // A linha anda somando a primeira coluna da matriz: o numerador e o
-    // denominador são lineares em `s`.
+    let t = (j as f64 + 0.5) / sh as f64;
     let passo = m.column(0) / sw as f64;
-    for j in 0..sh {
-        let t = (j as f64 + 0.5) / sh as f64;
-        let mut v = m * Vector3::new(0.5 / sw as f64, t, 1.0);
-        for i in 0..sw {
-            let dentro = v.z > 1e-12 && {
-                let (u, w) = (v.x / v.z, v.y / v.z);
-                u >= -folga_u && u <= 1.0 + folga_u && w >= -folga_v && w <= 1.0 + folga_v
-            };
-            let pixel = if dentro {
-                let (u, w) = (v.x / v.z, v.y / v.z);
-                amostrar(&origem, (u * lf - 0.5) as f32, (w * af - 0.5) as f32)
+    let mut v = m * Vector3::new(0.5 / sw as f64, t, 1.0);
+    let dados = origem.as_raw();
+    for pixel in saida.chunks_exact_mut(4) {
+        let cor = if v.z > 1e-12 {
+            let (u, w) = (v.x / v.z, v.y / v.z);
+            if u >= -folga_u && u <= 1.0 + folga_u && w >= -folga_v && w <= 1.0 + folga_v {
+                amostrar_bruto(
+                    dados,
+                    largura,
+                    altura,
+                    (u * lf - 0.5) as f32,
+                    (w * af - 0.5) as f32,
+                )
             } else {
                 fora
-            };
-            destino.put_pixel(i, j, pixel);
-            v += passo;
-        }
+            }
+        } else {
+            fora
+        };
+        pixel.copy_from_slice(&cor);
+        v += passo;
     }
-    DynamicImage::ImageRgba8(destino)
+}
+
+/// [`amostrar`] direto no buffer — a mesma conta, sem `get_pixel`.
+#[inline]
+fn amostrar_bruto(dados: &[u8], largura: u32, altura: u32, u: f32, v: f32) -> [u8; 4] {
+    let max_x = largura as i64 - 1;
+    let max_y = altura as i64 - 1;
+    let x0 = u.floor() as i64;
+    let y0 = v.floor() as i64;
+    let fx = u - x0 as f32;
+    let fy = v - y0 as f32;
+    let em = |x: i64, y: i64| -> usize {
+        let x = x.clamp(0, max_x) as usize;
+        let y = y.clamp(0, max_y) as usize;
+        (y * largura as usize + x) * 4
+    };
+    let (a, b, c, d) = (
+        em(x0, y0),
+        em(x0 + 1, y0),
+        em(x0, y0 + 1),
+        em(x0 + 1, y0 + 1),
+    );
+    let mut canais = [0u8; 4];
+    for k in 0..4 {
+        let (pa, pb, pc, pd) = (
+            dados[a + k] as f32,
+            dados[b + k] as f32,
+            dados[c + k] as f32,
+            dados[d + k] as f32,
+        );
+        let cima = pa + (pb - pa) * fx;
+        let baixo = pc + (pd - pc) * fx;
+        canais[k] = (cima + (baixo - cima) * fy).round().clamp(0.0, 255.0) as u8;
+    }
+    canais
 }
 
 /// A foto inteira girada `angulo` graus em torno do centro, no mesmo tamanho,
