@@ -187,8 +187,16 @@ fn dt_gamut_check_yrg(entrada: vec4<f32>) -> vec4<f32> {
     return ych;
 }
 
+/// ⚠️ **Faixa zero é o preto absoluto**: pixel (0, 0, 0) chega com `duro =
+/// suave = 0`, e o C faz `exp(−x/0) = exp(−∞) = 0`, que dá `suave`. O Metal
+/// compila com fast math, onde dividir por zero é indefinido: o Apple Silicon
+/// acerta, e as GPUs Intel/AMD dos Macs antigos devolvem NaN, que sai roxo nos
+/// pretos do "RecordarFotos P&B". A conta aqui não divide.
 fn dt_soft_clip(x: f32, suave: f32, duro: f32) -> f32 {
     let norma = duro - suave;
+    if (x > suave && norma <= 0.0) {
+        return suave;
+    }
     if (x > suave) {
         return suave + (1.0 - exp(-(x - suave) / norma)) * norma;
     }

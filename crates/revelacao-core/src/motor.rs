@@ -1600,6 +1600,46 @@ mod testes {
     /// ⚠️ **Tolerância de 1 nível**, e só por arredondamento: a GPU pode fundir
     /// multiplicação e soma (FMA) e errar na sétima casa. Uma conta errada move
     /// o pixel dezenas de níveis.
+    /// 🚨 O preto absoluto passa pelo `soft_clip` do color balance rgb com
+    /// faixa zero (`exp(−x/0)` no C). Nas GPUs Intel/AMD dos Macs antigos a
+    /// divisão por zero do fast math saía NaN, e os pretos do "RecordarFotos
+    /// P&B" ficavam roxos: o preto tem de sair o preto do gabarito.
+    #[test]
+    fn o_preto_absoluto_no_pb_sai_o_preto_do_gabarito() {
+        let mut motor = motor_pronto();
+        let (w, h) = (8usize, 8usize);
+        let entrada: Arc<Vec<u8>> = Arc::new((0..w * h).flat_map(|_| [0u8, 0, 0, 255]).collect());
+        let estilo = estilo_recordarfotos_pb();
+        for (rotulo, ajustes) in [
+            (
+                "color balance rgb",
+                Ajustes {
+                    dt_exposure_ativo: 0.0,
+                    dt_shadhi_ativo: 0.0,
+                    dt_monochrome_ativo: 0.0,
+                    dt_vignette_ativo: 0.0,
+                    ..estilo
+                },
+            ),
+            ("os cinco", estilo),
+        ] {
+            let gpu = motor
+                .revelar(&entrada, w as u32, h as u32, &ajustes)
+                .expect("o motor devolveu imagem")
+                .into_rgba8()
+                .into_raw();
+            let cpu = oraculo_darktable(&entrada, w, h, &ajustes);
+            for (a, b) in gpu.as_chunks::<4>().0.iter().zip(cpu.as_chunks::<4>().0) {
+                assert!(
+                    (0..3).all(|c| a[c].abs_diff(b[c]) <= 1),
+                    "{rotulo}: o preto saiu {:?} na GPU e {:?} no gabarito",
+                    &a[..3],
+                    &b[..3]
+                );
+            }
+        }
+    }
+
     #[test]
     fn o_estagio_darktable_por_pixel_bate_com_o_oraculo() {
         let mut motor = motor_pronto();
