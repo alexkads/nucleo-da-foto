@@ -199,10 +199,11 @@ fn criar_recursos(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    // Duas linhas `vec4`: 32 bytes, múltiplo de 16 como o WebGL2 exige.
+    // Três linhas `vec4` (a terceira é a projetiva da perspectiva guiada):
+    // 48 bytes, múltiplo de 16 como o WebGL2 exige.
     let buffer_quadro = dispositivo.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Quadro de saída"),
-        size: 32,
+        size: 48,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -3105,6 +3106,15 @@ mod testes {
             (
                 "giro 90, espelho h e 8°",
                 Corte::novo(0.25, 0.25, 0.5, 0.5, 1, 8.0, true, false),
+                3u8,
+            ),
+            // 🔑 A perspectiva guiada: o quadro vira projetivo (`linha_w` no
+            // WGSL), e a vinheta continua sendo a do recorte já corrigido.
+            (
+                "perspectiva com giro 90 e 4°",
+                Corte::novo(0.25, 0.25, 0.5, 0.5, 1, 4.0, false, false).com_perspectiva(
+                    crate::perspectiva::Perspectiva::nova([7.0, -4.0, 1.0], 1.5, 2.0, 0.0),
+                ),
                 3u8,
             ),
         ];

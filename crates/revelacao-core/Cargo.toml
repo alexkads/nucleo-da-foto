@@ -34,6 +34,10 @@ lru = "0.16.2"
 futures-channel = "0.3"
 serde.workspace = true
 serde_json.workspace = true
+# A álgebra da perspectiva guiada (`perspectiva.rs`): matrizes 3×3 e 4×4 em
+# `f64`, rotação por vetor, Cholesky e SVD. Puro Rust, sem biblioteca nativa —
+# compila igual no Mac, no Windows e em `wasm32`. Sem `macros` (proc-macro).
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Bloquear numa thread é privilégio do desktop: o navegador não tem como.

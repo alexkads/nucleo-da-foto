@@ -30,6 +30,7 @@ pub mod locais;
 mod mascaras;
 pub mod motor;
 pub mod nivel;
+pub mod perspectiva;
 pub mod preenchimento;
 mod retoque;
 #[cfg(all(test, not(target_arch = "wasm32")))]
