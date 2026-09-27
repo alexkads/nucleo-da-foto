@@ -1,0 +1,27 @@
+[package]
+name = "editor-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "O editor de fotos em camadas sem janela: documento, tiles, pincel, histórico, composição e a gravação do projeto"
+
+# 🔑 **Sem GPUI e sem `revelacao-core`** (docs/editor-em-camadas/02-CONTRATO.md).
+# A janela (ui-gpui) e a Revelação dependem deste crate, e ele de nenhum dos
+# dois: é o que impede o ciclo e deixa tudo aqui testável sem janela nem GPU.
+[dependencies]
+# Só o PNG: a imagem editada é PNG RGB8 sem perdas (C29).
+image = { version = "0.25", default-features = false, features = ["png"] }
+# O mesmo `png` que o `image` usa, direto: o `PngEncoder` do `image` não grava
+# o chunk `sRGB`, e a imagem editada declara o espaço em que foi pintada.
+png = "0.18"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# O nome de cada tile é o hash do conteúdo, e a base guarda o dela (C33, reabrir).
+sha2 = "0.10"
+# Os tiles no disco, comprimidos — o mesmo `miniz_oxide` que o `png` já traz.
+miniz_oxide = "0.8"
+
+[dev-dependencies]
+tempfile.workspace = true
