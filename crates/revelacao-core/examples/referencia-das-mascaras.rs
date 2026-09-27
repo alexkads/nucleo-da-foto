@@ -88,6 +88,7 @@ fn receita() -> ReceitaLocal {
                     pincel(vec![[0.4, 0.3, 1.0]], 0.04, 0.2, 1.0, Modo::Subtrair),
                 ],
                 invertida: false,
+                ..Default::default()
             },
             Camada {
                 ajustes: AjustesLocais { exposicao_ev: -1.0 },
@@ -99,6 +100,7 @@ fn receita() -> ReceitaLocal {
                     Modo::Somar,
                 )],
                 invertida: true,
+                ..Default::default()
             },
         ],
         ..Default::default()

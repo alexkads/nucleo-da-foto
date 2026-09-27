@@ -437,6 +437,41 @@ pub fn uvs_do_enquadramento(
     (ux, uy, uoff)
 }
 
+/// Do quadro exibido à foto inteira: `(s, t)` normalizado no quadro (o que
+/// a tela mostra, já enquadrado) vira `(x, y)` normalizado na foto de pé, antes
+/// de espelho, giro, endireitamento e recorte — o espaço da receita local.
+///
+/// 🔑 É a mesma conta de [`uvs_do_enquadramento`], que o teste compara com
+/// [`aplicar`] pixel a pixel: a mão que pinta na tela cai no pixel da foto que
+/// está sob ela, em qualquer enquadramento.
+pub fn do_quadro_para_a_foto(largura: u32, altura: u32, corte: &Corte, s: f32, t: f32) -> [f32; 2] {
+    let (ux, uy, uoff) = uvs_do_enquadramento(largura, altura, corte);
+    [
+        uoff[0] + ux[0] * s + uy[0] * t,
+        uoff[1] + ux[1] * s + uy[1] * t,
+    ]
+}
+
+/// O inverso de [`do_quadro_para_a_foto`]: onde o ponto `(x, y)` da foto cai
+/// no quadro exibido (pode cair fora de `0..1`, se o recorte o deixou de fora).
+pub fn da_foto_para_o_quadro(largura: u32, altura: u32, corte: &Corte, x: f32, y: f32) -> [f32; 2] {
+    let (ux, uy, uoff) = uvs_do_enquadramento(largura, altura, corte);
+    let (a, b, c, d) = (ux[0], uy[0], ux[1], uy[1]);
+    let det = a * d - b * c;
+    let (px, py) = (x - uoff[0], y - uoff[1]);
+    if det.abs() < 1e-12 {
+        return [0.5, 0.5];
+    }
+    [(d * px - b * py) / det, (-c * px + a * py) / det]
+}
+
+/// Quantos pixels da foto a largura do quadro exibido atravessa — para levar o
+/// raio de uma máscara (fração do maior lado da foto) a pixels da tela.
+pub fn pixels_da_foto_na_largura_do_quadro(largura: u32, altura: u32, corte: &Corte) -> f32 {
+    let (ux, _, _) = uvs_do_enquadramento(largura, altura, corte);
+    ((ux[0] * largura as f32).powi(2) + (ux[1] * altura as f32).powi(2)).sqrt()
+}
+
 /// A foto pronta para a tela.
 ///
 /// `recortar` é `false` no modo de corte: lá a foto aparece inteira (girada e
@@ -1482,5 +1517,80 @@ mod testes_do_quadro {
         let quase = Corte::novo(0.00001, 0.0, 0.99999, 1.0, 0, 0.0, false, false);
         assert_eq!(quase.quadro(120, 80), Quadro::inteiro(120, 80));
         assert_eq!(Quadro::inteiro(120, 80).no_quadro(7.0, 3.0), (7.0, 3.0));
+    }
+}
+
+#[cfg(test)]
+mod testes_da_tela_para_a_foto {
+    use super::*;
+
+    fn cortes() -> Vec<Corte> {
+        vec![
+            Corte::inteiro(),
+            Corte::novo(0.1, 0.2, 0.6, 0.5, 0, 0.0, false, false),
+            Corte::novo(0.0, 0.0, 1.0, 1.0, 1, 0.0, false, false),
+            Corte::novo(0.05, 0.1, 0.8, 0.7, 3, 0.0, true, false),
+            Corte::novo(0.1, 0.1, 0.8, 0.8, 2, 0.0, false, true),
+            Corte::novo(0.15, 0.15, 0.7, 0.7, 0, 8.0, false, false),
+            Corte::novo(0.2, 0.1, 0.6, 0.7, 1, -12.0, true, true),
+        ]
+    }
+
+    #[test]
+    fn ida_e_volta_entre_a_tela_e_a_foto() {
+        for corte in cortes() {
+            for &(s, t) in &[(0.1, 0.2), (0.5, 0.5), (0.93, 0.71)] {
+                let [x, y] = do_quadro_para_a_foto(300, 200, &corte, s, t);
+                let [s2, t2] = da_foto_para_o_quadro(300, 200, &corte, x, y);
+                assert!((s - s2).abs() < 1e-5 && (t - t2).abs() < 1e-5, "{corte:?}");
+            }
+        }
+    }
+
+    /// 🚨 O ponto da foto aparece, depois do `aplicar` de verdade, onde a conta
+    /// diz — é o que garante que a pincelada cai sob o cursor.
+    #[test]
+    fn o_ponto_da_foto_cai_onde_o_aplicar_o_poe() {
+        let (w, h) = (300u32, 200u32);
+        for corte in cortes() {
+            let (px, py) = (170u32, 90u32);
+            let mut img = RgbaImage::from_pixel(w, h, Rgba([0, 0, 0, 255]));
+            for dy in 0..3 {
+                for dx in 0..3 {
+                    img.put_pixel(px + dx, py + dy, Rgba([255, 255, 255, 255]));
+                }
+            }
+            let saida = aplicar(&DynamicImage::ImageRgba8(img), &corte, true);
+            let (ow, oh) = saida.dimensions();
+            let (mut sx, mut sy, mut n) = (0.0f32, 0.0f32, 0.0f32);
+            for (x, y, p) in saida.pixels() {
+                if p[0] > 128 {
+                    sx += x as f32 + 0.5;
+                    sy += y as f32 + 0.5;
+                    n += 1.0;
+                }
+            }
+            assert!(n > 0.0, "o ponto sumiu no {corte:?}");
+            let centro = [(px as f32 + 1.5) / w as f32, (py as f32 + 1.5) / h as f32];
+            let [s, t] = da_foto_para_o_quadro(w, h, &corte, centro[0], centro[1]);
+            let (ex, ey) = (s * ow as f32, t * oh as f32);
+            let (ax, ay) = (sx / n, sy / n);
+            assert!(
+                (ex - ax).abs() < 1.6 && (ey - ay).abs() < 1.6,
+                "{corte:?}: esperava ({ex:.1}, {ey:.1}), o aplicar pôs em ({ax:.1}, {ay:.1})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_largura_do_quadro_em_pixels_da_foto() {
+        assert!(
+            (pixels_da_foto_na_largura_do_quadro(300, 200, &Corte::inteiro()) - 300.0).abs() < 1e-3
+        );
+        let meia = Corte::novo(0.25, 0.0, 0.5, 1.0, 0, 0.0, false, false);
+        assert!((pixels_da_foto_na_largura_do_quadro(300, 200, &meia) - 150.0).abs() < 1.0);
+        // Girada 90°, a largura do quadro é a altura da foto.
+        let girada = Corte::novo(0.0, 0.0, 1.0, 1.0, 1, 0.0, false, false);
+        assert!((pixels_da_foto_na_largura_do_quadro(300, 200, &girada) - 200.0).abs() < 1.0);
     }
 }

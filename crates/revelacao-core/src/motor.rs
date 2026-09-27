@@ -806,12 +806,15 @@ impl Motor {
     /// receita, quando a GPU não desenha máscara: a exportação falha em vez de
     /// sair sem o que o operador pintou.
     pub fn definir_locais(&mut self, locais: &ReceitaLocal) -> Result<(), ErroDeMascara> {
+        // 🔑 As ocultas e as vazias saem aqui, para todo cliente: ninguém
+        // precisa lembrar de filtrar antes de mandar.
+        let locais = locais.para_o_motor();
         if !locais.camadas.is_empty() && !self.mascaras_suportadas {
             self.locais = ReceitaLocal::default();
             return Err(ErroDeMascara::SemSuporte);
         }
-        if self.locais != *locais {
-            self.locais = locais.clone();
+        if self.locais != locais {
+            self.locais = locais;
         }
         Ok(())
     }
@@ -827,6 +830,10 @@ impl Motor {
         self.mascaras_suportadas
     }
 
+    /// ⚠️ `camada` é a posição **no motor** — a da receita passada a
+    /// [`Motor::definir_locais`] já sem as ocultas e as vazias; quem tem a
+    /// posição na receita converte com [`ReceitaLocal::indice_no_motor`].
+    ///
     /// Os bytes (0–255) de uma camada da máscara, como está na GPU para
     /// imagens `largura × altura` — a sobreposição vermelha da tela ("mostrar
     /// máscara", `O`). `None` se nada foi revelado nesse tamanho, ou se a

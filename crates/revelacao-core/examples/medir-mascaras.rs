@@ -44,6 +44,7 @@ fn receita(tracos: usize) -> ReceitaLocal {
             ajustes: AjustesLocais { exposicao_ev: 0.8 },
             componentes: (0..tracos).map(traco).collect(),
             invertida: false,
+            ..Default::default()
         }],
         ..Default::default()
     }

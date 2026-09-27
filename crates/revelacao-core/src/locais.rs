@@ -88,8 +88,14 @@ impl Default for ReceitaLocal {
 }
 
 /// Uma máscara e o que ela aplica.
-#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Camada {
+    /// O nome na lista da Revelação local ("Máscara 1").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nome: String,
+    /// Oculta (o olho fechado): fica na receita, e o motor não a aplica.
+    #[serde(default = "verdadeiro", skip_serializing_if = "e_verdadeiro")]
+    pub visivel: bool,
     #[serde(default)]
     pub ajustes: AjustesLocais,
     #[serde(default)]
@@ -98,6 +104,29 @@ pub struct Camada {
     #[serde(default)]
     pub invertida: bool,
 }
+
+impl Default for Camada {
+    fn default() -> Self {
+        Self {
+            nome: String::new(),
+            visivel: true,
+            ajustes: AjustesLocais::default(),
+            componentes: Vec::new(),
+            invertida: false,
+        }
+    }
+}
+
+fn verdadeiro() -> bool {
+    true
+}
+
+fn e_verdadeiro(v: &bool) -> bool {
+    *v
+}
+
+/// O tamanho máximo do nome de uma máscara, em caracteres.
+pub const MAXIMO_DO_NOME: usize = 80;
 
 /// Os ajustes que uma camada aplica onde a máscara vale.
 ///
@@ -643,6 +672,36 @@ impl ReceitaLocal {
         self.camadas.is_empty() && self.retoques.is_empty()
     }
 
+    /// O que o motor aplica: as camadas visíveis e com componentes, e todos os
+    /// retoques. A ordem se mantém.
+    pub fn para_o_motor(&self) -> ReceitaLocal {
+        ReceitaLocal {
+            versao: self.versao,
+            camadas: self
+                .camadas
+                .iter()
+                .filter(|c| c.visivel && !c.componentes.is_empty())
+                .cloned()
+                .collect(),
+            retoques: self.retoques.clone(),
+        }
+    }
+
+    /// A posição, no motor, da camada `i` desta receita — `None` se ela está
+    /// oculta ou vazia (e por isso não é desenhada).
+    pub fn indice_no_motor(&self, i: usize) -> Option<usize> {
+        let camada = self.camadas.get(i)?;
+        if !camada.visivel || camada.componentes.is_empty() {
+            return None;
+        }
+        Some(
+            self.camadas[..i]
+                .iter()
+                .filter(|c| c.visivel && !c.componentes.is_empty())
+                .count(),
+        )
+    }
+
     /// Lê o JSON gravado, já saneado. Versão maior que [`VERSAO`] é recusada.
     pub fn de_json(json: &str) -> Result<Self, ErroDaReceita> {
         let valor: serde_json::Value =
@@ -672,6 +731,8 @@ impl ReceitaLocal {
             .into_iter()
             .take(MAXIMO_DE_CAMADAS)
             .map(|c| Camada {
+                nome: c.nome.chars().take(MAXIMO_DO_NOME).collect(),
+                visivel: c.visivel,
                 ajustes: AjustesLocais {
                     exposicao_ev: finito_ou(c.ajustes.exposicao_ev, 0.0)
                         .clamp(-EXPOSICAO_MAXIMA, EXPOSICAO_MAXIMA),
@@ -877,7 +938,7 @@ mod testes {
         Camada {
             ajustes: AjustesLocais { exposicao_ev: 1.0 },
             componentes,
-            invertida: false,
+            ..Default::default()
         }
     }
 
@@ -1104,6 +1165,61 @@ mod testes {
         let json = receita.em_json().expect("não vazia");
         assert_eq!(ReceitaLocal::de_json(&json), Ok(receita));
         assert!(json.contains("\"tipo\":\"pincel\""), "{json}");
+    }
+
+    /// Nome e olho vão e voltam; a máscara oculta fica na receita e sai do
+    /// que o motor aplica, e os índices do motor pulam as ocultas.
+    #[test]
+    fn nome_e_visibilidade_vao_e_voltam_e_o_motor_pula_as_ocultas() {
+        let pincel = || Componente {
+            modo: Modo::Somar,
+            forma: Forma::Pincel(traco(vec![[0.5, 0.5, 1.0]], 0.1, 0.0, 1.0)),
+        };
+        let receita = ReceitaLocal {
+            camadas: vec![
+                Camada {
+                    nome: "Céu".into(),
+                    componentes: vec![pincel()],
+                    ..Default::default()
+                },
+                Camada {
+                    nome: "Rosto".into(),
+                    visivel: false,
+                    componentes: vec![pincel()],
+                    ..Default::default()
+                },
+                Camada {
+                    nome: "Vazia".into(),
+                    ..Default::default()
+                },
+                Camada {
+                    nome: "Fundo".into(),
+                    componentes: vec![pincel()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let json = receita.em_json().unwrap();
+        assert!(
+            json.contains("\"visivel\":false"),
+            "só a oculta escreve o campo: {json}"
+        );
+        assert_eq!(ReceitaLocal::de_json(&json).unwrap(), receita);
+        // Receita antiga, sem os campos: visível e sem nome.
+        let antiga =
+            ReceitaLocal::de_json(r#"{"versao":1,"camadas":[{"componentes":[]}]}"#).unwrap();
+        assert!(antiga.camadas[0].visivel && antiga.camadas[0].nome.is_empty());
+
+        let motor = receita.para_o_motor();
+        let nomes: Vec<&str> = motor.camadas.iter().map(|c| c.nome.as_str()).collect();
+        assert_eq!(nomes, ["Céu", "Fundo"]);
+        assert_eq!(
+            (0..4)
+                .map(|i| receita.indice_no_motor(i))
+                .collect::<Vec<_>>(),
+            [Some(0), None, None, Some(1)]
+        );
     }
 
     #[test]

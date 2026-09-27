@@ -112,6 +112,7 @@ fn camada_completa(ev: f32) -> Camada {
             pincel(vec![[0.0, 0.0, 1.0]], 0.08, 0.0, 0.5, Modo::Somar),
         ],
         invertida: false,
+        ..Default::default()
     }
 }
 
@@ -223,6 +224,7 @@ fn na_gpu_o_stroke_que_volta_nao_passa_da_opacidade() {
         ajustes: AjustesLocais { exposicao_ev: 1.0 },
         componentes: vec![pincel(pontos, 0.1, 0.5, 0.5, Modo::Somar)],
         invertida: false,
+        ..Default::default()
     }]))
     .unwrap();
     revelar(&mut m, &foto(w, h), w, h, &Ajustes::default());
@@ -278,6 +280,7 @@ fn a_exposicao_local_e_em_rgb_linear() {
         ajustes: AjustesLocais { exposicao_ev: 1.0 },
         componentes: vec![pincel(vec![[0.5, 0.5, 1.0]], 1.0, 0.0, 1.0, Modo::Somar)],
         invertida: false,
+        ..Default::default()
     }]))
     .unwrap();
     let saida = revelar(&mut m, &cinza, w, h, &Ajustes::default());
@@ -373,6 +376,7 @@ fn a_mascara_acompanha_a_foto_no_corte_e_no_giro() {
             Modo::Somar,
         )],
         invertida: false,
+        ..Default::default()
     }]))
     .unwrap();
     // Um cinza escuro, para a exposição ter o que clarear.
@@ -404,6 +408,7 @@ fn so_o_que_mudou_e_rasterizado() {
         ajustes: AjustesLocais { exposicao_ev: 1.0 },
         componentes,
         invertida: false,
+        ..Default::default()
     };
     let mut m = motor(Entrada::Compute);
     let passo = |m: &mut Motor, r: ReceitaLocal| {
