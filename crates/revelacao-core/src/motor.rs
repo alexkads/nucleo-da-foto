@@ -508,6 +508,92 @@ impl ChaveDasGrades {
     }
 }
 
+/// Por que o motor não abriu num adaptador que respondeu.
+#[derive(Debug)]
+pub enum ErroAoAbrir {
+    /// O `request_device` recusou — limites, recursos, driver.
+    Dispositivo(wgpu::RequestDeviceError),
+    /// O dispositivo abriu, mas o shader ou o pipeline não compilou nele.
+    Shader(String),
+}
+
+impl std::fmt::Display for ErroAoAbrir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dispositivo(erro) => write!(f, "{erro}"),
+            Self::Shader(erro) => write!(f, "o shader não compilou: {erro}"),
+        }
+    }
+}
+
+impl std::error::Error for ErroAoAbrir {}
+
+/// Uma tentativa de abrir o motor: quais APIs, e qual placa preferir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tentativa {
+    pub backends: wgpu::Backends,
+    pub preferencia: wgpu::PowerPreference,
+}
+
+/// Em que ordem [`Motor::abrir`] tenta as APIs gráficas.
+///
+/// # 🪟 No Windows, DirectX 12 na placa da janela
+///
+/// No Mac a janela e o motor falam Metal; no Linux, os dois falam Vulkan. No
+/// Windows o GPUI desenha em **DirectX 11**, e com `Backends::all()` o wgpu
+/// pegava o **Vulkan** — duas famílias de driver na mesma máquina, e a
+/// Revelação e a tela do cliente lentas só lá, com o Lightroom liso no mesmo
+/// computador (dono, 27/set/2026). O Lightroom revela em DirectX 12.
+///
+/// 🔑 **E a placa é a primeira que o Windows lista, e não a "de alto
+/// desempenho".** É a que o GPUI usa (`EnumAdapters(0)`, em
+/// `gpui-pre-windows/directx_devices.rs`). Com `HighPerformance`, num notebook
+/// com Intel e NVIDIA a janela ficava numa placa e a revelação na outra. Quem
+/// muda a placa das duas juntas é o Windows: Configurações → Tela → Elementos
+/// gráficos → "Alto desempenho" para o app.
+///
+/// O Vulkan continua logo atrás, se o DirectX 12 não abrir ou recusar o shader.
+///
+/// # 🔧 `VLB_GPU`
+///
+/// `dx12`, `vulkan`, `metal` ou `gl` força uma API só, para comparar as duas
+/// na mesma máquina sem recompilar. Valor desconhecido é ignorado.
+pub fn plano_de_abertura(no_windows: bool, pedido: Option<&str>) -> Vec<Tentativa> {
+    let preferencia = if no_windows {
+        wgpu::PowerPreference::None
+    } else {
+        wgpu::PowerPreference::HighPerformance
+    };
+    let pedido = pedido.map(|valor| valor.trim().to_ascii_lowercase());
+    let forcado = match pedido.as_deref() {
+        Some("dx12" | "d3d12" | "directx12") => Some(wgpu::Backends::DX12),
+        Some("vulkan" | "vk") => Some(wgpu::Backends::VULKAN),
+        Some("metal") => Some(wgpu::Backends::METAL),
+        Some("gl" | "opengl") => Some(wgpu::Backends::GL),
+        _ => None,
+    };
+    if let Some(backends) = forcado {
+        return vec![Tentativa {
+            backends,
+            preferencia,
+        }];
+    }
+    let mut plano = Vec::new();
+    if no_windows {
+        for backends in [wgpu::Backends::DX12, wgpu::Backends::VULKAN] {
+            plano.push(Tentativa {
+                backends,
+                preferencia,
+            });
+        }
+    }
+    plano.push(Tentativa {
+        backends: wgpu::Backends::all(),
+        preferencia,
+    });
+    plano
+}
+
 /// O dispositivo, o pipeline e o cache de recursos — abertos uma vez.
 ///
 /// ⚠️ **Abrir custa**: `request_adapter` e `request_device` são assíncronos e
@@ -586,24 +672,37 @@ impl Motor {
     /// `Fragmento` em nativo existe para o teste que compara os dois.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn abrir_por(entrada: Entrada) -> Option<Self> {
-        let instancia = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
-
-        let adaptador =
-            pollster::block_on(instancia.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            }))?;
-
-        pollster::block_on(Self::abrir_com(
-            &adaptador,
-            entrada,
-            wgpu::Limits::default(),
-        ))
-        .ok()
+        let pedido = std::env::var("VLB_GPU").ok();
+        for tentativa in plano_de_abertura(cfg!(target_os = "windows"), pedido.as_deref()) {
+            let instancia = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: tentativa.backends,
+                ..Default::default()
+            });
+            let Some(adaptador) =
+                pollster::block_on(instancia.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: tentativa.preferencia,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                }))
+            else {
+                continue;
+            };
+            match pollster::block_on(Self::abrir_com(
+                &adaptador,
+                entrada,
+                wgpu::Limits::default(),
+            )) {
+                Ok(motor) => return Some(motor),
+                // O próximo da lista: um backend que abriu e não compilou o
+                // shader não pode deixar a Revelação sem motor.
+                Err(erro) => eprintln!(
+                    "[motor] {:?} em {} não abriu: {erro}",
+                    tentativa.backends,
+                    adaptador.get_info().name
+                ),
+            }
+        }
+        None
     }
 
     /// Abre o dispositivo num adaptador que quem chama já escolheu.
@@ -619,7 +718,7 @@ impl Motor {
         adaptador: &wgpu::Adapter,
         entrada: Entrada,
         limites: wgpu::Limits,
-    ) -> Result<Self, wgpu::RequestDeviceError> {
+    ) -> Result<Self, ErroAoAbrir> {
         let (dispositivo, fila) = adaptador
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -630,7 +729,15 @@ impl Motor {
                 },
                 None,
             )
-            .await?;
+            .await
+            .map_err(ErroAoAbrir::Dispositivo)?;
+
+        // 🚨 **Um shader que não compila vira erro, e não pânico.** Sem escopo,
+        // o wgpu entrega o erro ao tratador padrão, que derruba a thread. No
+        // DirectX 12 quem compila é o FXC da Microsoft, e não o compilador dos
+        // outros backends: se ele recusar o nosso WGSL, `abrir_por` tenta o
+        // próximo backend em vez de a Revelação ficar sem motor.
+        dispositivo.push_error_scope(wgpu::ErrorFilter::Validation);
 
         // 🚨 O `struct Params` do WGSL tem de casar com o `Ajustes`, campo a
         // campo: o `uniform` viaja como bytes crus e liga por **posição**, não
@@ -686,6 +793,9 @@ impl Motor {
                 }
             }
         };
+        if let Some(erro) = dispositivo.pop_error_scope().await {
+            return Err(ErroAoAbrir::Shader(erro.to_string()));
+        }
 
         Ok(Self {
             dispositivo,
@@ -1535,6 +1645,58 @@ async fn esperar_o_mapeamento(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod testes {
+    use super::{plano_de_abertura, Tentativa};
+
+    fn backends(plano: &[Tentativa]) -> Vec<wgpu::Backends> {
+        plano.iter().map(|t| t.backends).collect()
+    }
+
+    /// 🪟 O Windows revela em DirectX 12, na placa da janela, e só depois tenta
+    /// o Vulkan — o caminho que deixava a Revelação lenta só lá.
+    #[test]
+    fn no_windows_o_directx_12_vem_antes_do_vulkan_na_placa_da_janela() {
+        let plano = plano_de_abertura(true, None);
+        assert_eq!(
+            backends(&plano),
+            [
+                wgpu::Backends::DX12,
+                wgpu::Backends::VULKAN,
+                wgpu::Backends::all()
+            ]
+        );
+        assert!(
+            plano
+                .iter()
+                .all(|t| t.preferencia == wgpu::PowerPreference::None),
+            "a placa é a que o GPUI usa, e não a de alto desempenho"
+        );
+    }
+
+    /// Mac e Linux ficam como estavam: lá está liso.
+    #[test]
+    fn fora_do_windows_nada_muda() {
+        let plano = plano_de_abertura(false, None);
+        assert_eq!(backends(&plano), [wgpu::Backends::all()]);
+        assert_eq!(plano[0].preferencia, wgpu::PowerPreference::HighPerformance);
+    }
+
+    /// `VLB_GPU` escolhe uma API só; o que ele não conhece é ignorado.
+    #[test]
+    fn vlb_gpu_forca_uma_api_so() {
+        assert_eq!(
+            backends(&plano_de_abertura(true, Some("Vulkan"))),
+            [wgpu::Backends::VULKAN]
+        );
+        assert_eq!(
+            backends(&plano_de_abertura(true, Some(" dx12 "))),
+            [wgpu::Backends::DX12]
+        );
+        assert_eq!(
+            backends(&plano_de_abertura(true, Some("qualquer"))),
+            backends(&plano_de_abertura(true, None))
+        );
+    }
+
     #[test]
     fn as_grades_esperam_o_arrasto_parar_e_so_ele() {
         let chave = |pixels, parametro: u32, modulos| super::ChaveDasGrades {

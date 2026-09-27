@@ -42,5 +42,5 @@ pub use mascaras::MedidasDosLocais;
 /// `motor::registrar_flush_da_gpu`.
 #[cfg(target_arch = "wasm32")]
 pub use motor::registrar_flush_da_gpu;
-pub use motor::{Entrada, ErroDeMascara, Motor};
+pub use motor::{Entrada, ErroAoAbrir, ErroDeMascara, Motor};
 pub use transformacao::Corte;
