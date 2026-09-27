@@ -778,3 +778,44 @@ fn o_content_aware_por_laco_tira_o_que_foi_cercado() {
     b.definir_locais(&locais).unwrap();
     assert!(maior_diferenca(&saida, &revelar(&mut b, &pixels, w, h, &Ajustes::default())) <= 1);
 }
+
+/// ⏱️ O cronômetro da GPU mede as três etapas quando o adaptador carimba, e a
+/// foto sai idêntica com ele ligado ou desligado — medir não pode mexer no
+/// pixel. Sem suporte, os tempos de CPU continuam e o da GPU vem `None`.
+#[test]
+fn o_cronometro_mede_as_etapas_da_gpu_sem_mexer_na_foto() {
+    let (w, h) = (256, 192);
+    let pixels = foto(w, h);
+    let mut locais = receita(vec![camada_completa(0.8)]);
+    locais.retoques = vec![Retoque::Clone(carimbo([0.2, 0.3], [0.7, 0.6], 0.05, 0.4))];
+    let ajustes = Ajustes::default();
+
+    let mut sem = motor(Entrada::Compute);
+    sem.definir_locais(&locais).expect("máscara suportada");
+    let referencia = revelar(&mut sem, &pixels, w, h, &ajustes);
+    assert_eq!(sem.ultimos_tempos().gpu, None, "sem medição ligada, sem carimbo");
+
+    let mut com = motor(Entrada::Compute);
+    com.definir_locais(&locais).expect("máscara suportada");
+    com.definir_medicao(true);
+    let medida = revelar(&mut com, &pixels, w, h, &ajustes);
+    assert_eq!(medida, referencia, "o carimbo mudou o pixel");
+
+    let tempos = com.ultimos_tempos();
+    assert!(tempos.subiu_textura, "a primeira revelação sobe a foto");
+    if com.info().carimbos {
+        let gpu = tempos.gpu.expect("com carimbos, a GPU foi medida");
+        eprintln!("GPU {} ({}): {gpu:?} · {tempos:?}", com.info().nome, com.info().backend);
+        assert!(gpu.revelacao_ms.is_some(), "{gpu:?}");
+        assert!(gpu.mascaras_ms.is_some(), "a máscara rodou: {gpu:?}");
+        assert!(gpu.retoques_ms.is_some(), "o retoque rodou: {gpu:?}");
+        assert!(gpu.total_ms >= gpu.revelacao_ms, "{gpu:?}");
+    } else {
+        assert_eq!(tempos.gpu, None);
+    }
+    // A segunda, com a mesma foto, não sobe a textura de novo — e continua
+    // medindo (a leitura anterior foi colhida).
+    let _ = revelar(&mut com, &pixels, w, h, &ajustes);
+    assert!(!com.ultimos_tempos().subiu_textura);
+    assert_eq!(com.ultimos_tempos().gpu.is_some(), com.info().carimbos);
+}

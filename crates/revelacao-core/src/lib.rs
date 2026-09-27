@@ -23,6 +23,7 @@
 //! `o_fragmento_revela_o_mesmo_pixel_que_o_compute`, em [`motor`].
 
 pub mod ajustes;
+pub mod cronometro;
 pub mod darktable;
 pub mod jpeg;
 pub mod locais;
@@ -36,6 +37,7 @@ mod testes_das_mascaras;
 pub mod transformacao;
 
 pub use ajustes::{Ajustes, QUANTIDADE};
+pub use cronometro::TemposDaGpu;
 pub use locais::ReceitaLocal;
 pub use mascaras::MedidasDosLocais;
 /// 🚨 O flush do contexto WebGL2 — quem tem o canvas registra, e a espera do
@@ -43,5 +45,5 @@ pub use mascaras::MedidasDosLocais;
 /// `motor::registrar_flush_da_gpu`.
 #[cfg(target_arch = "wasm32")]
 pub use motor::registrar_flush_da_gpu;
-pub use motor::{Entrada, ErroAoAbrir, ErroDeMascara, Motor};
+pub use motor::{Entrada, ErroAoAbrir, ErroDeMascara, InfoDoAdaptador, Motor, TemposDoMotor};
 pub use transformacao::Corte;

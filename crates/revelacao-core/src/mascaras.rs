@@ -901,26 +901,30 @@ pub(crate) fn passe(
     vista: &wgpu::TextureView,
     limpar: bool,
 ) -> wgpu::RenderPass<'static> {
-    encoder
-        .begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Máscara"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: vista,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: if limpar {
-                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                    } else {
-                        wgpu::LoadOp::Load
+    // O cronômetro da GPU carimba a passada, quando há medição em curso
+    // (`crate::cronometro`); sem ela, `timestamp_writes` fica `None`.
+    crate::cronometro::com_escritas_de_render(|timestamp_writes| {
+        encoder
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Máscara"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: vista,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: if limpar {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Store,
                     },
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        })
-        .forget_lifetime()
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes,
+                occlusion_query_set: None,
+            })
+            .forget_lifetime()
+    })
 }
 
 /// Um buffer com pelo menos `tamanho` bytes, reaproveitado entre quadros.

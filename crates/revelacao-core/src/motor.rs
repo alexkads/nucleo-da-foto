@@ -125,6 +125,9 @@ struct Recursos {
     ultimo_pedido_ms: f64,
     /// O último desenho saiu com grades de antes.
     grades_pendentes: bool,
+    /// A última preparação subiu os pixels para a GPU (foto nova ou tamanho
+    /// novo) — o que separa "trocar de foto" de "mexer num slider" no custo.
+    subiu_agora: bool,
     /// As máscaras locais deste tamanho — cache refeito da receita.
     mascaras: Mascaras,
     /// Clone e Heal deste tamanho — o resultado que a revelação lê.
@@ -241,6 +244,7 @@ fn criar_recursos(
         grades_pedidas: None,
         ultimo_pedido_ms: 0.0,
         grades_pendentes: false,
+        subiu_agora: false,
         mascaras,
         retoques: Default::default(),
     }
@@ -629,6 +633,53 @@ pub struct Motor {
     rasterizador: Option<Rasterizador>,
     /// Ver [`Motor::medidas_dos_locais`].
     medidas: MedidasDosLocais,
+    /// O cronômetro da GPU — `None` quando o adaptador não carimba passadas
+    /// (ver `crate::cronometro`).
+    cronometro: Option<crate::cronometro::Cronometro>,
+    /// A ferramenta de desempenho está gravando: carimbar as passadas.
+    medir: bool,
+    /// Ver [`Motor::ultimos_tempos`].
+    tempos: TemposDoMotor,
+    /// Ver [`Motor::info`].
+    info: InfoDoAdaptador,
+}
+
+/// Quem é a GPU do motor — para o relatório de desempenho.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InfoDoAdaptador {
+    pub nome: String,
+    pub backend: &'static str,
+    /// `integrada`, `dedicada`, `virtual`, `cpu` ou `outra`.
+    pub tipo: &'static str,
+    /// O nome do driver e a versão, quando o backend diz (Vulkan e DX12
+    /// costumam dizer; Metal não).
+    pub driver: String,
+    pub driver_info: String,
+    /// O motor mede o tempo de GPU por timestamp query.
+    pub carimbos: bool,
+}
+
+/// O que a última revelação custou, por etapa.
+///
+/// 🚨 **As etapas de CPU não são tempo de shader.** `espera_ms` é do `submit`
+/// até a foto voltar mapeada: GPU trabalhando, fila, driver e a cópia — é a
+/// espera que a thread do motor sente. Quanto os shaders levaram é `gpu`, que
+/// só existe com timestamp query.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TemposDoMotor {
+    /// CPU: recursos, subida da textura (se a foto mudou), grades bilaterais
+    /// do estágio darktable e uniformes.
+    pub preparo_ms: f32,
+    /// CPU: gravar o encoder (máscaras, retoques, a passada) e o `submit`.
+    pub gravacao_ms: f32,
+    /// Do `submit` até o buffer da foto voltar — espera por GPU.
+    pub espera_ms: f32,
+    /// CPU: copiar as linhas alinhadas da GPU para a imagem.
+    pub leitura_ms: f32,
+    /// A foto subiu para a GPU nesta revelação.
+    pub subiu_textura: bool,
+    /// Os tempos medidos na GPU — `None` sem suporte ou sem medição ligada.
+    pub gpu: Option<crate::cronometro::TemposDaGpu>,
 }
 
 /// Por que o motor recusou uma receita local.
@@ -719,11 +770,24 @@ impl Motor {
         entrada: Entrada,
         limites: wgpu::Limits,
     ) -> Result<Self, ErroAoAbrir> {
+        // ⏱️ O carimbo de tempo da GPU, só onde o adaptador oferece e só no
+        // desktop: é a ferramenta de desempenho do rodapé que o lê. O
+        // `VLB_SEM_CARIMBOS=1` simula uma GPU sem suporte — é como se confere
+        // que o resto da ferramenta continua de pé sem ele.
+        #[cfg(not(target_arch = "wasm32"))]
+        let carimbos = crate::cronometro::suportado(adaptador)
+            && std::env::var_os("VLB_SEM_CARIMBOS").is_none();
+        #[cfg(target_arch = "wasm32")]
+        let carimbos = false;
         let (dispositivo, fila) = adaptador
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("VintageLightbox GPU"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: if carimbos {
+                        wgpu::Features::TIMESTAMP_QUERY
+                    } else {
+                        wgpu::Features::empty()
+                    },
                     required_limits: limites,
                     memory_hints: wgpu::MemoryHints::Performance,
                 },
@@ -797,7 +861,36 @@ impl Motor {
             return Err(ErroAoAbrir::Shader(erro.to_string()));
         }
 
+        let dados = adaptador.get_info();
+        let backend = match dados.backend {
+            wgpu::Backend::Metal => "Metal",
+            wgpu::Backend::Vulkan => "Vulkan",
+            wgpu::Backend::Dx12 => "DirectX 12",
+            wgpu::Backend::Gl => "OpenGL",
+            wgpu::Backend::BrowserWebGpu => "WebGPU",
+            wgpu::Backend::Empty => "sem GPU",
+        };
+        let info = InfoDoAdaptador {
+            nome: dados.name.clone(),
+            backend,
+            tipo: match dados.device_type {
+                wgpu::DeviceType::IntegratedGpu => "integrada",
+                wgpu::DeviceType::DiscreteGpu => "dedicada",
+                wgpu::DeviceType::VirtualGpu => "virtual",
+                wgpu::DeviceType::Cpu => "cpu",
+                wgpu::DeviceType::Other => "outra",
+            },
+            driver: dados.driver.clone(),
+            driver_info: dados.driver_info.clone(),
+            carimbos,
+        };
+        let cronometro = carimbos.then(|| crate::cronometro::Cronometro::novo(&dispositivo, &fila));
+
         Ok(Self {
+            cronometro,
+            medir: false,
+            tempos: TemposDoMotor::default(),
+            info,
             dispositivo,
             fila,
             pipeline,
@@ -810,20 +903,29 @@ impl Motor {
             mascaras_suportadas: crate::mascaras::suportado(adaptador),
             rasterizador: None,
             medidas: MedidasDosLocais::default(),
-            backend: match adaptador.get_info().backend {
-                wgpu::Backend::Metal => "Metal",
-                wgpu::Backend::Vulkan => "Vulkan",
-                wgpu::Backend::Dx12 => "DirectX 12",
-                wgpu::Backend::Gl => "OpenGL",
-                wgpu::Backend::BrowserWebGpu => "WebGPU",
-                wgpu::Backend::Empty => "sem GPU",
-            },
+            backend,
         })
     }
 
     /// Qual API gráfica respondeu.
     pub fn backend(&self) -> &'static str {
         self.backend
+    }
+
+    /// Quem é a GPU, e se ela carimba passadas.
+    pub fn info(&self) -> &InfoDoAdaptador {
+        &self.info
+    }
+
+    /// Liga ou desliga o carimbo das passadas. Desligado (o padrão), a
+    /// revelação é exatamente a de antes: nenhum `timestamp_writes`.
+    pub fn definir_medicao(&mut self, medir: bool) {
+        self.medir = medir;
+    }
+
+    /// O que a última [`Motor::revelar`] custou, por etapa.
+    pub fn ultimos_tempos(&self) -> TemposDoMotor {
+        self.tempos
     }
 
     /// Por onde este motor entra no shader.
@@ -1058,6 +1160,8 @@ impl Motor {
     ) -> Option<DynamicImage> {
         let escala = self.escala_do_original;
         let quadro = self.corte.quadro(largura, altura);
+        let relogio = crate::cronometro::relogio_ms;
+        let comeco = relogio();
         let Motor {
             dispositivo,
             fila,
@@ -1066,6 +1170,9 @@ impl Motor {
             locais,
             rasterizador,
             medidas,
+            cronometro,
+            medir,
+            tempos,
             ..
         } = self;
         let recursos = preparar(
@@ -1081,6 +1188,10 @@ impl Motor {
             None,
             &quadro,
         );
+        let preparado = relogio();
+        // Só mede com a ferramenta gravando e com a leitura anterior de volta.
+        let mut cronometro = cronometro.as_mut().filter(|_| *medir);
+        let medindo = cronometro.as_deref_mut().is_some_and(|c| c.comecar());
 
         let mut encoder = dispositivo.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Revelação Encoder"),
@@ -1101,16 +1212,18 @@ impl Motor {
         let vista_de_saida = recursos
             .textura_saida
             .create_view(&wgpu::TextureViewDescriptor::default());
-        despachar(
-            dispositivo,
-            pipeline,
-            &mut encoder,
-            recursos,
-            largura,
-            altura,
-            &vista_de_saida,
-            FORMATO_DE_LEITURA,
-        );
+        crate::cronometro::na_etapa(crate::cronometro::EtapaDaGpu::Revelacao, || {
+            despachar(
+                dispositivo,
+                pipeline,
+                &mut encoder,
+                recursos,
+                largura,
+                altura,
+                &vista_de_saida,
+                FORMATO_DE_LEITURA,
+            )
+        });
 
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
@@ -1134,7 +1247,18 @@ impl Motor {
             },
         );
 
+        if medindo {
+            if let Some(c) = cronometro.as_deref_mut() {
+                c.encerrar(&mut encoder);
+            }
+        }
         fila.submit(std::iter::once(encoder.finish()));
+        if medindo {
+            if let Some(c) = cronometro.as_deref_mut() {
+                c.pedir_leitura();
+            }
+        }
+        let enviado = relogio();
 
         let fatia = recursos.buffer_saida.slice(..);
         let (avisa, espera) = futures_channel::oneshot::channel();
@@ -1157,6 +1281,10 @@ impl Motor {
             recursos.buffer_saida.unmap();
             return None;
         }
+        let voltou = relogio();
+        // O `poll(Wait)` acima já levou a GPU ao fim: os carimbos voltaram
+        // junto. Se não, ficam para a próxima — sem esperar aqui.
+        let gpu = cronometro.and_then(|c| c.colher());
 
         let dados = fatia.get_mapped_range();
         // A GPU devolve cada linha alinhada em 256 bytes; a imagem não tem esse
@@ -1169,6 +1297,15 @@ impl Motor {
         }
         drop(dados);
         recursos.buffer_saida.unmap();
+        let fim = relogio();
+        *tempos = TemposDoMotor {
+            preparo_ms: (preparado - comeco) as f32,
+            gravacao_ms: (enviado - preparado) as f32,
+            espera_ms: (voltou - enviado) as f32,
+            leitura_ms: (fim - voltou) as f32,
+            subiu_textura: recursos.subiu_agora,
+            gpu,
+        };
 
         Some(DynamicImage::ImageRgba8(image::RgbaImage::from_raw(
             largura, altura, saida,
@@ -1305,6 +1442,7 @@ fn preparar<'a>(
         );
         recursos.ultimos_pixels = Some(pixels.clone());
     }
+    recursos.subiu_agora = precisa_subir;
 
     // Estágio darktable: as grades bilaterais só se refazem quando a chave muda.
     recursos.grades_pendentes = false;
@@ -1400,31 +1538,36 @@ fn atualizar_mascaras(
     if !locais.vazia() && rasterizador.is_none() {
         *rasterizador = Some(Rasterizador::novo(dispositivo));
     }
-    let recriou = recursos.mascaras.atualizar(
-        dispositivo,
-        fila,
-        encoder,
-        rasterizador.as_ref(),
-        locais,
-        largura,
-        altura,
-        medidas,
-    );
+    let recriou = crate::cronometro::na_etapa(crate::cronometro::EtapaDaGpu::Mascaras, || {
+        recursos.mascaras.atualizar(
+            dispositivo,
+            fila,
+            encoder,
+            rasterizador.as_ref(),
+            locais,
+            largura,
+            altura,
+            medidas,
+        )
+    });
     // Os retoques vêm antes da revelação no mesmo encoder: leem a entrada (ou
     // o retoque anterior) e escrevem outra textura, nunca a que leem.
     let pixels = recursos.ultimos_pixels.clone();
-    let trocou_a_entrada = recursos.retoques.atualizar(
-        dispositivo,
-        fila,
-        encoder,
-        rasterizador.as_ref(),
-        &recursos.textura_entrada,
-        pixels.as_ref(),
-        &locais.retoques,
-        largura,
-        altura,
-        medidas,
-    );
+    let trocou_a_entrada =
+        crate::cronometro::na_etapa(crate::cronometro::EtapaDaGpu::Retoques, || {
+            recursos.retoques.atualizar(
+                dispositivo,
+                fila,
+                encoder,
+                rasterizador.as_ref(),
+                &recursos.textura_entrada,
+                pixels.as_ref(),
+                &locais.retoques,
+                largura,
+                altura,
+                medidas,
+            )
+        });
     medidas.bytes += recursos.retoques.bytes();
     if recriou || trocou_a_entrada {
         recursos.grupo = montar_grupo(
@@ -1458,16 +1601,18 @@ fn despachar(
 ) {
     match pipeline {
         Pipeline::Compute(pipeline) => {
-            let mut passe = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Image Processing Pass"),
-                timestamp_writes: None,
+            crate::cronometro::com_escritas_de_compute(|timestamp_writes| {
+                let mut passe = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Image Processing Pass"),
+                    timestamp_writes,
+                });
+                passe.set_pipeline(pipeline);
+                passe.set_bind_group(0, &recursos.grupo, &[]);
+                // Grupos de 16×16, como o `@workgroup_size` do WGSL declara. A divisão
+                // arredonda para cima: com 17 pixels de largura o último grupo trabalha
+                // pela metade, e é o shader que descarta quem cair fora.
+                passe.dispatch_workgroups(largura.div_ceil(16), altura.div_ceil(16), 1);
             });
-            passe.set_pipeline(pipeline);
-            passe.set_bind_group(0, &recursos.grupo, &[]);
-            // Grupos de 16×16, como o `@workgroup_size` do WGSL declara. A divisão
-            // arredonda para cima: com 17 pixels de largura o último grupo trabalha
-            // pela metade, e é o shader que descarta quem cair fora.
-            passe.dispatch_workgroups(largura.div_ceil(16), altura.div_ceil(16), 1);
         }
         Pipeline::Fragmento {
             modulo,
