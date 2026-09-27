@@ -52,6 +52,10 @@ struct CamadaUniforme {
     uv_off: [f32; 2],
     alfa: f32,
     _reservado: f32,
+    /// A linha projetiva da perspectiva guiada, `[w0, w1, w2, 0]`: a UV é
+    /// `(uv_off + uv_x·s + uv_y·t) / (w0·s + w1·t + w2)`. Sem perspectiva é
+    /// `[0, 0, 1, 0]`, e a divisão por 1 é exata.
+    uv_w: [f32; 4],
 }
 
 /// Uma foto no ar — a que entra ou a que sai.
@@ -653,13 +657,15 @@ fn ajustes_de(v: &[f32]) -> Result<Ajustes, JsValue> {
 }
 
 fn corte_de(v: &[f32]) -> Result<Corte, JsValue> {
-    if v.len() != 8 {
+    // Oito números, ou oito mais os seis da perspectiva guiada — a mesma forma
+    // do `revelacao-web`.
+    if v.len() != 8 && v.len() != 14 {
         return Err(erro(format!(
-            "esperava 8 campos de corte, recebi {}",
+            "esperava 8 ou 14 campos de corte, recebi {}",
             v.len()
         )));
     }
-    Ok(Corte::novo(
+    let corte = Corte::novo(
         v[0],
         v[1],
         v[2],
@@ -668,94 +674,18 @@ fn corte_de(v: &[f32]) -> Result<Corte, JsValue> {
         v[5],
         v[6] != 0.0,
         v[7] != 0.0,
-    ))
-}
-
-/// Onde esta camada fica na janela, e que pedaço da foto ela mostra.
-///
-/// 🚨 **O enquadramento é a mesma conta do arquivo** (`Corte::retangulo` sobre
-/// `dimensoes_giradas`), e não uma aproximação: é o que impede o operador de
-/// enquadrar uma coisa na tela e o cliente ver outra. O que muda entre os dois é
-/// só quem interpola — aqui o amostrador, no arquivo a bilinear do core.
-/// Onde esta camada fica na janela, e que pedaço da foto ela mostra.
-///
-/// 🚨 **O enquadramento é a mesma conta do arquivo** (`Corte::retangulo` sobre
-/// `dimensoes_giradas`), e não uma aproximação: é o que impede o operador de
-/// enquadrar uma coisa na tela e o cliente ver outra. O que muda entre os dois é
-/// só quem interpola — aqui o amostrador, no arquivo a bilinear do core.
-/// As UVs do enquadramento — a parte **pura**, e é ela que o teste cobra.
-///
-/// 🔑 **Extraída de `montar_uniforme` em 2026-09-12**, quando o dono relatou
-/// que *"o rotacionamento de fotos na tela do cliente não está funcionando
-/// corretamente"* enquanto a revelação, as tiras e a biblioteca funcionavam. O
-/// resto daquela função precisa de uma `Camada` com textura de GPU e não se
-/// testa fora do navegador; esta parte é aritmética, e agora está presa a um
-/// teste que a compara com o `transformacao::aplicar` do core — a mesma conta
-/// que produz o arquivo.
-///
-/// Devolve `(uv_x, uv_y, uv_off)`, que o shader usa como
-/// `uv = uv_off + uv_x·s + uv_y·t` para `(s, t)` no quad `0..1`.
-///
-/// 🚨 **A ordem é a do `transformacao.rs`: espelhos, giro de 90°, ângulo,
-/// recorte.** Aqui ela é percorrida ao contrário, porque o caminho é o inverso
-/// — do pixel na tela de volta ao pixel da textura.
-pub(crate) fn uvs_do_enquadramento(
-    largura: u32,
-    altura: u32,
-    corte: &Corte,
-) -> ([f32; 2], [f32; 2], [f32; 2]) {
-    let (lg, ag) = corte.dimensoes_giradas(largura, altura);
-    let (rx, ry, rw, rh) = corte.retangulo(lg, ag);
-
-    // As UVs: do quad (0..1) para o pedaço da foto que o retângulo marca, no
-    // espaço girado — e daí de volta para o espaço da textura.
-    let (mut ux, mut uy, mut uoff) = (
-        [rw as f32 / lg as f32, 0.0],
-        [0.0, rh as f32 / ag as f32],
-        [rx as f32 / lg as f32, ry as f32 / ag as f32],
     );
-
-    // O endireitamento gira em torno do centro do espaço girado, como no core.
-    if corte.angulo() != 0.0 {
-        let r = corte.angulo().to_radians();
-        let (sen, cos) = r.sin_cos();
-        // Em UV o espaço não é quadrado: gira em pixels e volta.
-        let gira = |v: [f32; 2]| {
-            let (x, y) = (v[0] * lg as f32, v[1] * ag as f32);
-            [
-                (x * cos - y * sen) / lg as f32,
-                (x * sen + y * cos) / ag as f32,
-            ]
-        };
-        let centro = [0.5, 0.5];
-        let canto = [uoff[0] - centro[0], uoff[1] - centro[1]];
-        let girado = gira(canto);
-        uoff = [girado[0] + centro[0], girado[1] + centro[1]];
-        ux = gira(ux);
-        uy = gira(uy);
-    }
-
-    // Giro de 90° e espelhos: uma troca de eixos e um sinal.
-    let quartos = ((corte.giro_90() % 4) + 4) % 4;
-    for _ in 0..quartos {
-        // (x, y) → (y, 1 - x): um quarto de volta no espaço normalizado.
-        let troca = |v: [f32; 2]| [v[1], -v[0]];
-        ux = troca(ux);
-        uy = troca(uy);
-        uoff = [uoff[1], 1.0 - uoff[0]];
-    }
-    if corte.espelho_h() {
-        ux[0] = -ux[0];
-        uy[0] = -uy[0];
-        uoff[0] = 1.0 - uoff[0];
-    }
-    if corte.espelho_v() {
-        ux[1] = -ux[1];
-        uy[1] = -uy[1];
-        uoff[1] = 1.0 - uoff[1];
-    }
-
-    (ux, uy, uoff)
+    Ok(match v.get(8..14) {
+        Some(&[rx, ry, rz, foco, vertical, horizontal]) => {
+            corte.com_perspectiva(revelacao_core::perspectiva::Perspectiva::nova(
+                [rx, ry, rz],
+                foco,
+                vertical,
+                horizontal,
+            ))
+        }
+        _ => corte,
+    })
 }
 
 /// Onde esta camada fica na janela, e que pedaço da foto ela mostra.
@@ -780,17 +710,19 @@ fn montar_uniforme(camada: &Camada, janela: (f32, f32), alfa: f32, zoom: f32) ->
     let largura_na_tela = sw as f32 * escala;
     let altura_na_tela = sh as f32 * escala;
 
-    // 2. As UVs — a conta pura, testada em `uvs_do_enquadramento`.
-    let (ux, uy, uoff) =
-        revelacao_core::transformacao::uvs_do_enquadramento(camada.largura, camada.altura, corte);
+    // 2. As UVs — a conta pura, testada em `uvs_do_enquadramento` e, com
+    //    perspectiva, em `a_tela_do_cliente_amostra_o_que_o_arquivo_tem`.
+    let m =
+        revelacao_core::transformacao::mapa_do_enquadramento(camada.largura, camada.altura, corte);
 
     CamadaUniforme {
         escala: [largura_na_tela / jw, altura_na_tela / jh],
         centro: [0.0, 0.0],
-        uv_x: ux,
-        uv_y: uy,
-        uv_off: uoff,
+        uv_x: [m[0][0], m[1][0]],
+        uv_y: [m[0][1], m[1][1]],
+        uv_off: [m[0][2], m[1][2]],
         alfa,
         _reservado: 0.0,
+        uv_w: [m[2][0], m[2][1], m[2][2], 0.0],
     }
 }

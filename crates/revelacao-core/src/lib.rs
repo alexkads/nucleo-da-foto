@@ -49,4 +49,7 @@ pub use motor::adaptadores_da_maquina;
 #[cfg(target_arch = "wasm32")]
 pub use motor::registrar_flush_da_gpu;
 pub use motor::{Entrada, ErroAoAbrir, ErroDeMascara, InfoDoAdaptador, Motor, TemposDoMotor};
+/// A álgebra da perspectiva, para quem converte ponto da tela em ponto da
+/// foto pela mesma matriz ([`transformacao::Corte::mapa`]).
+pub use nalgebra;
 pub use transformacao::Corte;

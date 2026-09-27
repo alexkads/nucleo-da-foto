@@ -400,6 +400,35 @@ impl Corte {
         na_foto * desorientar * desperspectivar * desendireitar * centrar * recorte
     }
 
+    /// A perspectiva sozinha, em **pixels do espaço orientado**: leva o pixel
+    /// `(x, y)` da foto espelhada e girada (antes do endireitar) ao lugar dele
+    /// na foto corrigida, `H·(x, y, 1)` dividido.
+    ///
+    /// É o passo que o editor do site põe entre o giro de 90° e o endireitar,
+    /// como um `matrix3d` no CSS — a mesma matriz que o [`Corte::mapa`]
+    /// desfaz, só que no sentido de ida e em pixels.
+    pub fn homografia_em_pixels(&self, largura: u32, altura: u32) -> Matrix3<f64> {
+        let (lg, ag) = {
+            let (x, y) = self.dimensoes_giradas(largura.max(1), altura.max(1));
+            (x as f64, y as f64)
+        };
+        let r = 0.5 * lg.hypot(ag);
+        let centrar = Matrix3::new(
+            1.0 / r,
+            0.0,
+            -0.5 * lg / r,
+            0.0,
+            1.0 / r,
+            -0.5 * ag / r,
+            0.0,
+            0.0,
+            1.0,
+        );
+        let descentrar = Matrix3::new(r, 0.0, 0.5 * lg, 0.0, r, 0.5 * ag, 0.0, 0.0, 1.0);
+        let h = descentrar * self.perspectiva.homografia(self.orientacao(), lg, ag) * centrar;
+        h / h[(2, 2)]
+    }
+
     /// O contorno da foto dentro do **espaço** (girado, corrigido e
     /// endireitado), normalizado — os quatro cantos da foto, na ordem
     /// superior-esquerdo, superior-direito, inferior-direito, inferior-esquerdo.
@@ -919,7 +948,7 @@ fn linha_projetiva(
     let passo = m.column(0) / sw as f64;
     let mut v = m * Vector3::new(0.5 / sw as f64, t, 1.0);
     let dados = origem.as_raw();
-    for pixel in saida.chunks_exact_mut(4) {
+    for pixel in saida.as_chunks_mut::<4>().0 {
         let cor = if v.z > 1e-12 {
             let (u, w) = (v.x / v.z, v.y / v.z);
             if u >= -folga_u && u <= 1.0 + folga_u && w >= -folga_v && w <= 1.0 + folga_v {
@@ -2221,6 +2250,50 @@ mod testes_da_perspectiva {
             })
             .count();
         assert!(diferentes == 0, "espelho: {diferentes} pixels diferentes");
+    }
+
+    /// 🔑 A homografia em pixels (o `matrix3d` do editor do site) é a ida do
+    /// que o [`Corte::mapa`] desfaz: espelhar/girar o ponto da foto e levá-lo
+    /// pela homografia dá o mesmo lugar que o mapa inverso dá.
+    #[test]
+    fn a_homografia_em_pixels_e_a_ida_do_mapa() {
+        let (l, a) = (1200u32, 800u32);
+        for corte in cortes_com_perspectiva() {
+            // Sem ângulo nem recorte: o espaço corrigido é o do Enquadrar.
+            let sem_angulo = Corte::novo(
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                corte.giro_90(),
+                0.0,
+                corte.espelho_h(),
+                corte.espelho_v(),
+            )
+            .com_perspectiva(*corte.perspectiva());
+            let ida = sem_angulo.mapa(l, a, false).try_inverse().unwrap();
+            let h = sem_angulo.homografia_em_pixels(l, a);
+            let (lg, ag) = sem_angulo.dimensoes_giradas(l, a);
+            let t = sem_angulo.orientacao().matriz();
+            for (u, v) in [(0.2, 0.3), (0.7, 0.6), (0.5, 0.5)] {
+                // A foto (u, v) no espaço orientado, em pixels.
+                let r = 0.5 * (l as f64).hypot(a as f64);
+                let c = t * Vector3::new((u - 0.5) * l as f64 / r, (v - 0.5) * a as f64 / r, 1.0);
+                let (ox, oy) = (c.x * r + lg as f64 / 2.0, c.y * r + ag as f64 / 2.0);
+                let p = h * Vector3::new(ox, oy, 1.0);
+                let esperado = ida * Vector3::new(u, v, 1.0);
+                let (ex, ey) = (
+                    esperado.x / esperado.z * lg as f64,
+                    esperado.y / esperado.z * ag as f64,
+                );
+                assert!(
+                    (p.x / p.z - ex).abs() < 1e-6 && (p.y / p.z - ey).abs() < 1e-6,
+                    "{corte:?}: {:?} × {:?}",
+                    (p.x / p.z, p.y / p.z),
+                    (ex, ey)
+                );
+            }
+        }
     }
 
     /// No Enquadrar os cantos sem conteúdo aparecem (transparentes); no
