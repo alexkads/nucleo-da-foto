@@ -16,6 +16,13 @@
 //!    (propagação + busca aleatória); depois cada pixel do buraco vira a média
 //!    do que os patches que o cobrem dizem (o "voto"). Repete algumas vezes, e
 //!    o campo de correspondências sobe ao nível seguinte multiplicado por dois.
+//!    O voto é o do **patch que casou melhor**, e não a média: a média borra.
+//! 4. No nível cheio, a **síntese coerente** (Ashikhmin) refaz o buraco casca
+//!    a casca, continuando a fonte dos vizinhos já preenchidos, com o
+//!    resultado do EM como guia da estrutura. O EM sozinho acerta a estrutura
+//!    e perde a textura: numa estampa grande e de pouco contraste ele
+//!    convergia para o liso entre os desenhos (achado no app real, 2026-09-27,
+//!    num papel de parede adamascado).
 //!
 //! ## 🔑 Determinístico, e o mesmo no desktop e no navegador
 //!
@@ -34,8 +41,8 @@
 //! - **A resolução muda a escolha**: o preview sintetiza na resolução dele e a
 //!   exportação na do arquivo, então o remendo final pode não ser idêntico ao
 //!   da tela (parecido na textura e na cor, não pixel a pixel).
-//! - **Custo em CPU** cresce com a área: dezenas de milissegundos num remendo
-//!   de preview, centenas numa área grande a 24 MP. É feito uma vez por
+//! - **Custo em CPU** cresce com a área: ~0,6 s num remendo de 220 px no
+//!   preview de 2048 (release), segundos numa área grande a 24 MP. É feito uma vez por
 //!   retoque e guardado; só refaz quando o retoque ou a foto mudam.
 
 use crate::locais::Preenchimento;
@@ -45,6 +52,8 @@ const R: i32 = 3;
 /// O buraco no nível mais grosso não passa disto (em pixels).
 const LADO_GROSSO: i32 = 24;
 const ITERACOES_DO_PATCHMATCH: usize = 4;
+/// Rodadas de busca + voto por nível.
+const RODADAS_DO_EM: usize = 4;
 
 /// O resultado: a caixa do buraco, preenchida, em RGBA.
 #[derive(Clone, Debug, PartialEq)]
@@ -127,6 +136,89 @@ impl Nivel {
             }
         }
         valido
+    }
+
+    /// Casca de cebola **com patches** (Criminisi, Pérez e Toyama, 2004): de
+    /// fora para dentro, cada pixel da borda do buraco recebe o centro do
+    /// patch inteiro que mais se parece com o que já se conhece em volta dele.
+    ///
+    /// 🚨 **A difusão (média dos vizinhos) lavava a textura** (achado no app
+    /// real, 2026-09-27): o nível grosso nascia cinza e liso, a busca de
+    /// patches preferia os trechos lisos para casar com ele, e o papel de
+    /// parede saía sem estampa. Começando de patches de verdade, o EM só
+    /// refina.
+    fn preencher_por_patches(&mut self, fontes: &[(i32, i32)]) {
+        let mut conhecido: Vec<bool> = self.buraco.iter().map(|b| !b).collect();
+        loop {
+            let mut borda = Vec::new();
+            for y in 0..self.h {
+                for x in 0..self.w {
+                    if conhecido[self.i(x, y)] {
+                        continue;
+                    }
+                    let encosta = (-1..=1).any(|dy| {
+                        (-1..=1).any(|dx| {
+                            let (vx, vy) = (x + dx, y + dy);
+                            vx >= 0
+                                && vy >= 0
+                                && vx < self.w
+                                && vy < self.h
+                                && conhecido[self.i(vx, vy)]
+                        })
+                    });
+                    if encosta {
+                        borda.push((x, y));
+                    }
+                }
+            }
+            if borda.is_empty() {
+                // Sem vizinho conhecido nenhum (não acontece com fontes).
+                return self.preencher_por_difusao();
+            }
+            let mut novos = Vec::with_capacity(borda.len());
+            for &(x, y) in &borda {
+                let mut melhor = (u64::MAX, fontes[0]);
+                for &f in fontes {
+                    let mut d = 0u64;
+                    let mut n = 0u64;
+                    'patch: for dy in -R..=R {
+                        for dx in -R..=R {
+                            let (px, py) = (x + dx, y + dy);
+                            if px < 0 || py < 0 || px >= self.w || py >= self.h {
+                                continue;
+                            }
+                            let i = self.i(px, py);
+                            if !conhecido[i] {
+                                continue;
+                            }
+                            let a = self.cor[i];
+                            let b = self.cor[self.i(f.0 + dx, f.1 + dy)];
+                            for c in 0..3 {
+                                let e = a[c] as i64 - b[c] as i64;
+                                d += (e * e) as u64;
+                            }
+                            n += 1;
+                            // Com no máximo 49 pixels, o custo final é pelo
+                            // menos d·64/49: se isso já perde, desiste.
+                            if d * 64 / 49 >= melhor.0 {
+                                break 'patch;
+                            }
+                        }
+                    }
+                    // Normalizado pelos pixels conhecidos: o patch da quina,
+                    // com poucos, não ganha por ter menos a somar.
+                    let custo = (d * 64).checked_div(n).unwrap_or(u64::MAX);
+                    if custo < melhor.0 {
+                        melhor = (custo, f);
+                    }
+                }
+                novos.push((self.i(x, y), self.cor[self.i(melhor.1 .0, melhor.1 .1)]));
+            }
+            for (i, c) in novos {
+                self.cor[i] = c;
+                conhecido[i] = true;
+            }
+        }
     }
 
     /// Casca de cebola: de fora para dentro, a média dos vizinhos conhecidos.
@@ -266,7 +358,7 @@ fn patchmatch(
     nnf: &mut [(i32, i32)],
     valido: &[bool],
     sorteio: &mut Sorteio,
-) {
+) -> Vec<u64> {
     let ok = |s: (i32, i32)| {
         s.0 >= 0 && s.1 >= 0 && s.0 < n.w && s.1 < n.h && valido[(s.1 * n.w + s.0) as usize]
     };
@@ -320,13 +412,186 @@ fn patchmatch(
             }
         }
     }
+    custo
 }
 
-/// Cada pixel do buraco vira a média do que os patches que o cobrem dizem.
-fn votar(n: &mut Nivel, alvos: &[(i32, i32)], nnf: &[(i32, i32)]) {
-    let mut soma = vec![[0u32; 3]; (n.w * n.h) as usize];
-    let mut conta = vec![0u32; (n.w * n.h) as usize];
-    for (p, s) in alvos.iter().zip(nnf) {
+/// Meio lado da vizinhança da síntese coerente: 9×9, maior que o patch do
+/// EM para enxergar o desenho de uma estampa grande.
+const R_COERENTE: i32 = 4;
+/// O peso do guia do EM (×64 como a distância): uma diferença de cor ao
+/// centro pesa tanto quanto a mesma diferença em cada pixel da vizinhança.
+const PESO_DO_GUIA: u64 = 12;
+/// Candidatos sorteados por pixel na síntese coerente.
+const SORTEADOS: usize = 24;
+
+/// A distância entre a vizinhança **já conhecida** de `p` e a de `f`, por
+/// pixel contado (×64), parando quando passa de `teto`.
+fn distancia_mascarada(
+    n: &Nivel,
+    conhecido: &[bool],
+    p: (i32, i32),
+    f: (i32, i32),
+    teto: u64,
+) -> u64 {
+    let mut d = 0u64;
+    let mut conta = 0u64;
+    for dy in -R_COERENTE..=R_COERENTE {
+        for dx in -R_COERENTE..=R_COERENTE {
+            let (px, py) = (p.0 + dx, p.1 + dy);
+            let (fx, fy) = (f.0 + dx, f.1 + dy);
+            if px < 0
+                || py < 0
+                || px >= n.w
+                || py >= n.h
+                || fx < 0
+                || fy < 0
+                || fx >= n.w
+                || fy >= n.h
+            {
+                continue;
+            }
+            let i = n.i(px, py);
+            if !conhecido[i] {
+                continue;
+            }
+            let (a, b) = (n.cor[i], n.cor[n.i(fx, fy)]);
+            for c in 0..3 {
+                let e = a[c] as i64 - b[c] as i64;
+                d += (e * e) as u64;
+            }
+            conta += 1;
+        }
+        // Com no máximo 81 pixels, o custo final é pelo menos d·64/81.
+        if d * 64 / 81 >= teto {
+            return u64::MAX;
+        }
+    }
+    (d * 64).checked_div(conta).unwrap_or(u64::MAX)
+}
+
+/// 🔑 **Síntese coerente, casca a casca, na resolução cheia** (Ashikhmin,
+/// 2001, com a propagação do PatchMatch): cada pixel da borda do que falta
+/// procura, entre os candidatos, a vizinhança conhecida mais parecida — e os
+/// candidatos são sobretudo *continuar a fonte dos vizinhos já preenchidos*.
+/// Assim uma estampa grande e de pouco contraste continua desenhada, em vez
+/// de o EM convergir para os trechos lisos entre os desenhos (achado no app
+/// real, 2026-09-27: o papel de parede saía cinza). O resultado do EM entra
+/// como candidato também: ele traz a estrutura grossa.
+fn sintese_coerente(n: &mut Nivel, valido: &[bool], fontes: &[(i32, i32)], sorteio: &mut Sorteio) {
+    // O guia: o que o EM deixou no buraco — a estrutura grossa, sem a
+    // textura. Sem ele a síntese continuava o objeto que sobrou na borda
+    // (o resto do violino entrava no buraco).
+    let guia = n.cor.clone();
+    let custo_do_guia = |p: (i32, i32), c: (i32, i32), cor: &[[u8; 3]]| -> u64 {
+        let (a, b) = (
+            guia[(p.1 * n.w + p.0) as usize],
+            cor[(c.1 * n.w + c.0) as usize],
+        );
+        (0..3)
+            .map(|k| {
+                let e = a[k] as i64 - b[k] as i64;
+                (e * e) as u64
+            })
+            .sum::<u64>()
+            * PESO_DO_GUIA
+    };
+    let ok = |c: (i32, i32)| {
+        c.0 >= 0 && c.1 >= 0 && c.0 < n.w && c.1 < n.h && valido[(c.1 * n.w + c.0) as usize]
+    };
+    let mut conhecido: Vec<bool> = n.buraco.iter().map(|b| !b).collect();
+    let mut origem: Vec<Option<(i32, i32)>> = vec![None; (n.w * n.h) as usize];
+    loop {
+        let mut borda = Vec::new();
+        for y in 0..n.h {
+            for x in 0..n.w {
+                let i = n.i(x, y);
+                if conhecido[i] {
+                    continue;
+                }
+                let encosta = (-1..=1).any(|dy: i32| {
+                    (-1..=1).any(|dx: i32| {
+                        let (vx, vy) = (x + dx, y + dy);
+                        vx >= 0 && vy >= 0 && vx < n.w && vy < n.h && conhecido[n.i(vx, vy)]
+                    })
+                });
+                if encosta {
+                    borda.push((x, y));
+                }
+            }
+        }
+        if borda.is_empty() {
+            return;
+        }
+        let mut novos = Vec::with_capacity(borda.len());
+        for &(x, y) in &borda {
+            let mut candidatos: Vec<(i32, i32)> = Vec::with_capacity(SORTEADOS + 30);
+            // Continuar a fonte dos vizinhos já preenchidos (raio 2).
+            for dy in -2..=2i32 {
+                for dx in -2..=2i32 {
+                    let (vx, vy) = (x + dx, y + dy);
+                    if vx < 0 || vy < 0 || vx >= n.w || vy >= n.h {
+                        continue;
+                    }
+                    if let Some(o) = origem[n.i(vx, vy)] {
+                        let c = (o.0 - dx, o.1 - dy);
+                        if ok(c) {
+                            candidatos.push(c);
+                        }
+                    }
+                }
+            }
+            for _ in 0..SORTEADOS {
+                candidatos.push(fontes[sorteio.ate(fontes.len())]);
+            }
+            let mut melhor = (u64::MAX, candidatos[0]);
+            for &c in &candidatos {
+                let g = custo_do_guia((x, y), c, &n.cor);
+                if g >= melhor.0 {
+                    continue;
+                }
+                let d = distancia_mascarada(n, &conhecido, (x, y), c, melhor.0 - g);
+                if d != u64::MAX && d + g < melhor.0 {
+                    melhor = (d + g, c);
+                }
+            }
+            // Busca em volta do melhor, com raios que caem pela metade.
+            let mut raio = 32;
+            while raio >= 1 {
+                let c = (
+                    melhor.1 .0 + sorteio.ate((2 * raio + 1) as usize) as i32 - raio,
+                    melhor.1 .1 + sorteio.ate((2 * raio + 1) as usize) as i32 - raio,
+                );
+                if ok(c) {
+                    let g = custo_do_guia((x, y), c, &n.cor);
+                    if g < melhor.0 {
+                        let d = distancia_mascarada(n, &conhecido, (x, y), c, melhor.0 - g);
+                        if d != u64::MAX && d + g < melhor.0 {
+                            melhor = (d + g, c);
+                        }
+                    }
+                }
+                raio /= 2;
+            }
+            novos.push(((x, y), melhor.1));
+        }
+        for ((x, y), c) in novos {
+            let i = n.i(x, y);
+            n.cor[i] = n.cor[n.i(c.0, c.1)];
+            origem[i] = Some(c);
+            conhecido[i] = true;
+        }
+    }
+}
+
+/// Cada pixel do buraco toma a cor do patch que o cobre **e casou melhor**.
+///
+/// 🚨 **Não a média** (achado no app real, 2026-09-27): a média de até 49
+/// patches desalinhados por um pixel borra, o borrado alimenta a busca
+/// seguinte, que passa a preferir os trechos lisos — e o papel de parede
+/// saía cinza, sem estampa. O melhor patch mantém a textura nítida.
+fn votar_pelo_melhor(n: &mut Nivel, alvos: &[(i32, i32)], nnf: &[(i32, i32)], custo: &[u64]) {
+    let mut melhor = vec![(u64::MAX, [0u8; 3]); (n.w * n.h) as usize];
+    for ((p, s), &c) in alvos.iter().zip(nnf).zip(custo) {
         for dy in -R..=R {
             for dx in -R..=R {
                 let (qx, qy) = (p.0 + dx, p.1 + dy);
@@ -334,21 +599,16 @@ fn votar(n: &mut Nivel, alvos: &[(i32, i32)], nnf: &[(i32, i32)]) {
                     continue;
                 }
                 let q = n.i(qx, qy);
-                if !n.buraco[q] {
-                    continue;
+                // Empate: o de menor índice, para ser determinístico.
+                if n.buraco[q] && c < melhor[q].0 {
+                    melhor[q] = (c, n.cor[n.i(s.0 + dx, s.1 + dy)]);
                 }
-                let c = n.cor[n.i(s.0 + dx, s.1 + dy)];
-                for k in 0..3 {
-                    soma[q][k] += c[k] as u32;
-                }
-                conta[q] += 1;
             }
         }
     }
-    for q in 0..soma.len() {
-        if conta[q] > 0 {
-            let m = conta[q];
-            n.cor[q] = [0, 1, 2].map(|k| ((soma[q][k] + m / 2) / m) as u8);
+    for (q, (c, cor)) in melhor.into_iter().enumerate() {
+        if c != u64::MAX {
+            n.cor[q] = cor;
         }
     }
 }
@@ -495,27 +755,21 @@ pub fn preencher(rgba: &[u8], largura: u32, altura: u32, p: &Preenchimento) -> O
             })
             .collect();
         if anterior.is_none() {
-            n.preencher_por_difusao();
+            n.preencher_por_patches(&fontes);
         } else {
-            votar(n, &alvos, &nnf);
+            let custo: Vec<u64> = alvos
+                .iter()
+                .zip(&nnf)
+                .map(|(p, s)| distancia(n, *p, *s, u64::MAX))
+                .collect();
+            votar_pelo_melhor(n, &alvos, &nnf, &custo);
         }
-        let rodadas = 2 + (nivel > 0) as usize;
-        for _ in 0..rodadas {
-            patchmatch(n, &alvos, &mut nnf, &valido, &mut sorteio);
-            votar(n, &alvos, &nnf);
+        for _ in 0..RODADAS_DO_EM {
+            let custo = patchmatch(n, &alvos, &mut nnf, &valido, &mut sorteio);
+            votar_pelo_melhor(n, &alvos, &nnf, &custo);
         }
         if nivel == 0 {
-            // 🔑 O último passo não é voto: a média de patches que discordam
-            // por um pixel borra a textura (listras viram degradê). Cada pixel
-            // do buraco toma o centro do patch que casou melhor com o dele.
-            let mut nitido = n.cor.clone();
-            for (p, s) in alvos.iter().zip(&nnf) {
-                let q = n.i(p.0, p.1);
-                if n.buraco[q] {
-                    nitido[q] = n.cor[n.i(s.0, s.1)];
-                }
-            }
-            n.cor = nitido;
+            sintese_coerente(n, &valido, &fontes, &mut sorteio);
         }
         anterior = Some((n.w, n.h, alvos.into_iter().zip(nnf).collect()));
     }
@@ -540,6 +794,51 @@ pub fn preencher(rgba: &[u8], largura: u32, altura: u32, p: &Preenchimento) -> O
 
 #[cfg(test)]
 mod testes {
+
+    /// 🚨 **Estampa grande e de pouco contraste não pode sair lisa** (o papel
+    /// de parede adamascado do app real, 2026-09-27): o EM sozinho convergia
+    /// para o liso entre os desenhos. O remendo tem de guardar pelo menos
+    /// metade da variação que a estampa tem em volta.
+    #[test]
+    fn numa_estampa_grande_e_suave_o_remendo_nao_fica_liso() {
+        let (w, h) = (192u32, 192u32);
+        let img: Vec<u8> = (0..h)
+            .flat_map(|y| {
+                (0..w).flat_map(move |x| {
+                    // Bolinhas de raio 9 numa grade de 40 px, 24 níveis acima do fundo.
+                    let (cx, cy) = ((x % 40) as i32 - 20, (y % 40) as i32 - 20);
+                    let v = 120
+                        + if cx * cx + cy * cy < 81 { 24 } else { 0 }
+                        + ((x * 7 + y * 13) % 5) as u8;
+                    [v, v, v, 255]
+                })
+            })
+            .collect();
+        let p = buraco(vec![[0.45, 0.5], [0.55, 0.5]], 0.12);
+        let r = preencher(&img, w, h, &p).expect("remendo");
+        let desvio = |vals: &[f32]| {
+            let m = vals.iter().sum::<f32>() / vals.len() as f32;
+            (vals.iter().map(|v| (v - m).powi(2)).sum::<f32>() / vals.len() as f32).sqrt()
+        };
+        // Todo o buraco (o caminho com o raio) contra a foto inteira.
+        let raio = 0.12 * w as f32;
+        let (ax, bx, cy) = (0.45 * w as f32, 0.55 * w as f32, 0.5 * h as f32);
+        let miolo: Vec<f32> = (0..r.altura)
+            .flat_map(|y| (0..r.largura).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let (gx, gy) = ((r.x0 + x) as f32 + 0.5, (r.y0 + y) as f32 + 0.5);
+                let dx = gx - gx.clamp(ax, bx);
+                (dx * dx + (gy - cy).powi(2)).sqrt() < raio - 2.0
+            })
+            .map(|(x, y)| r.rgba[((y * r.largura + x) * 4) as usize] as f32)
+            .collect();
+        let foto: Vec<f32> = img.iter().step_by(4).map(|&v| v as f32).collect();
+        let (dm, df) = (desvio(&miolo), desvio(&foto));
+        assert!(
+            dm > 0.5 * df,
+            "o miolo ficou liso: desvio {dm:.1} contra {df:.1} na estampa"
+        );
+    }
     use super::*;
 
     /// Listras verticais de 4 px (escuro/claro) com um ruído fixo por cima.
