@@ -778,33 +778,3 @@ fn o_content_aware_por_laco_tira_o_que_foi_cercado() {
     b.definir_locais(&locais).unwrap();
     assert!(maior_diferenca(&saida, &revelar(&mut b, &pixels, w, h, &Ajustes::default())) <= 1);
 }
-
-#[test]
-fn sonda_faixa_do_band_aid() {
-    let (w, h) = (1200, 800);
-    let pixels = foto_com_luz(w, h);
-    let mut m = motor(Entrada::Compute);
-    m.definir_locais(&ReceitaLocal::default()).unwrap();
-    let original = revelar(&mut m, &pixels, w, h, &Ajustes::default());
-    let c = Carimbo {
-        caminho: vec![[0.5, 0.4], [0.505, 0.4]],
-        ..carimbo([0.45, 0.35], [0.5, 0.4], 0.03, 0.5)
-    };
-    m.definir_locais(&com_retoques(vec![Retoque::Heal(c)])).unwrap();
-    let heal = revelar(&mut m, &pixels, w, h, &Ajustes::default());
-    let mut colunas = std::collections::BTreeMap::new();
-    for y in 0..h {
-        for x in 0..w {
-            let i = ((y * w + x) * 4) as usize;
-            if heal[i] != original[i] {
-                let e = colunas.entry(x).or_insert((y, y, 0));
-                e.1 = y;
-                e.2 += 1;
-            }
-        }
-    }
-    for (x, (a, b, n)) in &colunas {
-        if b - a > 100 { eprintln!("coluna {x}: y {a}..{b} ({n})"); }
-    }
-    eprintln!("colunas mudadas: {}", colunas.len());
-}
