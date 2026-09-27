@@ -55,13 +55,19 @@ pub(crate) fn suportado(adaptador: &wgpu::Adapter) -> bool {
 
 /// Os pipelines do rasterizador — criados na primeira receita com máscara.
 pub(crate) struct Rasterizador {
-    layout_desenho: wgpu::BindGroupLayout,
+    pub(crate) layout_desenho: wgpu::BindGroupLayout,
     layout_compor: wgpu::BindGroupLayout,
-    capsula: wgpu::RenderPipeline,
+    pub(crate) capsula: wgpu::RenderPipeline,
     /// `[Somar, Subtrair]`.
     compor: [wgpu::RenderPipeline; 2],
     gradiente: [wgpu::RenderPipeline; 2],
-    alinhamento: u64,
+    /// O laço — `shaders/laco.wgsl`. `[Somar, Subtrair]`.
+    pub(crate) layout_laco: wgpu::BindGroupLayout,
+    pub(crate) laco: [wgpu::RenderPipeline; 2],
+    /// Clone e Heal — `shaders/retoque.wgsl`, ver `retoque.rs`.
+    pub(crate) layout_retoque: wgpu::BindGroupLayout,
+    pub(crate) retoque: wgpu::RenderPipeline,
+    pub(crate) alinhamento: u64,
 }
 
 fn indice(modo: Modo) -> usize {
@@ -214,18 +220,246 @@ impl Rasterizador {
                 subtrair,
             ),
         ];
+        let (layout_retoque, retoque) = pipeline_do_retoque(dispositivo);
+        let (layout_laco, laco) = pipelines_do_laco(dispositivo, somar, subtrair);
         Self {
+            layout_laco,
+            laco,
             layout_desenho,
             layout_compor,
             capsula,
             compor,
             gradiente,
+            layout_retoque,
+            retoque,
             alinhamento: dispositivo
                 .limits()
                 .min_uniform_buffer_offset_alignment
                 .max(TAMANHO_DO_DESENHO as u32) as u64,
         }
     }
+}
+
+/// O `struct Laco` do WGSL: dois `vec4` e os vértices, dois por `vec4`.
+pub(crate) const TAMANHO_DO_LACO: u64 = 32 + 16 * (locais::VERTICES_DO_LACO as u64 / 2);
+
+/// O uniforme de um laço numa imagem `largura × altura` — `None` quando ele
+/// não tem área dentro da foto.
+pub(crate) fn uniforme_do_laco(
+    pontos: &[[f32; 2]],
+    feather: f32,
+    largura: u32,
+    altura: u32,
+) -> Option<Vec<f32>> {
+    let poligono = locais::laco_em_pixels(pontos, largura, altura);
+    if poligono.len() < 3 {
+        return None;
+    }
+    let (w, h) = (largura as f32, altura as f32);
+    let f = feather * w.max(h);
+    let folga = f * 0.5 + 1.0;
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in &poligono {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    let caixa = [
+        (x0 - folga).floor().max(0.0),
+        (y0 - folga).floor().max(0.0),
+        (x1 + folga).ceil().min(w),
+        (y1 + folga).ceil().min(h),
+    ];
+    if caixa[2] <= caixa[0] || caixa[3] <= caixa[1] {
+        return None;
+    }
+    let mut u = vec![0.0f32; (TAMANHO_DO_LACO / 4) as usize];
+    u[..4].copy_from_slice(&[w, h, f, poligono.len() as f32]);
+    u[4..8].copy_from_slice(&caixa);
+    for (i, p) in poligono.iter().enumerate() {
+        u[8 + i * 2] = p[0];
+        u[8 + i * 2 + 1] = p[1];
+    }
+    Some(u)
+}
+
+/// A caixa (em pixels) que um uniforme de laço cobre — para o scissor.
+pub(crate) fn caixa_do_uniforme(u: &[f32]) -> (u32, u32, u32, u32) {
+    (u[4] as u32, u[5] as u32, u[6] as u32, u[7] as u32)
+}
+
+fn pipelines_do_laco(
+    dispositivo: &wgpu::Device,
+    somar: wgpu::BlendState,
+    subtrair: wgpu::BlendState,
+) -> (wgpu::BindGroupLayout, [wgpu::RenderPipeline; 2]) {
+    let modulo = dispositivo.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Laço"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/laco.wgsl").into()),
+    });
+    let layout_do_grupo = dispositivo.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Laço"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: true,
+                min_binding_size: wgpu::BufferSize::new(TAMANHO_DO_LACO),
+            },
+            count: None,
+        }],
+    });
+    let layout = dispositivo.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Laço"),
+        bind_group_layouts: &[&layout_do_grupo],
+        push_constant_ranges: &[],
+    });
+    let pipeline = |blend| {
+        dispositivo.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Laço"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &modulo,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &modulo,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: FORMATO,
+                    blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    };
+    (layout_do_grupo, [pipeline(somar), pipeline(subtrair)])
+}
+
+/// Os lacos de uma revelação num buffer só, com offset dinâmico, e o grupo
+/// que os liga.
+pub(crate) struct LacosNaGpu {
+    pub(crate) grupo: wgpu::BindGroup,
+    pub(crate) passo: u64,
+}
+
+pub(crate) fn subir_lacos(
+    dispositivo: &wgpu::Device,
+    fila: &wgpu::Queue,
+    rasterizador: &Rasterizador,
+    guardado: &mut Option<wgpu::Buffer>,
+    lacos: &[Vec<f32>],
+) -> Option<LacosNaGpu> {
+    if lacos.is_empty() {
+        return None;
+    }
+    let passo = TAMANHO_DO_LACO.div_ceil(rasterizador.alinhamento) * rasterizador.alinhamento;
+    let mut bytes = vec![0u8; (lacos.len() as u64 * passo) as usize];
+    for (i, u) in lacos.iter().enumerate() {
+        let inicio = i * passo as usize;
+        bytes[inicio..inicio + TAMANHO_DO_LACO as usize].copy_from_slice(bytemuck::cast_slice(u));
+    }
+    garantir(
+        dispositivo,
+        guardado,
+        bytes.len() as u64,
+        wgpu::BufferUsages::UNIFORM,
+        "Laços",
+    );
+    let buffer = guardado.as_ref().expect("garantido");
+    fila.write_buffer(buffer, 0, &bytes);
+    let grupo = dispositivo.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Laços"),
+        layout: &rasterizador.layout_laco,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer,
+                offset: 0,
+                size: wgpu::BufferSize::new(TAMANHO_DO_LACO),
+            }),
+        }],
+    });
+    Some(LacosNaGpu { grupo, passo })
+}
+
+/// O pipeline do retoque: lê uma textura e a máscara do destino, escreve outra.
+fn pipeline_do_retoque(
+    dispositivo: &wgpu::Device,
+) -> (wgpu::BindGroupLayout, wgpu::RenderPipeline) {
+    let modulo = dispositivo.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Retoque"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/retoque.wgsl").into()),
+    });
+    let textura = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    let layout_do_grupo = dispositivo.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Retoque"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(crate::retoque::TAMANHO_DO_UNIFORME),
+                },
+                count: None,
+            },
+            textura(1),
+            textura(2),
+            textura(3),
+        ],
+    });
+    let layout = dispositivo.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Retoque"),
+        bind_group_layouts: &[&layout_do_grupo],
+        push_constant_ranges: &[],
+    });
+    let pipeline = dispositivo.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Retoque"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &modulo,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &modulo,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+    (layout_do_grupo, pipeline)
 }
 
 /// O que a última atualização fez — é a régua da invalidação e da memória.
@@ -235,8 +469,14 @@ pub struct MedidasDosLocais {
     pub camadas_refeitas: u32,
     /// Componentes rasterizados (strokes e gradientes).
     pub componentes_desenhados: u32,
-    /// Bytes das texturas de máscara e do rascunho.
+    /// Bytes das texturas de máscara, do rascunho e do retoque.
     pub bytes: u64,
+    /// Retoques (Clone e Heal) aplicados nesta revelação — zero quando a
+    /// cadeia pronta foi reaproveitada.
+    pub retoques_aplicados: u32,
+    /// Milissegundos de CPU sintetizando remendos de Content-Aware nesta
+    /// revelação — zero quando todos vieram do guardado.
+    pub sintese_ms: f32,
     /// Milissegundos gastos na CPU montando os passes (a GPU roda depois).
     pub montagem_ms: f32,
 }
@@ -253,6 +493,7 @@ pub(crate) struct Mascaras {
     feitas: Vec<Option<Vec<Componente>>>,
     desenhos: Option<wgpu::Buffer>,
     trechos: Option<wgpu::Buffer>,
+    lacos: Option<wgpu::Buffer>,
 }
 
 fn textura(
@@ -295,6 +536,12 @@ enum Passo {
         modo: Modo,
         desenho: u64,
     },
+    Laco {
+        camada: u32,
+        modo: Modo,
+        laco: u64,
+        caixa: (u32, u32, u32, u32),
+    },
 }
 
 impl Mascaras {
@@ -314,6 +561,7 @@ impl Mascaras {
             feitas: Vec::new(),
             desenhos: None,
             trechos: None,
+            lacos: None,
         }
     }
 
@@ -382,6 +630,7 @@ impl Mascaras {
         let lado = w.max(h);
         let mut desenhos: Vec<[f32; 16]> = Vec::new();
         let mut trechos: Vec<[f32; 6]> = Vec::new();
+        let mut lacos: Vec<Vec<f32>> = Vec::new();
         let mut passos = Vec::new();
         for (i, camada) in camadas.iter().enumerate() {
             let componentes = &camada.componentes;
@@ -405,6 +654,21 @@ impl Mascaras {
                 desenho[0] = w;
                 desenho[1] = h;
                 match &componente.forma {
+                    Forma::Laco(l) => {
+                        let Some(u) = uniforme_do_laco(&l.pontos, l.feather, largura, altura)
+                        else {
+                            continue;
+                        };
+                        passos.push(Passo::Laco {
+                            camada: i as u32,
+                            modo: componente.modo,
+                            laco: lacos.len() as u64,
+                            caixa: caixa_do_uniforme(&u),
+                        });
+                        lacos.push(u);
+                        medidas.componentes_desenhados += 1;
+                        continue;
+                    }
                     Forma::Pincel(traco) => {
                         let Some(caixa) = traco.caixa_em_pixels(largura, altura) else {
                             continue;
@@ -478,7 +742,8 @@ impl Mascaras {
         // escrever o mesmo endereço duas vezes antes do `submit` faria todos
         // os desenhos lerem o último.
         let passo = rasterizador.alinhamento;
-        let mut bytes = vec![0u8; (desenhos.len() as u64 * passo) as usize];
+        let lacos_na_gpu = subir_lacos(dispositivo, fila, rasterizador, &mut self.lacos, &lacos);
+        let mut bytes = vec![0u8; (desenhos.len().max(1) as u64 * passo) as usize];
         for (i, d) in desenhos.iter().enumerate() {
             let inicio = i * passo as usize;
             bytes[inicio..inicio + TAMANHO_DO_DESENHO as usize]
@@ -599,6 +864,19 @@ impl Mascaras {
                     r.set_scissor_rect(caixa.0, caixa.1, caixa.2 - caixa.0, caixa.3 - caixa.1);
                     r.draw(0..6, 0..1);
                 }
+                Passo::Laco {
+                    camada,
+                    modo,
+                    laco,
+                    caixa,
+                } => {
+                    let l = lacos_na_gpu.as_ref().expect("há laço, há buffer");
+                    let mut r = passe(encoder, &vista_da_camada(*camada), false);
+                    r.set_pipeline(&rasterizador.laco[indice(*modo)]);
+                    r.set_bind_group(0, &l.grupo, &[(*laco * l.passo) as u32]);
+                    r.set_scissor_rect(caixa.0, caixa.1, caixa.2 - caixa.0, caixa.3 - caixa.1);
+                    r.draw(0..6, 0..1);
+                }
                 Passo::Gradiente {
                     camada,
                     modo,
@@ -618,7 +896,7 @@ impl Mascaras {
 }
 
 /// Um passe de render sobre uma vista da máscara — limpando antes ou não.
-fn passe(
+pub(crate) fn passe(
     encoder: &mut wgpu::CommandEncoder,
     vista: &wgpu::TextureView,
     limpar: bool,
@@ -646,7 +924,7 @@ fn passe(
 }
 
 /// Um buffer com pelo menos `tamanho` bytes, reaproveitado entre quadros.
-fn garantir(
+pub(crate) fn garantir(
     dispositivo: &wgpu::Device,
     guardado: &mut Option<wgpu::Buffer>,
     tamanho: u64,

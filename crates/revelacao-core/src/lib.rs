@@ -28,6 +28,8 @@ pub mod jpeg;
 pub mod locais;
 mod mascaras;
 pub mod motor;
+pub mod preenchimento;
+mod retoque;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod testes_das_mascaras;
 pub mod transformacao;

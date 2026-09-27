@@ -507,6 +507,22 @@ impl Motor {
         Ok(())
     }
 
+    /// A máscara `camada` como está na GPU, em bytes 0–255, do tamanho da
+    /// cópia de trabalho — a sobreposição vermelha do editor ("mostrar
+    /// máscara"). Vazio se a camada não existe. Chame depois de
+    /// [`Motor::aplicar`]: é leitura do cache, não revela de novo.
+    pub async fn mascara(&mut self, camada: u32) -> Result<Vec<u8>, JsValue> {
+        let (_, largura, altura) = self
+            .trabalho
+            .clone()
+            .ok_or_else(|| erro("nenhuma imagem carregada"))?;
+        Ok(self
+            .motor
+            .ler_mascara_async(largura, altura, camada)
+            .await
+            .unwrap_or_default())
+    }
+
     /// Aplica os ajustes à cópia de trabalho e desenha no canvas.
     ///
     /// `agora` é o relógio de quem arrasta (`performance.now()`): com ele, as

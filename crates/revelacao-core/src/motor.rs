@@ -127,6 +127,16 @@ struct Recursos {
     grades_pendentes: bool,
     /// As máscaras locais deste tamanho — cache refeito da receita.
     mascaras: Mascaras,
+    /// Clone e Heal deste tamanho — o resultado que a revelação lê.
+    retoques: crate::retoque::Retoques,
+}
+
+/// A textura que a revelação lê: a entrada original, ou o último retoque.
+fn entrada_efetiva(recursos: &Recursos) -> &wgpu::Texture {
+    recursos
+        .retoques
+        .resultado()
+        .unwrap_or(&recursos.textura_entrada)
 }
 
 fn criar_recursos(
@@ -232,6 +242,7 @@ fn criar_recursos(
         ultimo_pedido_ms: 0.0,
         grades_pendentes: false,
         mascaras,
+        retoques: Default::default(),
     }
 }
 
@@ -816,19 +827,28 @@ impl Motor {
         self.mascaras_suportadas
     }
 
-    /// Os bytes de uma camada da máscara em uso para este tamanho — para os
-    /// testes compararem a GPU com a referência em CPU.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(crate) fn ler_camada_da_mascara(
+    /// Os bytes (0–255) de uma camada da máscara, como está na GPU para
+    /// imagens `largura × altura` — a sobreposição vermelha da tela ("mostrar
+    /// máscara", `O`). `None` se nada foi revelado nesse tamanho, ou se a
+    /// camada não existe.
+    ///
+    /// Lê o **cache**, sem refazer: chame depois de revelar com a receita.
+    pub async fn ler_mascara_async(
         &mut self,
         largura: u32,
         altura: u32,
         camada: u32,
-    ) -> Vec<u8> {
-        let recursos = self
-            .cache
-            .get(&(largura, altura))
-            .expect("revele antes de ler");
+    ) -> Option<Vec<u8>> {
+        if camada as usize >= self.locais.camadas.len() {
+            return None;
+        }
+        let recursos = self.cache.get(&(largura, altura))?;
+        let textura = &recursos.mascaras.textura;
+        if (textura.width(), textura.height()) != (largura, altura)
+            || camada >= textura.depth_or_array_layers()
+        {
+            return None;
+        }
         let alinhado = largura.div_ceil(256) * 256;
         let buffer = self.dispositivo.create_buffer(&wgpu::BufferDescriptor {
             label: Some("leitura da máscara"),
@@ -839,7 +859,7 @@ impl Motor {
         let mut encoder = self.dispositivo.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
-                texture: &recursos.mascaras.textura,
+                texture: textura,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: 0,
@@ -864,15 +884,39 @@ impl Motor {
         );
         self.fila.submit(std::iter::once(encoder.finish()));
         let fatia = buffer.slice(..);
-        fatia.map_async(wgpu::MapMode::Read, |_| {});
-        self.dispositivo.poll(wgpu::Maintain::Wait);
+        let (avisa, espera) = futures_channel::oneshot::channel();
+        fatia.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = avisa.send(r);
+        });
+        if esperar_o_mapeamento(&self.dispositivo, &self.fila, espera)
+            .await
+            .is_none()
+        {
+            buffer.unmap();
+            return None;
+        }
         let dados = fatia.get_mapped_range();
-        (0..altura)
+        let saida = (0..altura)
             .flat_map(|y| {
                 let inicio = (y * alinhado) as usize;
                 dados[inicio..inicio + largura as usize].to_vec()
             })
-            .collect()
+            .collect();
+        drop(dados);
+        buffer.unmap();
+        Some(saida)
+    }
+
+    /// [`Motor::ler_mascara_async`] bloqueando — para os testes.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn ler_camada_da_mascara(
+        &mut self,
+        largura: u32,
+        altura: u32,
+        camada: u32,
+    ) -> Vec<u8> {
+        pollster::block_on(self.ler_mascara_async(largura, altura, camada))
+            .expect("revele antes de ler")
     }
 
     /// Uma passada: sobe o que mudou, despacha, lê de volta.
@@ -1199,7 +1243,7 @@ fn preparar<'a>(
             recursos.grupo = montar_grupo(
                 dispositivo,
                 pipeline,
-                &recursos.textura_entrada,
+                entrada_efetiva(recursos),
                 &recursos.textura_saida,
                 &recursos.buffer_ajustes,
                 &recursos.textura_grade_sh,
@@ -1236,7 +1280,7 @@ fn atualizar_mascaras(
     altura: u32,
     medidas: &mut MedidasDosLocais,
 ) {
-    if !locais.camadas.is_empty() && rasterizador.is_none() {
+    if !locais.vazia() && rasterizador.is_none() {
         *rasterizador = Some(Rasterizador::novo(dispositivo));
     }
     let recriou = recursos.mascaras.atualizar(
@@ -1249,11 +1293,27 @@ fn atualizar_mascaras(
         altura,
         medidas,
     );
-    if recriou {
+    // Os retoques vêm antes da revelação no mesmo encoder: leem a entrada (ou
+    // o retoque anterior) e escrevem outra textura, nunca a que leem.
+    let pixels = recursos.ultimos_pixels.clone();
+    let trocou_a_entrada = recursos.retoques.atualizar(
+        dispositivo,
+        fila,
+        encoder,
+        rasterizador.as_ref(),
+        &recursos.textura_entrada,
+        pixels.as_ref(),
+        &locais.retoques,
+        largura,
+        altura,
+        medidas,
+    );
+    medidas.bytes += recursos.retoques.bytes();
+    if recriou || trocou_a_entrada {
         recursos.grupo = montar_grupo(
             dispositivo,
             pipeline,
-            &recursos.textura_entrada,
+            entrada_efetiva(recursos),
             &recursos.textura_saida,
             &recursos.buffer_ajustes,
             &recursos.textura_grade_sh,

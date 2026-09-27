@@ -134,6 +134,124 @@ pub enum Forma {
     Pincel(BrushStroke),
     Linear(GradienteLinear),
     Radial(GradienteRadial),
+    Laco(Laco),
+}
+
+/// Um laço: o polígono fechado que o operador cercou — livre (arrastando) ou
+/// poligonal (clique a clique), é o mesmo polígono.
+///
+/// O último ponto se liga ao primeiro. A borda é suave por **distância à
+/// borda**: `feather` é a largura da transição, em fração do maior lado da foto
+/// (a mesma régua do raio do pincel), centrada na linha do laço — metade para
+/// dentro, metade para fora. Zero é borda dura.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Laco {
+    pub pontos: Vec<[f32; 2]>,
+    #[serde(default)]
+    pub feather: f32,
+}
+
+/// Quantos vértices o laço leva à GPU — o tamanho do `array` do WGSL (dois por
+/// `vec4`). Um laço livre tem centenas de pontos; ele é simplificado
+/// (Douglas–Peucker) até caber, com a menor tolerância que basta.
+pub const VERTICES_DO_LACO: usize = 256;
+
+/// O laço em pixels de uma imagem `largura × altura`, simplificado até
+/// [`VERTICES_DO_LACO`]. A GPU e a referência em CPU desenham **este**
+/// polígono, e por isso concordam.
+pub fn laco_em_pixels(pontos: &[[f32; 2]], largura: u32, altura: u32) -> Vec<[f32; 2]> {
+    let (w, h) = (largura as f32, altura as f32);
+    let px: Vec<[f32; 2]> = pontos.iter().map(|p| [p[0] * w, p[1] * h]).collect();
+    let mut tolerancia = 0.5;
+    loop {
+        let simples = douglas_peucker(&px, tolerancia);
+        if simples.len() <= VERTICES_DO_LACO {
+            return simples;
+        }
+        tolerancia *= 2.0;
+    }
+}
+
+fn douglas_peucker(pontos: &[[f32; 2]], tolerancia: f32) -> Vec<[f32; 2]> {
+    if pontos.len() <= 3 {
+        return pontos.to_vec();
+    }
+    let mut manter = vec![false; pontos.len()];
+    manter[0] = true;
+    manter[pontos.len() - 1] = true;
+    let mut pilha = vec![(0usize, pontos.len() - 1)];
+    while let Some((a, b)) = pilha.pop() {
+        let (mut pior, mut onde) = (0.0f32, a);
+        for (i, p) in pontos.iter().enumerate().take(b).skip(a + 1) {
+            let d = distancia_ao_segmento(*p, pontos[a], pontos[b]);
+            if d > pior {
+                pior = d;
+                onde = i;
+            }
+        }
+        if pior > tolerancia {
+            manter[onde] = true;
+            pilha.push((a, onde));
+            pilha.push((onde, b));
+        }
+    }
+    pontos
+        .iter()
+        .zip(manter)
+        .filter_map(|(p, m)| m.then_some(*p))
+        .collect()
+}
+
+fn distancia_ao_segmento(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let ap = [p[0] - a[0], p[1] - a[1]];
+    let l2 = ab[0] * ab[0] + ab[1] * ab[1];
+    let t = if l2 > 1e-12 {
+        ((ap[0] * ab[0] + ap[1] * ab[1]) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let d = [ap[0] - ab[0] * t, ap[1] - ab[1] * t];
+    (d[0] * d[0] + d[1] * d[1]).sqrt()
+}
+
+/// A distância **com sinal** de `p` à borda do polígono (em pixels): positiva
+/// dentro, negativa fora. Dentro/fora pela regra par-ímpar — um laço que se
+/// cruza fica com as partes cruzadas de fora, como no Photoshop.
+///
+/// 🔑 A mesma conta, na mesma ordem, de `fs_laco` em `shaders/laco.wgsl`.
+pub fn distancia_ao_laco(poligono: &[[f32; 2]], p: [f32; 2]) -> f32 {
+    let n = poligono.len();
+    let mut dentro = false;
+    let mut menor = f32::MAX;
+    for i in 0..n {
+        let a = poligono[i];
+        let b = poligono[(i + 1) % n];
+        if (a[1] > p[1]) != (b[1] > p[1]) {
+            let x = (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0];
+            if p[0] < x {
+                dentro = !dentro;
+            }
+        }
+        menor = menor.min(distancia_ao_segmento(p, a, b));
+    }
+    if dentro {
+        menor
+    } else {
+        -menor
+    }
+}
+
+/// A cobertura do laço em `p` (pixels), com a transição centrada na borda.
+pub fn cobertura_do_laco(poligono: &[[f32; 2]], feather_px: f32, p: [f32; 2]) -> f32 {
+    if poligono.len() < 3 {
+        return 0.0;
+    }
+    suave(
+        -feather_px * 0.5,
+        feather_px * 0.5,
+        distancia_ao_laco(poligono, p),
+    )
 }
 
 /// Um gesto de pincel.
@@ -174,21 +292,87 @@ pub struct GradienteRadial {
     pub fora: bool,
 }
 
-/// Um retoque. Os dois tipos têm os mesmos parâmetros e fazem coisas
-/// diferentes: o Clone copia os pixels; o Heal copia a textura e adapta cor e
-/// luz à vizinhança do destino.
+/// Um retoque.
+///
+/// - **Clone** (carimbo) copia os pixels da origem.
+/// - **Heal** (band-aid) copia a textura da origem e adapta cor e luz à
+///   vizinhança do destino.
+/// - **Preencher** (Content-Aware) não tem origem: sintetiza a área com
+///   patches da vizinhança (`preenchimento.rs`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tipo", rename_all = "snake_case")]
 pub enum Retoque {
     Clone(Carimbo),
     Heal(Carimbo),
+    Preencher(Preenchimento),
 }
 
 impl Retoque {
-    pub fn carimbo(&self) -> &Carimbo {
+    /// A origem e o caminho — `None` no Content-Aware, que não tem origem.
+    pub fn carimbo(&self) -> Option<&Carimbo> {
         match self {
-            Retoque::Clone(c) | Retoque::Heal(c) => c,
+            Retoque::Clone(c) | Retoque::Heal(c) => Some(c),
+            Retoque::Preencher(_) => None,
         }
+    }
+
+    /// A máscara do destino, como stroke de opacidade cheia.
+    pub fn traco(&self) -> BrushStroke {
+        match self {
+            Retoque::Clone(c) | Retoque::Heal(c) => c.como_traco(),
+            Retoque::Preencher(p) => BrushStroke {
+                raio: p.raio,
+                feather: p.feather,
+                opacidade: 1.0,
+                pontos: p.caminho.iter().map(|q| [q[0], q[1], 1.0]).collect(),
+            },
+        }
+    }
+
+    pub fn opacidade(&self) -> f32 {
+        match self {
+            Retoque::Clone(c) | Retoque::Heal(c) => c.opacidade,
+            Retoque::Preencher(p) => p.opacidade,
+        }
+    }
+}
+
+/// A área a preencher pelo conteúdo em volta — o caminho pintado, sem origem.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Preenchimento {
+    /// O caminho pintado (com `raio`) — vazio quando a área é um laço.
+    #[serde(default)]
+    pub caminho: Vec<[f32; 2]>,
+    pub raio: f32,
+    pub feather: f32,
+    pub opacidade: f32,
+    /// A área cercada por um laço, em vez de pintada. Com laço, `caminho` e
+    /// `raio` não contam, e `feather` é o do laço (fração do maior lado).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub laco: Vec<[f32; 2]>,
+}
+
+impl Preenchimento {
+    fn saneado(mut self) -> Option<Self> {
+        self.caminho = self
+            .caminho
+            .into_iter()
+            .filter_map(posicao)
+            .take(MAXIMO_DE_PONTOS)
+            .collect();
+        self.laco = self
+            .laco
+            .into_iter()
+            .filter_map(posicao)
+            .take(MAXIMO_DE_PONTOS)
+            .collect();
+        if self.laco.len() < 3 {
+            self.laco.clear();
+        }
+        self.raio = finito_ou(self.raio, RAIO_MINIMO).clamp(RAIO_MINIMO, 0.25);
+        self.feather = finito_ou(self.feather, 0.0).clamp(0.0, 1.0);
+        self.opacidade = finito_ou(self.opacidade, 1.0).clamp(0.0, 1.0);
+        (!self.caminho.is_empty() || !self.laco.is_empty()).then_some(self)
     }
 }
 
@@ -226,6 +410,82 @@ impl Carimbo {
             pontos: self.caminho.iter().map(|p| [p[0], p[1], 1.0]).collect(),
         }
     }
+}
+
+/// Quantas amostras o anel do Heal leva à GPU — o tamanho do `array` do WGSL.
+pub const AMOSTRAS_DO_ANEL: usize = 96;
+
+/// O anel do Heal: pontos **logo fora** da máscara de destino, em pixels de uma
+/// imagem `largura × altura`, onde a diferença de cor entre destino e fonte é
+/// medida. É só geometria — sai dos parâmetros, sem ler pixel nenhum —, e por
+/// isso a mesma conta serve ao desktop e ao navegador.
+///
+/// Cada ponto do caminho (espaçados de meio raio) contribui com 16 pontos num
+/// círculo de `1,25 × raio + 2 px`. Saem os que caem dentro de outra cápsula
+/// do caminho, fora da foto, ou cuja fonte (`ponto + deslocamento`) cai fora
+/// da foto. Passando de [`AMOSTRAS_DO_ANEL`], fica um a cada tanto.
+pub fn anel_do_carimbo(carimbo: &Carimbo, largura: u32, altura: u32) -> Vec<[f32; 2]> {
+    let (w, h) = (largura as f32, altura as f32);
+    let r = carimbo.raio * w.max(h);
+    let raio_do_anel = r * 1.25 + 2.0;
+    let [dx, dy] = carimbo.deslocamento();
+    let (dx, dy) = (dx * w, dy * h);
+    let caminho: Vec<[f32; 2]> = carimbo
+        .caminho
+        .iter()
+        .map(|p| [p[0] * w, p[1] * h])
+        .collect();
+
+    // Os centros: o caminho reamostrado a cada meio raio.
+    let passo = (r * 0.5).max(1.0);
+    let mut centros = vec![caminho[0]];
+    for par in caminho.windows(2) {
+        let (a, b) = (par[0], par[1]);
+        let comprimento = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+        let n = (comprimento / passo).ceil() as usize;
+        for k in 1..=n {
+            let t = k as f32 / n as f32;
+            centros.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+        }
+    }
+    let dentro_da_mascara = |q: [f32; 2]| {
+        let trechos: Vec<([f32; 2], [f32; 2])> = if caminho.len() == 1 {
+            vec![(caminho[0], caminho[0])]
+        } else {
+            caminho.windows(2).map(|p| (p[0], p[1])).collect()
+        };
+        trechos.iter().any(|(a, b)| {
+            let ab = [b[0] - a[0], b[1] - a[1]];
+            let aq = [q[0] - a[0], q[1] - a[1]];
+            let l2 = ab[0] * ab[0] + ab[1] * ab[1];
+            let t = if l2 > 1e-9 {
+                ((aq[0] * ab[0] + aq[1] * ab[1]) / l2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let d = [aq[0] - ab[0] * t, aq[1] - ab[1] * t];
+            (d[0] * d[0] + d[1] * d[1]).sqrt() < r * 1.15
+        })
+    };
+    let na_foto = |x: f32, y: f32| x >= 0.5 && y >= 0.5 && x <= w - 0.5 && y <= h - 0.5;
+
+    let mut anel = Vec::new();
+    for c in &centros {
+        for k in 0..16 {
+            let a = k as f32 / 16.0 * std::f32::consts::TAU;
+            let q = [c[0] + raio_do_anel * a.cos(), c[1] + raio_do_anel * a.sin()];
+            if na_foto(q[0], q[1]) && na_foto(q[0] + dx, q[1] + dy) && !dentro_da_mascara(q) {
+                anel.push(q);
+            }
+        }
+    }
+    if anel.len() > AMOSTRAS_DO_ANEL {
+        let passo = anel.len() as f32 / AMOSTRAS_DO_ANEL as f32;
+        anel = (0..AMOSTRAS_DO_ANEL)
+            .map(|i| anel[(i as f32 * passo) as usize])
+            .collect();
+    }
+    anel
 }
 
 /// Por que uma receita não pôde ser lida.
@@ -326,6 +586,21 @@ impl Componente {
                 inicio: posicao(g.inicio)?,
                 fim: posicao(g.fim)?,
             }),
+            Forma::Laco(l) => {
+                let pontos: Vec<[f32; 2]> = l
+                    .pontos
+                    .into_iter()
+                    .filter_map(posicao)
+                    .take(MAXIMO_DE_PONTOS)
+                    .collect();
+                if pontos.len() < 3 {
+                    return None;
+                }
+                Forma::Laco(Laco {
+                    pontos,
+                    feather: finito_ou(l.feather, 0.0).clamp(0.0, 0.25),
+                })
+            }
             Forma::Radial(g) => Forma::Radial(GradienteRadial {
                 centro: posicao(g.centro)?,
                 raio_x: finito_ou(g.raio_x, RAIO_MINIMO).clamp(RAIO_MINIMO, 2.0),
@@ -416,6 +691,7 @@ impl ReceitaLocal {
             .filter_map(|r| match r {
                 Retoque::Clone(c) => c.saneado().map(Retoque::Clone),
                 Retoque::Heal(c) => c.saneado().map(Retoque::Heal),
+                Retoque::Preencher(p) => p.saneado().map(Retoque::Preencher),
             })
             .take(MAXIMO_DE_RETOQUES)
             .collect();
@@ -507,6 +783,11 @@ pub fn cobertura_do_gradiente(forma: &Forma, p: [f32; 2], largura: f32, altura: 
                 dentro
             }
         }
+        Forma::Laco(l) => cobertura_do_laco(
+            &laco_em_pixels(&l.pontos, largura as u32, altura as u32),
+            l.feather * lado,
+            p,
+        ),
         Forma::Pincel(_) => 0.0,
     }
 }
@@ -866,6 +1147,96 @@ mod testes {
         };
         assert_eq!((t.raio, t.feather, t.opacidade), (1.0, 0.0, 1.0));
         assert_eq!(t.pontos[0][2], 1.0);
+    }
+
+    #[test]
+    fn o_laco_pinta_dentro_e_a_borda_suave_fica_na_linha() {
+        let quadrado = vec![[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]];
+        let camada = camada_com(vec![Componente {
+            modo: Modo::Somar,
+            forma: Forma::Laco(Laco {
+                pontos: quadrado.clone(),
+                feather: 0.0,
+            }),
+        }]);
+        let m = mascara_em_cpu(&camada, 40, 40);
+        assert_eq!(m[20 * 40 + 20], 1.0);
+        assert_eq!(m[20 * 40 + 5], 0.0);
+        assert_eq!(m[20 * 40 + 11], 1.0, "logo dentro da borda (x = 10)");
+        assert_eq!(m[20 * 40 + 9], 0.0, "logo fora");
+
+        let suave = mascara_em_cpu(
+            &camada_com(vec![Componente {
+                modo: Modo::Somar,
+                forma: Forma::Laco(Laco {
+                    pontos: quadrado,
+                    feather: 0.2, // 8 px de transição
+                }),
+            }]),
+            40,
+            40,
+        );
+        let borda = suave[20 * 40 + 10];
+        assert!(
+            borda > 0.3 && borda < 0.7,
+            "meio da transição na linha: {borda}"
+        );
+        assert_eq!(suave[20 * 40 + 20], 1.0);
+        assert_eq!(suave[20 * 40 + 2], 0.0);
+    }
+
+    /// Um laço livre de 2000 pontos cabe nos vértices da GPU e continua o mesmo
+    /// contorno (a tolerância da simplificação é de meio pixel para cima).
+    #[test]
+    fn o_laco_livre_e_simplificado_sem_perder_a_forma() {
+        let circulo: Vec<[f32; 2]> = (0..2000)
+            .map(|i| {
+                let a = i as f32 / 2000.0 * std::f32::consts::TAU;
+                [0.5 + 0.3 * a.cos(), 0.5 + 0.3 * a.sin()]
+            })
+            .collect();
+        let px = laco_em_pixels(&circulo, 400, 400);
+        assert!(
+            px.len() <= VERTICES_DO_LACO && px.len() > 16,
+            "{}",
+            px.len()
+        );
+        for p in &px {
+            let r = ((p[0] - 200.0).powi(2) + (p[1] - 200.0).powi(2)).sqrt();
+            assert!((r - 120.0).abs() < 0.01, "os vértices ficam no círculo");
+        }
+        // E no meio de cada lado o erro é pequeno.
+        let d = distancia_ao_laco(&px, [200.0 + 120.0, 200.0]).abs();
+        assert!(d < 2.0, "{d}");
+    }
+
+    #[test]
+    fn o_anel_fica_fora_da_mascara_e_dentro_da_foto() {
+        let c = Carimbo {
+            origem: [0.2, 0.5],
+            destino_inicial: [0.6, 0.5],
+            caminho: vec![[0.6, 0.5], [0.8, 0.5]],
+            raio: 0.05,
+            feather: 0.3,
+            opacidade: 1.0,
+        };
+        let anel = anel_do_carimbo(&c, 200, 100);
+        assert!(!anel.is_empty() && anel.len() <= AMOSTRAS_DO_ANEL);
+        let r = 0.05 * 200.0;
+        for q in &anel {
+            // Longe do caminho (y = 50, x de 120 a 160) e dentro da foto,
+            // com a fonte (40 px à esquerda) dentro também.
+            let dx = if q[0] < 120.0 {
+                120.0 - q[0]
+            } else if q[0] > 160.0 {
+                q[0] - 160.0
+            } else {
+                0.0
+            };
+            let d = (dx * dx + (q[1] - 50.0).powi(2)).sqrt();
+            assert!(d >= r * 1.15, "{q:?} a {d} px do caminho");
+            assert!(q[0] - 80.0 >= 0.5 && q[1] >= 0.5 && q[1] <= 99.5);
+        }
     }
 
     #[test]

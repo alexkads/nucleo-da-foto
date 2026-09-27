@@ -86,6 +86,28 @@ fn camada_completa(ev: f32) -> Camada {
                 }),
             },
             pincel(vec![[0.4, 0.3, 1.0]], 0.05, 0.2, 1.0, Modo::Subtrair),
+            // Um laço em estrela (côncavo), com feather, que se cruza com o resto.
+            Componente {
+                modo: Modo::Somar,
+                forma: Forma::Laco(Laco {
+                    pontos: (0..10)
+                        .map(|k| {
+                            let a = k as f32 / 10.0 * std::f32::consts::TAU;
+                            let r = if k % 2 == 0 { 0.2 } else { 0.08 };
+                            [0.3 + r * a.cos(), 0.65 + r * a.sin()]
+                        })
+                        .collect(),
+                    feather: 0.03,
+                }),
+            },
+            // E um laço que apaga.
+            Componente {
+                modo: Modo::Subtrair,
+                forma: Forma::Laco(Laco {
+                    pontos: vec![[0.7, 0.4], [0.85, 0.45], [0.8, 0.6]],
+                    feather: 0.0,
+                }),
+            },
             // Um clique na borda, meio fora da foto.
             pincel(vec![[0.0, 0.0, 1.0]], 0.08, 0.0, 0.5, Modo::Somar),
         ],
@@ -315,8 +337,11 @@ fn a_mascara_do_preview_e_a_da_exportacao_reduzida() {
     }
     let media = soma as f32 / (pw * ph) as f32;
     assert!(media < 1.5, "diferença média de {media} níveis");
-    // Só a borda dura do clique no canto (feather 0) pode divergir mais.
-    assert!(pior < 70, "pior {pior}");
+    // 🔑 Só as bordas duras (o clique no canto e o laço que apaga, ambos com
+    // feather 0) divergem mais: num pixel de borda dura o preview amostra o
+    // centro (0 ou 1) e o arquivo reduzido é a média de 9 — até ~meia escala.
+    // A média acima é o que mede a paridade.
+    assert!(pior <= 140, "pior {pior}");
 }
 
 /// A máscara é da foto, não do quadro: com giro e espelho, o ponto pintado
@@ -431,4 +456,320 @@ fn so_o_que_mudou_e_rasterizado() {
 #[test]
 fn a_gpu_desta_maquina_desenha_mascara() {
     assert!(motor(Entrada::Compute).mascaras_suportadas());
+}
+
+// --------------------------------------------------------------- retoques
+
+/// Uma foto com textura forte (xadrez de 2 px) sobre um degradê de luz: a
+/// esquerda escura, a direita clara.
+fn foto_com_luz(largura: u32, altura: u32) -> Arc<Vec<u8>> {
+    Arc::new(
+        (0..altura)
+            .flat_map(|y| {
+                (0..largura).flat_map(move |x| {
+                    let luz = 40 + x * 160 / largura;
+                    let v = (luz + if (x / 2 + y / 2) % 2 == 0 { 20 } else { 0 }) as u8;
+                    [v, v, v, 255]
+                })
+            })
+            .collect(),
+    )
+}
+
+fn carimbo(origem: [f32; 2], destino: [f32; 2], raio: f32, feather: f32) -> Carimbo {
+    Carimbo {
+        origem,
+        destino_inicial: destino,
+        caminho: vec![destino],
+        raio,
+        feather,
+        opacidade: 1.0,
+    }
+}
+
+fn com_retoques(retoques: Vec<Retoque>) -> ReceitaLocal {
+    ReceitaLocal {
+        retoques,
+        ..Default::default()
+    }
+}
+
+/// A média de um canal num quadrado de lado `2·meio` em volta de `(cx, cy)`.
+fn media(img: &[u8], largura: u32, cx: u32, cy: u32, meio: u32) -> f32 {
+    let mut soma = 0.0;
+    let mut n = 0.0;
+    for y in cy - meio..cy + meio {
+        for x in cx - meio..cx + meio {
+            soma += img[((y * largura + x) * 4) as usize] as f32;
+            n += 1.0;
+        }
+    }
+    soma / n
+}
+
+/// O Clone copia: o centro do destino é o pixel da origem.
+#[test]
+fn o_clone_copia_a_origem_para_o_destino() {
+    let (w, h) = (160, 100);
+    let pixels = foto_com_luz(w, h);
+    let mut m = motor(Entrada::Compute);
+    m.definir_locais(&com_retoques(vec![Retoque::Clone(carimbo(
+        [0.25, 0.5],
+        [0.75, 0.5],
+        0.08,
+        0.0,
+    ))]))
+    .unwrap();
+    let saida = revelar(&mut m, &pixels, w, h, &Ajustes::default());
+    for (dx, dy) in [(0i32, 0i32), (3, 1), (-4, 2)] {
+        let destino = ((50 + dy) * w as i32 + (120 + dx)) as usize * 4;
+        let origem = ((50 + dy) * w as i32 + (40 + dx)) as usize * 4;
+        assert_eq!(saida[destino], pixels[origem], "({dx},{dy})");
+    }
+    // Fora do raio, nada muda.
+    assert_eq!(
+        saida[(50 * w + 150) as usize * 4],
+        pixels[(50 * w + 150) as usize * 4]
+    );
+    assert_eq!(
+        pixels.len(),
+        (w * h * 4) as usize,
+        "a origem continua a mesma"
+    );
+}
+
+/// 🚨 Política de fonte fora da foto: não pinta — o destino fica como estava.
+#[test]
+fn fonte_fora_da_foto_nao_pinta() {
+    let (w, h) = (160, 100);
+    let pixels = foto_com_luz(w, h);
+    let mut m = motor(Entrada::Compute);
+    m.definir_locais(&ReceitaLocal::default()).unwrap();
+    let antes = revelar(&mut m, &pixels, w, h, &Ajustes::default());
+    // A origem 30 px à esquerda da borda: metade do carimbo tem fonte fora.
+    m.definir_locais(&com_retoques(vec![Retoque::Clone(carimbo(
+        [-0.05, 0.5],
+        [0.1, 0.5],
+        0.1,
+        0.0,
+    ))]))
+    .unwrap();
+    let depois = revelar(&mut m, &pixels, w, h, &Ajustes::default());
+    // Pixel do destino cuja fonte cai fora (x=4 → fonte x=-20): intacto.
+    let i = (50 * w + 4) as usize * 4;
+    assert_eq!(depois[i], antes[i]);
+    // Pixel do destino com fonte dentro (x=28 → fonte x=4): copiado.
+    let j = (50 * w + 28) as usize * 4;
+    assert_eq!(depois[j], pixels[(50 * w + 4) as usize * 4]);
+}
+
+/// 🚨 O Heal não é carimbo: numa área de outra luz, ele leva a luz do destino
+/// e mantém a textura da fonte. O Clone leva a luz da fonte junto.
+#[test]
+fn o_heal_adapta_a_luz_ao_destino_e_o_clone_nao() {
+    let (w, h) = (200, 100);
+    let pixels = foto_com_luz(w, h);
+    // A fonte escura (x = 40) vai para o destino claro (x = 160).
+    let c = carimbo([0.2, 0.5], [0.8, 0.5], 0.06, 0.3);
+    let mut m = motor(Entrada::Compute);
+    m.definir_locais(&ReceitaLocal::default()).unwrap();
+    let original = revelar(&mut m, &pixels, w, h, &Ajustes::default());
+    m.definir_locais(&com_retoques(vec![Retoque::Clone(c.clone())]))
+        .unwrap();
+    let clone = revelar(&mut m, &pixels, w, h, &Ajustes::default());
+    m.definir_locais(&com_retoques(vec![Retoque::Heal(c)]))
+        .unwrap();
+    let heal = revelar(&mut m, &pixels, w, h, &Ajustes::default());
+
+    let alvo = media(&original, w, 160, 50, 4);
+    let (mc, mh) = (media(&clone, w, 160, 50, 4), media(&heal, w, 160, 50, 4));
+    assert!(
+        (mc - alvo).abs() > 40.0,
+        "o clone leva a luz da fonte: {mc} vs {alvo}"
+    );
+    assert!(
+        (mh - alvo).abs() < 8.0,
+        "o heal fica com a luz do destino: {mh} vs {alvo}"
+    );
+
+    // E a textura (o xadrez) é a da fonte: a diferença entre vizinhos continua.
+    let contraste = |img: &[u8]| {
+        (150..170)
+            .map(|x| {
+                img[((50 * w + x) * 4) as usize].abs_diff(img[((50 * w + x + 2) * 4) as usize])
+                    as f32
+            })
+            .sum::<f32>()
+            / 20.0
+    };
+    assert!(
+        contraste(&heal) > 8.0,
+        "o remendo tem textura, não é mancha"
+    );
+}
+
+/// A cadeia: o segundo retoque lê o resultado do primeiro, e a cadeia pronta
+/// não é refeita — retoque novo no fim roda só ele.
+#[test]
+fn a_cadeia_de_retoques_e_reaproveitada() {
+    let (w, h) = (160, 100);
+    let pixels = foto_com_luz(w, h);
+    let um = Retoque::Clone(carimbo([0.2, 0.3], [0.5, 0.3], 0.05, 0.2));
+    let dois = Retoque::Heal(carimbo([0.2, 0.7], [0.5, 0.7], 0.05, 0.2));
+    let mut m = motor(Entrada::Compute);
+    let passo = |m: &mut Motor, r: Vec<Retoque>| {
+        m.definir_locais(&com_retoques(r)).unwrap();
+        let s = revelar(m, &pixels, w, h, &Ajustes::default());
+        (m.medidas_dos_locais().retoques_aplicados, s)
+    };
+    assert_eq!(passo(&mut m, vec![um.clone()]).0, 1);
+    assert_eq!(passo(&mut m, vec![um.clone()]).0, 0, "nada mudou");
+    let (n, incremental) = passo(&mut m, vec![um.clone(), dois.clone()]);
+    assert_eq!(n, 1, "só o novo");
+    let mut limpo = motor(Entrada::Compute);
+    let (n, de_uma_vez) = passo(&mut limpo, vec![um.clone(), dois]);
+    assert_eq!(n, 2);
+    assert_eq!(incremental, de_uma_vez);
+    // Desfazer o segundo volta ao resultado de só o primeiro.
+    let (_, desfeito) = passo(&mut m, vec![um.clone()]);
+    assert_eq!(desfeito, passo(&mut limpo, vec![um]).1);
+}
+
+/// Compute, fragmento e os limites do WebGL2 retocam o mesmo pixel.
+#[test]
+fn retoques_iguais_nas_duas_entradas_e_no_webgl2() {
+    let (w, h) = (97, 61);
+    let pixels = foto_com_luz(w, h);
+    let locais = ReceitaLocal {
+        camadas: vec![camada_completa(1.0)],
+        retoques: vec![
+            Retoque::Clone(carimbo([0.2, 0.3], [0.6, 0.3], 0.05, 0.3)),
+            Retoque::Heal(Carimbo {
+                caminho: vec![[0.5, 0.7], [0.7, 0.75]],
+                ..carimbo([0.2, 0.7], [0.5, 0.7], 0.04, 0.4)
+            }),
+        ],
+        ..Default::default()
+    };
+    let mut a = motor(Entrada::Compute);
+    a.definir_locais(&locais).unwrap();
+    let x = revelar(&mut a, &pixels, w, h, &Ajustes::default());
+    let mut b = motor(Entrada::Fragmento);
+    b.definir_locais(&locais).unwrap();
+    assert!(maior_diferenca(&x, &revelar(&mut b, &pixels, w, h, &Ajustes::default())) <= 1);
+
+    let instancia = wgpu::Instance::default();
+    let adaptador = pollster::block_on(instancia.request_adapter(&Default::default())).unwrap();
+    let limites = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adaptador.limits());
+    let mut c =
+        pollster::block_on(Motor::abrir_com(&adaptador, Entrada::Fragmento, limites)).unwrap();
+    c.definir_locais(&locais).unwrap();
+    assert!(maior_diferenca(&x, &revelar(&mut c, &pixels, w, h, &Ajustes::default())) <= 1);
+}
+
+/// 🚨 Content-Aware pelo motor: some a mancha, fica a textura, e sai igual nas
+/// duas entradas e com os limites do WebGL2 (a síntese é Rust determinístico,
+/// a mistura é o mesmo shader).
+#[test]
+fn o_content_aware_tira_a_mancha_e_mantem_a_textura() {
+    let (w, h) = (160, 120);
+    let mut img: Vec<u8> = (0..h)
+        .flat_map(|y| {
+            (0..w).flat_map(move |x| {
+                let v = if (x / 4) % 2 == 0 { 60 } else { 180 } + ((x * 7 + y * 13) % 9) as u8;
+                [v, v, v, 255]
+            })
+        })
+        .collect();
+    // Uma mancha vermelha no meio.
+    for y in 55..65 {
+        for x in 75..85 {
+            let i = ((y * w + x) * 4) as usize;
+            img[i..i + 3].copy_from_slice(&[250, 20, 20]);
+        }
+    }
+    let pixels = Arc::new(img);
+    let locais = com_retoques(vec![Retoque::Preencher(Preenchimento {
+        caminho: vec![[0.5, 0.5]],
+        raio: 0.06,
+        feather: 0.2,
+        opacidade: 1.0,
+        laco: Vec::new(),
+    })]);
+    let mut a = motor(Entrada::Compute);
+    a.definir_locais(&locais).unwrap();
+    let saida = revelar(&mut a, &pixels, w, h, &Ajustes::default());
+    assert!(a.medidas_dos_locais().sintese_ms > 0.0);
+
+    let vermelhos = (55..65)
+        .flat_map(|y| (75..85).map(move |x| ((y * w + x) * 4) as usize))
+        .filter(|&i| saida[i] > 200 && saida[i + 1] < 60)
+        .count();
+    assert_eq!(vermelhos, 0, "a mancha sumiu");
+    let linha: Vec<u8> = (70..90)
+        .map(|x| saida[((60 * w + x) * 4) as usize])
+        .collect();
+    assert!(
+        linha.iter().any(|&v| v < 100) && linha.iter().any(|&v| v > 150),
+        "as listras atravessam o remendo: {linha:?}"
+    );
+
+    // Revelar de novo não sintetiza de novo.
+    revelar(&mut a, &pixels, w, h, &Ajustes::default());
+    assert_eq!(a.medidas_dos_locais().sintese_ms, 0.0);
+
+    let mut b = motor(Entrada::Fragmento);
+    b.definir_locais(&locais).unwrap();
+    assert!(maior_diferenca(&saida, &revelar(&mut b, &pixels, w, h, &Ajustes::default())) <= 1);
+}
+
+/// Content-Aware por laço: cercar a mancha basta — sem raio, sem pincel.
+#[test]
+fn o_content_aware_por_laco_tira_o_que_foi_cercado() {
+    let (w, h) = (160, 120);
+    let mut img: Vec<u8> = (0..h)
+        .flat_map(|y| {
+            (0..w).flat_map(move |x| {
+                let v = if (x / 4) % 2 == 0 { 60 } else { 180 } + ((x * 7 + y * 13) % 9) as u8;
+                [v, v, v, 255]
+            })
+        })
+        .collect();
+    // Uma mancha comprida e torta, que um círculo cobriria mal.
+    for y in 40..80u32 {
+        let x0 = 60 + (y - 40) / 2;
+        for x in x0..x0 + 8 {
+            let i = ((y * w + x) * 4) as usize;
+            img[i..i + 3].copy_from_slice(&[250, 20, 20]);
+        }
+    }
+    let pixels = Arc::new(img);
+    let (fw, fh) = (w as f32, h as f32);
+    let laco = vec![
+        [56.0 / fw, 36.0 / fh],
+        [72.0 / fw, 36.0 / fh],
+        [92.0 / fw, 84.0 / fh],
+        [76.0 / fw, 84.0 / fh],
+    ];
+    let locais = com_retoques(vec![Retoque::Preencher(Preenchimento {
+        caminho: Vec::new(),
+        raio: 0.01,
+        feather: 0.01,
+        opacidade: 1.0,
+        laco,
+    })]);
+    let mut a = motor(Entrada::Compute);
+    a.definir_locais(&locais).unwrap();
+    let saida = revelar(&mut a, &pixels, w, h, &Ajustes::default());
+    let vermelhos = saida.chunks(4).filter(|p| p[0] > 200 && p[1] < 60).count();
+    assert_eq!(vermelhos, 0, "nada da mancha sobrou");
+    // Fora do laço, a foto é a mesma.
+    assert_eq!(
+        saida[((10 * w + 10) * 4) as usize],
+        pixels[((10 * w + 10) * 4) as usize]
+    );
+
+    let mut b = motor(Entrada::Fragmento);
+    b.definir_locais(&locais).unwrap();
+    assert!(maior_diferenca(&saida, &revelar(&mut b, &pixels, w, h, &Ajustes::default())) <= 1);
 }
