@@ -116,11 +116,7 @@ thread_local! {
 
 /// Grava as passadas de `f` como da `etapa` (se houver medição em curso).
 pub(crate) fn na_etapa<R>(etapa: EtapaDaGpu, f: impl FnOnce() -> R) -> R {
-    let anterior = MEDICAO.with(|m| {
-        m.borrow_mut()
-            .as_mut()
-            .map(|m| std::mem::replace(&mut m.etapa, Some(etapa)))
-    });
+    let anterior = MEDICAO.with(|m| m.borrow_mut().as_mut().map(|m| m.etapa.replace(etapa)));
     let saida = f();
     if let Some(anterior) = anterior {
         MEDICAO.with(|m| {
@@ -301,8 +297,10 @@ impl Cronometro {
         let carimbos: Vec<u64> = {
             let dados = fatia.get_mapped_range();
             dados
-                .chunks_exact(8)
-                .map(|c| u64::from_le_bytes(c.try_into().expect("8 bytes")))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| u64::from_le_bytes(*c))
                 .collect()
         };
         self.leitura.unmap();
