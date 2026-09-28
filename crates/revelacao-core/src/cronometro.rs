@@ -201,6 +201,9 @@ pub struct Cronometro {
 }
 
 impl Cronometro {
+    // No navegador os recursos do wgpu não são `Send`, e o cronômetro nem é
+    // criado lá (o motor só o liga no desktop) — o `Arc` é pelo desktop.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn novo(dispositivo: &wgpu::Device, fila: &wgpu::Queue) -> Self {
         let bytes = u64::from(CAPACIDADE) * 8;
         Self {
