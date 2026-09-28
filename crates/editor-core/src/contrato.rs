@@ -1,7 +1,7 @@
 //! O contrato entre o editor e a Revelação — `docs/editor-em-camadas/02-CONTRATO.md`.
 //!
 //! O editor produz uma [`VersaoEditada`]; a Revelação a resolve como **entrada**
-//! (C32), invalida o que era daquela foto e reaplica a receita atual. A janela do
+//! (C32), invalida o que era daquela foto e reaplica a revelação atual. A janela do
 //! editor nunca escreve no estado da Revelação: ela só anuncia a versão.
 
 use std::path::PathBuf;

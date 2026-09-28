@@ -5,7 +5,7 @@
 //! entre duas `Rgba8Unorm`), e o shader de revelação passa a ler a última. Sem
 //! retoque, ele lê a entrada original, e nada disto é criado.
 //!
-//! A ordem é a da receita: cada retoque vê o resultado dos anteriores — o
+//! A ordem é a da revelação: cada retoque vê o resultado dos anteriores — o
 //! segundo carimbo pode tirar a fonte de onde o primeiro já pintou, como no
 //! Lightroom. O que está pronto fica guardado: retoque novo no fim roda só ele,
 //! sobre o último resultado; qualquer outra mudança (desfazer, trocar a
@@ -96,7 +96,7 @@ impl Retoques {
         self.texturas.as_ref().map_or(0, |_| 8 * px) + self.mascara.as_ref().map_or(0, |_| px)
     }
 
-    /// Leva o resultado a dizer o mesmo que a receita. Devolve se a textura
+    /// Leva o resultado a dizer o mesmo que a revelação. Devolve se a textura
     /// que a revelação lê mudou (e o bind group tem de ser refeito).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn atualizar(

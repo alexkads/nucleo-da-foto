@@ -627,7 +627,7 @@ pub fn uvs_do_enquadramento(
 
 /// Do quadro exibido à foto inteira: `(s, t)` normalizado no quadro (o que
 /// a tela mostra, já enquadrado) vira `(x, y)` normalizado na foto de pé, antes
-/// de espelho, giro, endireitamento e recorte — o espaço da receita local.
+/// de espelho, giro, endireitamento e recorte — o espaço da revelação local.
 ///
 /// 🔑 É a mesma conta de [`uvs_do_enquadramento`], que o teste compara com
 /// [`aplicar`] pixel a pixel: a mão que pinta na tela cai no pixel da foto que

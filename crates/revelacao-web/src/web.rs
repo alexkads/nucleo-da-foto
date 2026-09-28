@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use revelacao_core::{Ajustes, Corte, Entrada, ReceitaLocal};
+use revelacao_core::{Ajustes, Corte, Entrada, ParametrosLocais};
 use wasm_bindgen::prelude::*;
 
 /// O motor aberto sobre um `<canvas>`.
@@ -50,7 +50,7 @@ pub struct Motor {
     /// O enquadramento da foto na tela — ver [`Motor::definir_corte`].
     corte: Corte,
     /// Máscaras e retoques da foto na tela — ver [`Motor::definir_locais`].
-    locais: ReceitaLocal,
+    locais: ParametrosLocais,
     backend: &'static str,
 }
 
@@ -58,15 +58,15 @@ fn erro(mensagem: impl Into<String>) -> JsValue {
     JsValue::from_str(&mensagem.into())
 }
 
-/// A receita local vinda do JavaScript, como o desktop a grava
-/// (`ReceitaLocal::em_json`). `None` ou texto vazio é "sem máscara".
+/// A revelação local vinda do JavaScript, como o desktop a grava
+/// (`ParametrosLocais::em_json`). `None` ou texto vazio é "sem máscara".
 ///
-/// 🚨 **Versão mais nova ou JSON inválido é erro**, e não receita vazia: revelar
+/// 🚨 **Versão mais nova ou JSON inválido é erro**, e não revelação vazia: revelar
 /// sem as máscaras que a foto tem seria entregar outra foto, calado.
-fn locais_de_json(json: Option<&str>) -> Result<ReceitaLocal, JsValue> {
+fn locais_de_json(json: Option<&str>) -> Result<ParametrosLocais, JsValue> {
     match json.map(str::trim).filter(|j| !j.is_empty()) {
-        None => Ok(ReceitaLocal::default()),
-        Some(j) => ReceitaLocal::de_json(j).map_err(|e| erro(e.to_string())),
+        None => Ok(ParametrosLocais::default()),
+        Some(j) => ParametrosLocais::de_json(j).map_err(|e| erro(e.to_string())),
     }
 }
 
@@ -454,7 +454,7 @@ pub async fn abrir(canvas: web_sys::HtmlCanvasElement) -> Result<Motor, JsValue>
         trabalho: None,
         escala_do_trabalho: 1.0,
         corte: Corte::inteiro(),
-        locais: ReceitaLocal::default(),
+        locais: ParametrosLocais::default(),
         backend,
     })
 }
@@ -555,7 +555,7 @@ impl Motor {
     /// (`edit_locais`). `undefined`, `null` ou `""` tiram tudo.
     ///
     /// Vale para os próximos [`Motor::aplicar`], até ser trocada. As
-    /// coordenadas são da foto inteira, então a mesma receita serve à cópia de
+    /// coordenadas são da foto inteira, então a mesma revelação serve à cópia de
     /// trabalho e à exportação: a máscara é refeita em cada resolução.
     pub fn definir_locais(&mut self, json: Option<String>) -> Result<(), JsValue> {
         self.locais = locais_de_json(json.as_deref())?;
@@ -632,7 +632,7 @@ impl Motor {
     /// desktop. O corte vai ao motor antes, só para as vinhetas serem medidas
     /// no recorte (ver `revelar_e_codificar`).
     ///
-    /// `locais` é a receita local em JSON (último parâmetro, opcional: o TS de
+    /// `locais` é a revelação local em JSON (último parâmetro, opcional: o TS de
     /// hoje continua chamando sem ele). A máscara é refeita na resolução do
     /// arquivo, a partir dos parâmetros — o bitmap do preview não é ampliado.
     #[allow(clippy::too_many_arguments)]
@@ -694,7 +694,7 @@ fn escala_do_original(largura: u32, altura: u32, lado_original: Option<u32>) -> 
 /// 🚨 **Mas as vinhetas são do recorte**, e por isso o corte vai ao motor antes
 /// da revelação (`Motor::definir_corte`). Até 2026-09-13 ele não ia, e a vinheta
 /// saía centrada na foto inteira e com a proporção dela — a foto 3:2 recortada
-/// em 3:4 pela receita padrão chegava à galeria com as laterais limpas.
+/// em 3:4 pela revelação padrão chegava à galeria com as laterais limpas.
 #[allow(clippy::too_many_arguments)]
 async fn revelar_e_codificar(
     motor: &mut revelacao_core::Motor,
@@ -799,7 +799,7 @@ impl Exportador {
     /// É o mesmo caminho de `Motor::exportar_jpeg`, byte a byte: as duas
     /// chamam [`revelar_e_codificar`].
     ///
-    /// `locais` é a receita local (máscaras e retoques) em JSON, **último e
+    /// `locais` é a revelação local (máscaras e retoques) em JSON, **último e
     /// opcional**: quem chama sem ele continua exportando como antes.
     #[allow(clippy::too_many_arguments)]
     pub async fn exportar_jpeg(

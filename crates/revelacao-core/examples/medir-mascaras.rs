@@ -9,8 +9,8 @@
 //! 2048 px e no arquivo de 24 MP:
 //!
 //! - sem máscara (a régua);
-//! - com a receita pela primeira vez (rasteriza tudo);
-//! - com a mesma receita (só compõe — a máscara está no cache);
+//! - com a revelação pela primeira vez (rasteriza tudo);
+//! - com a mesma revelação (só compõe — a máscara está no cache);
 //! - com um stroke a mais no fim (o arrasto: só o novo é rasterizado).
 
 use std::sync::Arc;
@@ -38,8 +38,8 @@ fn traco(i: usize) -> Componente {
     }
 }
 
-fn receita(tracos: usize) -> ReceitaLocal {
-    ReceitaLocal {
+fn parametros(tracos: usize) -> ParametrosLocais {
+    ParametrosLocais {
         camadas: vec![Camada {
             ajustes: AjustesLocais { exposicao_ev: 0.8 },
             componentes: (0..tracos).map(traco).collect(),
@@ -76,13 +76,13 @@ fn main() {
                 .flat_map(|i| [(i % 251) as u8, (i % 241) as u8, (i % 239) as u8, 255])
                 .collect::<Vec<u8>>(),
         );
-        motor.definir_locais(&ReceitaLocal::default()).unwrap();
+        motor.definir_locais(&ParametrosLocais::default()).unwrap();
         medir(&mut motor, &pixels, w, h, "aquecimento (sobe a textura)");
         medir(&mut motor, &pixels, w, h, "sem máscara");
-        motor.definir_locais(&receita(20)).unwrap();
+        motor.definir_locais(&parametros(20)).unwrap();
         medir(&mut motor, &pixels, w, h, "20 strokes, primeira vez");
         medir(&mut motor, &pixels, w, h, "20 strokes, de novo (cache)");
-        motor.definir_locais(&receita(21)).unwrap();
+        motor.definir_locais(&parametros(21)).unwrap();
         medir(&mut motor, &pixels, w, h, "+1 stroke no fim (arrasto)");
     }
 }

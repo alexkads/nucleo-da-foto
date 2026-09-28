@@ -116,8 +116,8 @@ fn camada_completa(ev: f32) -> Camada {
     }
 }
 
-fn receita(camadas: Vec<Camada>) -> ReceitaLocal {
-    ReceitaLocal {
+fn parametros(camadas: Vec<Camada>) -> ParametrosLocais {
+    ParametrosLocais {
         camadas,
         ..Default::default()
     }
@@ -140,10 +140,10 @@ fn maior_diferenca(a: &[u8], b: &[u8]) -> u8 {
         .unwrap_or(0)
 }
 
-/// 🚨 Receita vazia é a foto de antes, byte a byte — e voltar a ela depois de
+/// 🚨 Revelação vazia é a foto de antes, byte a byte — e voltar a ela depois de
 /// ter usado máscara também.
 #[test]
-fn receita_vazia_sai_bit_a_bit_a_de_antes() {
+fn parametros_vazios_sai_bit_a_bit_a_de_antes() {
     let (w, h) = (97, 61);
     let pixels = foto(w, h);
     let ajustes = Ajustes {
@@ -156,7 +156,7 @@ fn receita_vazia_sai_bit_a_bit_a_de_antes() {
         let mut m = motor(entrada);
         let antes = revelar(&mut m, &pixels, w, h, &ajustes);
 
-        m.definir_locais(&ReceitaLocal::default()).unwrap();
+        m.definir_locais(&ParametrosLocais::default()).unwrap();
         assert_eq!(
             revelar(&mut m, &pixels, w, h, &ajustes),
             antes,
@@ -164,7 +164,7 @@ fn receita_vazia_sai_bit_a_bit_a_de_antes() {
         );
 
         // Máscara com exposição zero: desenhada, mas não muda nada.
-        m.definir_locais(&receita(vec![camada_completa(0.0)]))
+        m.definir_locais(&parametros(vec![camada_completa(0.0)]))
             .unwrap();
         assert_eq!(
             revelar(&mut m, &pixels, w, h, &ajustes),
@@ -172,11 +172,11 @@ fn receita_vazia_sai_bit_a_bit_a_de_antes() {
             "{entrada:?} ev 0"
         );
 
-        m.definir_locais(&receita(vec![camada_completa(1.0)]))
+        m.definir_locais(&parametros(vec![camada_completa(1.0)]))
             .unwrap();
         assert_ne!(revelar(&mut m, &pixels, w, h, &ajustes), antes);
 
-        m.definir_locais(&ReceitaLocal::default()).unwrap();
+        m.definir_locais(&ParametrosLocais::default()).unwrap();
         assert_eq!(
             revelar(&mut m, &pixels, w, h, &ajustes),
             antes,
@@ -198,7 +198,7 @@ fn a_mascara_da_gpu_e_a_da_referencia_em_cpu() {
         .collect();
     for entrada in [Entrada::Compute, Entrada::Fragmento] {
         let mut m = motor(entrada);
-        m.definir_locais(&receita(vec![camada.clone()])).unwrap();
+        m.definir_locais(&parametros(vec![camada.clone()])).unwrap();
         revelar(&mut m, &pixels, w, h, &Ajustes::default());
         let gpu = m.ler_camada_da_mascara(w, h, 0);
         let pior = maior_diferenca(&gpu, &referencia);
@@ -220,7 +220,7 @@ fn na_gpu_o_stroke_que_volta_nao_passa_da_opacidade() {
         })
         .collect();
     let mut m = motor(Entrada::Compute);
-    m.definir_locais(&receita(vec![Camada {
+    m.definir_locais(&parametros(vec![Camada {
         ajustes: AjustesLocais { exposicao_ev: 1.0 },
         componentes: vec![pincel(pontos, 0.1, 0.5, 0.5, Modo::Somar)],
         invertida: false,
@@ -241,7 +241,7 @@ fn na_gpu_o_stroke_que_volta_nao_passa_da_opacidade() {
 fn compute_fragmento_e_limites_do_webgl2_revelam_o_mesmo_com_mascara() {
     let (w, h) = (97, 61);
     let pixels = foto(w, h);
-    let locais = receita(vec![camada_completa(1.5), {
+    let locais = parametros(vec![camada_completa(1.5), {
         let mut c = camada_completa(-1.0);
         c.invertida = true;
         c
@@ -276,7 +276,7 @@ fn a_exposicao_local_e_em_rgb_linear() {
     let (w, h) = (16, 16);
     let cinza = Arc::new([100u8, 100, 100, 255].repeat((w * h) as usize));
     let mut m = motor(Entrada::Compute);
-    m.definir_locais(&receita(vec![Camada {
+    m.definir_locais(&parametros(vec![Camada {
         ajustes: AjustesLocais { exposicao_ev: 1.0 },
         componentes: vec![pincel(vec![[0.5, 0.5, 1.0]], 1.0, 0.0, 1.0, Modo::Somar)],
         invertida: false,
@@ -316,7 +316,7 @@ fn a_mascara_do_preview_e_a_da_exportacao_reduzida() {
     let (pw, ph) = (100, 66);
     let camada = camada_completa(1.0);
     let mut m = motor(Entrada::Compute);
-    m.definir_locais(&receita(vec![camada])).unwrap();
+    m.definir_locais(&parametros(vec![camada])).unwrap();
     revelar(&mut m, &foto(w, h), w, h, &Ajustes::default());
     let cheia = m.ler_camada_da_mascara(w, h, 0);
     revelar(&mut m, &foto(pw, ph), pw, ph, &Ajustes::default());
@@ -362,7 +362,7 @@ fn a_mascara_acompanha_a_foto_no_corte_e_no_giro() {
 
     let mut m = motor(Entrada::Compute);
     m.definir_corte(&corte);
-    m.definir_locais(&receita(vec![Camada {
+    m.definir_locais(&parametros(vec![Camada {
         ajustes: AjustesLocais { exposicao_ev: 5.0 },
         componentes: vec![pincel(
             vec![[
@@ -411,7 +411,7 @@ fn so_o_que_mudou_e_rasterizado() {
         ..Default::default()
     };
     let mut m = motor(Entrada::Compute);
-    let passo = |m: &mut Motor, r: ReceitaLocal| {
+    let passo = |m: &mut Motor, r: ParametrosLocais| {
         m.definir_locais(&r).unwrap();
         revelar(m, &pixels, w, h, &Ajustes::default());
         let md = m.medidas_dos_locais();
@@ -422,7 +422,7 @@ fn so_o_que_mudou_e_rasterizado() {
     assert_eq!(
         passo(
             &mut m,
-            receita(vec![camada(vec![traco(0.2)]), fixa.clone()])
+            parametros(vec![camada(vec![traco(0.2)]), fixa.clone()])
         ),
         (2, 2)
     );
@@ -430,7 +430,7 @@ fn so_o_que_mudou_e_rasterizado() {
     assert_eq!(
         passo(
             &mut m,
-            receita(vec![camada(vec![traco(0.2), traco(0.4)]), fixa.clone()])
+            parametros(vec![camada(vec![traco(0.2), traco(0.4)]), fixa.clone()])
         ),
         (0, 1)
     );
@@ -438,7 +438,7 @@ fn so_o_que_mudou_e_rasterizado() {
     assert_eq!(
         passo(
             &mut m,
-            receita(vec![camada(vec![traco(0.2), traco(0.4)]), fixa.clone()])
+            parametros(vec![camada(vec![traco(0.2), traco(0.4)]), fixa.clone()])
         ),
         (0, 0)
     );
@@ -446,7 +446,7 @@ fn so_o_que_mudou_e_rasterizado() {
     assert_eq!(
         passo(
             &mut m,
-            receita(vec![camada(vec![traco(0.4)]), fixa.clone()])
+            parametros(vec![camada(vec![traco(0.4)]), fixa.clone()])
         ),
         (1, 1)
     );
@@ -454,7 +454,7 @@ fn so_o_que_mudou_e_rasterizado() {
     // E a máscara incremental é a mesma que a feita de uma vez.
     let incremental = m.ler_camada_da_mascara(w, h, 0);
     let mut limpo = motor(Entrada::Compute);
-    passo(&mut limpo, receita(vec![camada(vec![traco(0.4)]), fixa]));
+    passo(&mut limpo, parametros(vec![camada(vec![traco(0.4)]), fixa]));
     assert_eq!(limpo.ler_camada_da_mascara(w, h, 0), incremental);
 }
 
@@ -492,8 +492,8 @@ fn carimbo(origem: [f32; 2], destino: [f32; 2], raio: f32, feather: f32) -> Cari
     }
 }
 
-fn com_retoques(retoques: Vec<Retoque>) -> ReceitaLocal {
-    ReceitaLocal {
+fn com_retoques(retoques: Vec<Retoque>) -> ParametrosLocais {
+    ParametrosLocais {
         retoques,
         ..Default::default()
     }
@@ -549,7 +549,7 @@ fn fonte_fora_da_foto_nao_pinta() {
     let (w, h) = (160, 100);
     let pixels = foto_com_luz(w, h);
     let mut m = motor(Entrada::Compute);
-    m.definir_locais(&ReceitaLocal::default()).unwrap();
+    m.definir_locais(&ParametrosLocais::default()).unwrap();
     let antes = revelar(&mut m, &pixels, w, h, &Ajustes::default());
     // A origem 30 px à esquerda da borda: metade do carimbo tem fonte fora.
     m.definir_locais(&com_retoques(vec![Retoque::Clone(carimbo(
@@ -577,7 +577,7 @@ fn o_heal_adapta_a_luz_ao_destino_e_o_clone_nao() {
     // A fonte escura (x = 40) vai para o destino claro (x = 160).
     let c = carimbo([0.2, 0.5], [0.8, 0.5], 0.06, 0.3);
     let mut m = motor(Entrada::Compute);
-    m.definir_locais(&ReceitaLocal::default()).unwrap();
+    m.definir_locais(&ParametrosLocais::default()).unwrap();
     let original = revelar(&mut m, &pixels, w, h, &Ajustes::default());
     m.definir_locais(&com_retoques(vec![Retoque::Clone(c.clone())]))
         .unwrap();
@@ -645,7 +645,7 @@ fn a_cadeia_de_retoques_e_reaproveitada() {
 fn retoques_iguais_nas_duas_entradas_e_no_webgl2() {
     let (w, h) = (97, 61);
     let pixels = foto_com_luz(w, h);
-    let locais = ReceitaLocal {
+    let locais = ParametrosLocais {
         camadas: vec![camada_completa(1.0)],
         retoques: vec![
             Retoque::Clone(carimbo([0.2, 0.3], [0.6, 0.3], 0.05, 0.3)),
@@ -786,7 +786,7 @@ fn o_content_aware_por_laco_tira_o_que_foi_cercado() {
 fn o_cronometro_mede_as_etapas_da_gpu_sem_mexer_na_foto() {
     let (w, h) = (256, 192);
     let pixels = foto(w, h);
-    let mut locais = receita(vec![camada_completa(0.8)]);
+    let mut locais = parametros(vec![camada_completa(0.8)]);
     locais.retoques = vec![Retoque::Clone(carimbo([0.2, 0.3], [0.7, 0.6], 0.05, 0.4))];
     let ajustes = Ajustes::default();
 

@@ -1,4 +1,4 @@
-//! A receita local: máscaras (pincel, gradientes) com os ajustes delas, e os
+//! A revelação local: máscaras (pincel, gradientes) com os ajustes delas, e os
 //! retoques (Clone e Heal) — tudo como **parâmetro**, nunca como pixel.
 //!
 //! ## 🔑 A fonte de verdade é esta struct, e não uma textura
@@ -50,8 +50,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A versão do formato. Uma receita de versão maior é recusada por
-/// [`ReceitaLocal::de_json`], e quem abre a foto a guarda intacta.
+/// A versão do formato. Uma revelação de versão maior é recusada por
+/// [`ParametrosLocais::de_json`], e quem abre a foto a guarda intacta.
 pub const VERSAO: u32 = 1;
 /// Quantas camadas de máscara uma foto pode ter — o tamanho do `array` do WGSL.
 pub const MAXIMO_DE_CAMADAS: usize = 8;
@@ -69,7 +69,7 @@ pub const RAIO_MINIMO: f32 = 0.0002;
 
 /// Tudo o que é local numa foto: as camadas de máscara e os retoques.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ReceitaLocal {
+pub struct ParametrosLocais {
     pub versao: u32,
     #[serde(default)]
     pub camadas: Vec<Camada>,
@@ -77,7 +77,7 @@ pub struct ReceitaLocal {
     pub retoques: Vec<Retoque>,
 }
 
-impl Default for ReceitaLocal {
+impl Default for ParametrosLocais {
     fn default() -> Self {
         Self {
             versao: VERSAO,
@@ -93,7 +93,7 @@ pub struct Camada {
     /// O nome na lista da Revelação local ("Máscara 1").
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub nome: String,
-    /// Oculta (o olho fechado): fica na receita, e o motor não a aplica.
+    /// Oculta (o olho fechado): fica na revelação, e o motor não a aplica.
     #[serde(default = "verdadeiro", skip_serializing_if = "e_verdadeiro")]
     pub visivel: bool,
     #[serde(default)]
@@ -517,9 +517,9 @@ pub fn anel_do_carimbo(carimbo: &Carimbo, largura: u32, altura: u32) -> Vec<[f32
     anel
 }
 
-/// Por que uma receita não pôde ser lida.
+/// Por que uma revelação não pôde ser lida.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ErroDaReceita {
+pub enum ErroDosParametros {
     /// Gravada por uma versão mais nova do app. Quem abre a foto não a
     /// sobrescreve: devolve o texto que leu.
     VersaoNova(u32),
@@ -527,18 +527,21 @@ pub enum ErroDaReceita {
     Invalida(String),
 }
 
-impl std::fmt::Display for ErroDaReceita {
+impl std::fmt::Display for ErroDosParametros {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ErroDaReceita::VersaoNova(v) => {
-                write!(f, "receita local da versão {v}; este app lê até a {VERSAO}")
+            ErroDosParametros::VersaoNova(v) => {
+                write!(
+                    f,
+                    "revelação local da versão {v}; este app lê até a {VERSAO}"
+                )
             }
-            ErroDaReceita::Invalida(e) => write!(f, "receita local inválida: {e}"),
+            ErroDosParametros::Invalida(e) => write!(f, "revelação local inválida: {e}"),
         }
     }
 }
 
-impl std::error::Error for ErroDaReceita {}
+impl std::error::Error for ErroDosParametros {}
 
 fn finito_ou(v: f32, padrao: f32) -> f32 {
     if v.is_finite() {
@@ -666,7 +669,7 @@ impl Carimbo {
     }
 }
 
-impl ReceitaLocal {
+impl ParametrosLocais {
     /// Sem camada e sem retoque — a foto sai bit a bit a de antes.
     pub fn vazia(&self) -> bool {
         self.camadas.is_empty() && self.retoques.is_empty()
@@ -674,8 +677,8 @@ impl ReceitaLocal {
 
     /// O que o motor aplica: as camadas visíveis e com componentes, e todos os
     /// retoques. A ordem se mantém.
-    pub fn para_o_motor(&self) -> ReceitaLocal {
-        ReceitaLocal {
+    pub fn para_o_motor(&self) -> ParametrosLocais {
+        ParametrosLocais {
             versao: self.versao,
             camadas: self
                 .camadas
@@ -687,7 +690,7 @@ impl ReceitaLocal {
         }
     }
 
-    /// A posição, no motor, da camada `i` desta receita — `None` se ela está
+    /// A posição, no motor, da camada `i` desta revelação — `None` se ela está
     /// oculta ou vazia (e por isso não é desenhada).
     pub fn indice_no_motor(&self, i: usize) -> Option<usize> {
         let camada = self.camadas.get(i)?;
@@ -703,28 +706,28 @@ impl ReceitaLocal {
     }
 
     /// Lê o JSON gravado, já saneado. Versão maior que [`VERSAO`] é recusada.
-    pub fn de_json(json: &str) -> Result<Self, ErroDaReceita> {
+    pub fn de_json(json: &str) -> Result<Self, ErroDosParametros> {
         let valor: serde_json::Value =
-            serde_json::from_str(json).map_err(|e| ErroDaReceita::Invalida(e.to_string()))?;
+            serde_json::from_str(json).map_err(|e| ErroDosParametros::Invalida(e.to_string()))?;
         let versao = valor
             .get("versao")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(VERSAO as u64) as u32;
         if versao > VERSAO {
-            return Err(ErroDaReceita::VersaoNova(versao));
+            return Err(ErroDosParametros::VersaoNova(versao));
         }
-        let receita: ReceitaLocal =
-            serde_json::from_value(valor).map_err(|e| ErroDaReceita::Invalida(e.to_string()))?;
-        Ok(receita.saneada())
+        let parametros: ParametrosLocais = serde_json::from_value(valor)
+            .map_err(|e| ErroDosParametros::Invalida(e.to_string()))?;
+        Ok(parametros.saneada())
     }
 
-    /// O JSON que se grava. Receita vazia vira `None` — a coluna fica `NULL`.
+    /// O JSON que se grava. Revelação vazia vira `None` — a coluna fica `NULL`.
     pub fn em_json(&self) -> Option<String> {
-        (!self.vazia()).then(|| serde_json::to_string(self).expect("a receita local vira JSON"))
+        (!self.vazia()).then(|| serde_json::to_string(self).expect("a revelação local vira JSON"))
     }
 
     /// Limites e números finitos: o que a GPU recebe nunca é `NaN`, e nenhuma
-    /// receita cresce além do que o shader e a memória comportam.
+    /// revelação cresce além do que o shader e a memória comportam.
     pub fn saneada(self) -> Self {
         let camadas = self
             .camadas
@@ -1133,8 +1136,8 @@ mod testes {
     }
 
     #[test]
-    fn a_receita_vai_e_volta_pelo_json() {
-        let receita = ReceitaLocal {
+    fn os_parametros_vao_e_volta_pelo_json() {
+        let parametros = ParametrosLocais {
             versao: VERSAO,
             camadas: vec![camada_com(vec![
                 pincel(
@@ -1162,12 +1165,12 @@ mod testes {
                 opacidade: 1.0,
             })],
         };
-        let json = receita.em_json().expect("não vazia");
-        assert_eq!(ReceitaLocal::de_json(&json), Ok(receita));
+        let json = parametros.em_json().expect("não vazia");
+        assert_eq!(ParametrosLocais::de_json(&json), Ok(parametros));
         assert!(json.contains("\"tipo\":\"pincel\""), "{json}");
     }
 
-    /// Nome e olho vão e voltam; a máscara oculta fica na receita e sai do
+    /// Nome e olho vão e voltam; a máscara oculta fica na revelação e sai do
     /// que o motor aplica, e os índices do motor pulam as ocultas.
     #[test]
     fn nome_e_visibilidade_vao_e_voltam_e_o_motor_pula_as_ocultas() {
@@ -1175,7 +1178,7 @@ mod testes {
             modo: Modo::Somar,
             forma: Forma::Pincel(traco(vec![[0.5, 0.5, 1.0]], 0.1, 0.0, 1.0)),
         };
-        let receita = ReceitaLocal {
+        let parametros = ParametrosLocais {
             camadas: vec![
                 Camada {
                     nome: "Céu".into(),
@@ -1200,43 +1203,43 @@ mod testes {
             ],
             ..Default::default()
         };
-        let json = receita.em_json().unwrap();
+        let json = parametros.em_json().unwrap();
         assert!(
             json.contains("\"visivel\":false"),
             "só a oculta escreve o campo: {json}"
         );
-        assert_eq!(ReceitaLocal::de_json(&json).unwrap(), receita);
-        // Receita antiga, sem os campos: visível e sem nome.
+        assert_eq!(ParametrosLocais::de_json(&json).unwrap(), parametros);
+        // Revelação antiga, sem os campos: visível e sem nome.
         let antiga =
-            ReceitaLocal::de_json(r#"{"versao":1,"camadas":[{"componentes":[]}]}"#).unwrap();
+            ParametrosLocais::de_json(r#"{"versao":1,"camadas":[{"componentes":[]}]}"#).unwrap();
         assert!(antiga.camadas[0].visivel && antiga.camadas[0].nome.is_empty());
 
-        let motor = receita.para_o_motor();
+        let motor = parametros.para_o_motor();
         let nomes: Vec<&str> = motor.camadas.iter().map(|c| c.nome.as_str()).collect();
         assert_eq!(nomes, ["Céu", "Fundo"]);
         assert_eq!(
             (0..4)
-                .map(|i| receita.indice_no_motor(i))
+                .map(|i| parametros.indice_no_motor(i))
                 .collect::<Vec<_>>(),
             [Some(0), None, None, Some(1)]
         );
     }
 
     #[test]
-    fn receita_vazia_nao_grava_nada() {
-        assert_eq!(ReceitaLocal::default().em_json(), None);
+    fn parametros_vazios_nao_grava_nada() {
+        assert_eq!(ParametrosLocais::default().em_json(), None);
     }
 
     /// Versão mais nova não é lida — e quem abre a foto guarda o texto intacto.
     #[test]
     fn versao_nova_e_recusada_e_nao_vira_vazia() {
         assert_eq!(
-            ReceitaLocal::de_json(r#"{"versao": 2, "camadas": []}"#),
-            Err(ErroDaReceita::VersaoNova(2))
+            ParametrosLocais::de_json(r#"{"versao": 2, "camadas": []}"#),
+            Err(ErroDosParametros::VersaoNova(2))
         );
         assert!(matches!(
-            ReceitaLocal::de_json("não é json"),
-            Err(ErroDaReceita::Invalida(_))
+            ParametrosLocais::de_json("não é json"),
+            Err(ErroDosParametros::Invalida(_))
         ));
     }
 
@@ -1253,7 +1256,7 @@ mod testes {
                 ]
             })).collect::<Vec<_>>()
         });
-        let r = ReceitaLocal::de_json(&json.to_string()).unwrap();
+        let r = ParametrosLocais::de_json(&json.to_string()).unwrap();
         assert_eq!(r.camadas.len(), MAXIMO_DE_CAMADAS);
         let c = &r.camadas[0];
         assert_eq!(c.ajustes.exposicao_ev, EXPOSICAO_MAXIMA);

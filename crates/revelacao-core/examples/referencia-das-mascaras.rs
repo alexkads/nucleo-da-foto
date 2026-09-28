@@ -6,15 +6,15 @@
 //!
 //! Grava em `<pasta>`:
 //!
-//! - `receita.json`: a receita local (pincel com pressão e feather, os dois
+//! - `parametros.json`: a revelação local (pincel com pressão e feather, os dois
 //!   gradientes, um Subtrair e uma camada invertida);
 //! - `referencia.rgba`: a foto sintética (`320×200`, a mesma que a página de
 //!   teste gera em JavaScript) revelada pelo motor do desktop, sem enquadramento;
-//! - `sem-mascara.rgba`: a mesma, sem a receita — para a página provar que a
+//! - `sem-mascara.rgba`: a mesma, sem a revelação — para a página provar que a
 //!   máscara fez efeito, e não só que os dois lados concordam.
 //!
 //! A página abre o `Exportador` do `revelacao-web` (WebGPU, ou WebGL2 com
-//! `navigator.gpu` removido), exporta a mesma foto com a mesma receita e compara.
+//! `navigator.gpu` removido), exporta a mesma foto com a mesma revelação e compara.
 
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ fn foto() -> Vec<u8> {
         .collect()
 }
 
-fn receita() -> ReceitaLocal {
+fn parametros() -> ParametrosLocais {
     let pincel = |pontos: Vec<[f32; 3]>, raio, feather, opacidade, modo| Componente {
         modo,
         forma: Forma::Pincel(BrushStroke {
@@ -50,7 +50,7 @@ fn receita() -> ReceitaLocal {
             pontos,
         }),
     };
-    ReceitaLocal {
+    ParametrosLocais {
         camadas: vec![
             Camada {
                 ajustes: AjustesLocais { exposicao_ev: 1.5 },
@@ -112,13 +112,13 @@ fn main() {
     let pasta = std::path::Path::new(&pasta);
     std::fs::create_dir_all(pasta).unwrap();
 
-    let receita = receita();
-    std::fs::write(pasta.join("receita.json"), receita.em_json().unwrap()).unwrap();
+    let parametros = parametros();
+    std::fs::write(pasta.join("revelação.json"), parametros.em_json().unwrap()).unwrap();
 
     let mut motor = Motor::abrir().expect("GPU");
     let pixels = Arc::new(foto());
     let ajustes = Ajustes::default();
-    motor.definir_locais(&receita).unwrap();
+    motor.definir_locais(&parametros).unwrap();
     let com = motor
         .revelar(&pixels, LARGURA, ALTURA, &ajustes)
         .unwrap()
@@ -126,7 +126,7 @@ fn main() {
         .into_raw();
     std::fs::write(pasta.join("referencia.rgba"), &com).unwrap();
 
-    motor.definir_locais(&ReceitaLocal::default()).unwrap();
+    motor.definir_locais(&ParametrosLocais::default()).unwrap();
     let sem = motor
         .revelar(&pixels, LARGURA, ALTURA, &ajustes)
         .unwrap()

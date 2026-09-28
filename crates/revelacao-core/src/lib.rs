@@ -39,7 +39,7 @@ pub mod transformacao;
 
 pub use ajustes::{Ajustes, QUANTIDADE};
 pub use cronometro::TemposDaGpu;
-pub use locais::ReceitaLocal;
+pub use locais::ParametrosLocais;
 pub use mascaras::MedidasDosLocais;
 #[cfg(not(target_arch = "wasm32"))]
 pub use motor::adaptadores_da_maquina;

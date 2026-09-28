@@ -43,7 +43,7 @@ use image::DynamicImage;
 use lru::LruCache;
 
 use crate::ajustes::{Ajustes, TAMANHO_DO_UNIFORM};
-use crate::locais::ReceitaLocal;
+use crate::locais::ParametrosLocais;
 use crate::mascaras::{Mascaras, MedidasDosLocais, Rasterizador};
 use crate::transformacao::{Corte, Quadro};
 
@@ -128,7 +128,7 @@ struct Recursos {
     /// A última preparação subiu os pixels para a GPU (foto nova ou tamanho
     /// novo) — o que separa "trocar de foto" de "mexer num slider" no custo.
     subiu_agora: bool,
-    /// As máscaras locais deste tamanho — cache refeito da receita.
+    /// As máscaras locais deste tamanho — cache refeito da revelação.
     mascaras: Mascaras,
     /// Clone e Heal deste tamanho — o resultado que a revelação lê.
     retoques: crate::retoque::Retoques,
@@ -626,11 +626,11 @@ pub struct Motor {
     grades_pendentes: bool,
     /// O enquadramento da foto que vai ser revelada — ver [`Motor::definir_corte`].
     corte: Corte,
-    /// A receita local da foto que vai ser revelada — ver [`Motor::definir_locais`].
-    locais: ReceitaLocal,
+    /// A revelação local da foto que vai ser revelada — ver [`Motor::definir_locais`].
+    locais: ParametrosLocais,
     /// O adaptador desenha máscara (`R8Unorm` com blend) — ver `mascaras::suportado`.
     mascaras_suportadas: bool,
-    /// Os pipelines das máscaras, criados na primeira receita que tem uma.
+    /// Os pipelines das máscaras, criados na primeira revelação que tem uma.
     rasterizador: Option<Rasterizador>,
     /// Ver [`Motor::medidas_dos_locais`].
     medidas: MedidasDosLocais,
@@ -738,7 +738,7 @@ pub struct TemposDoMotor {
     pub gpu: Option<crate::cronometro::TemposDaGpu>,
 }
 
-/// Por que o motor recusou uma receita local.
+/// Por que o motor recusou uma revelação local.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ErroDeMascara {
     /// O adaptador não desenha em `R8Unorm` com blend. Revelar sem as máscaras
@@ -934,7 +934,7 @@ impl Motor {
             relogio_ms: None,
             grades_pendentes: false,
             corte: Corte::inteiro(),
-            locais: ReceitaLocal::default(),
+            locais: ParametrosLocais::default(),
             mascaras_suportadas: crate::mascaras::suportado(adaptador),
             rasterizador: None,
             medidas: MedidasDosLocais::default(),
@@ -1042,22 +1042,22 @@ impl Motor {
         self.corte = corte.clone();
     }
 
-    /// A receita local da foto que vai ser revelada: máscaras e retoques.
+    /// A revelação local da foto que vai ser revelada: máscaras e retoques.
     ///
     /// 🔑 **Vale até ser trocada**, como [`Motor::definir_corte`]: quem revela
-    /// fotos diferentes no mesmo motor define antes de cada uma. Receita vazia
+    /// fotos diferentes no mesmo motor define antes de cada uma. Revelação vazia
     /// (o padrão) deixa o pixel bit a bit o de antes.
     ///
     /// As texturas de máscara são refeitas a partir dela no tamanho da imagem de
     /// cada revelação — ver `mascaras.rs`. Devolve erro, e **não** guarda a
-    /// receita, quando a GPU não desenha máscara: a exportação falha em vez de
+    /// revelação, quando a GPU não desenha máscara: a exportação falha em vez de
     /// sair sem o que o operador pintou.
-    pub fn definir_locais(&mut self, locais: &ReceitaLocal) -> Result<(), ErroDeMascara> {
+    pub fn definir_locais(&mut self, locais: &ParametrosLocais) -> Result<(), ErroDeMascara> {
         // 🔑 As ocultas e as vazias saem aqui, para todo cliente: ninguém
         // precisa lembrar de filtrar antes de mandar.
         let locais = locais.para_o_motor();
         if !locais.camadas.is_empty() && !self.mascaras_suportadas {
-            self.locais = ReceitaLocal::default();
+            self.locais = ParametrosLocais::default();
             return Err(ErroDeMascara::SemSuporte);
         }
         if self.locais != locais {
@@ -1077,16 +1077,16 @@ impl Motor {
         self.mascaras_suportadas
     }
 
-    /// ⚠️ `camada` é a posição **no motor** — a da receita passada a
+    /// ⚠️ `camada` é a posição **no motor** — a da revelação passada a
     /// [`Motor::definir_locais`] já sem as ocultas e as vazias; quem tem a
-    /// posição na receita converte com [`ReceitaLocal::indice_no_motor`].
+    /// posição na revelação converte com [`ParametrosLocais::indice_no_motor`].
     ///
     /// Os bytes (0–255) de uma camada da máscara, como está na GPU para
     /// imagens `largura × altura` — a sobreposição vermelha da tela ("mostrar
     /// máscara", `O`). `None` se nada foi revelado nesse tamanho, ou se a
     /// camada não existe.
     ///
-    /// Lê o **cache**, sem refazer: chame depois de revelar com a receita.
+    /// Lê o **cache**, sem refazer: chame depois de revelar com a revelação.
     pub async fn ler_mascara_async(
         &mut self,
         largura: u32,
@@ -1554,7 +1554,7 @@ fn preparar<'a>(
     recursos
 }
 
-/// Leva as máscaras deste tamanho a dizer o mesmo que a receita, no mesmo
+/// Leva as máscaras deste tamanho a dizer o mesmo que a revelação, no mesmo
 /// encoder da revelação (os passes de máscara vêm antes), e refaz o bind group
 /// quando a textura foi recriada.
 #[allow(clippy::too_many_arguments)]
@@ -1565,7 +1565,7 @@ fn atualizar_mascaras(
     encoder: &mut wgpu::CommandEncoder,
     recursos: &mut Recursos,
     rasterizador: &mut Option<Rasterizador>,
-    locais: &ReceitaLocal,
+    locais: &ParametrosLocais,
     largura: u32,
     altura: u32,
     medidas: &mut MedidasDosLocais,
@@ -2802,7 +2802,7 @@ mod testes {
                 continue;
             }
             // Os dois extremos de cada slider, mais um valor fora da faixa: é
-            // fora dela que a conta estoura, e a tela deixa chegar (a receita
+            // fora dela que a conta estoura, e a tela deixa chegar (a revelação
             // vem do banco, e o banco tem o que outra versão gravou).
             for valor in [-100.0, -1.0, 1.0, 100.0, 255.0] {
                 if neutro[indice] == valor {
@@ -3032,7 +3032,7 @@ mod testes {
 
     /// 🚨 **A vinheta é do recorte** — o defeito que o dono viu em 2026-09-13,
     /// no passo-a-passo da nova sessão, com o `RecordarFotos P&B` e o 3:4 da
-    /// receita padrão: *"as vinhetas não estão respeitando o formato do corte"*.
+    /// revelação padrão: *"as vinhetas não estão respeitando o formato do corte"*.
     ///
     /// Numa foto 3:2 com recorte 3:4 no centro, a vinheta medida na foto inteira
     /// deixava as laterais do recorte limpas e escurecia só o topo e a base. A

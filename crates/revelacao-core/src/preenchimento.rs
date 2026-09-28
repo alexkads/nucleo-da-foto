@@ -27,7 +27,7 @@
 //! ## 🔑 Determinístico, e o mesmo no desktop e no navegador
 //!
 //! Distâncias e votos são **inteiros**, e o gerador aleatório é um xorshift com
-//! semente tirada dos parâmetros do retoque. A mesma foto com a mesma receita
+//! semente tirada dos parâmetros do retoque. A mesma foto com a mesma revelação
 //! dá o mesmo remendo em toda máquina, nativo ou wasm: é o mesmo Rust.
 //!
 //! ## ⚠️ Limites (declarados)

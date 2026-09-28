@@ -1,7 +1,7 @@
 //! As máscaras locais na GPU: o cache `R8Unorm` que o shader de revelação lê.
 //!
 //! 🔑 **Tudo aqui é cache reconstruível.** A fonte de verdade é a
-//! [`ReceitaLocal`](crate::locais::ReceitaLocal); a textura é refeita a partir
+//! [`ParametrosLocais`](crate::locais::ParametrosLocais); a textura é refeita a partir
 //! dela no tamanho da imagem que está sendo revelada — o preview no preview, o
 //! arquivo cheio na exportação. Nenhum bitmap de máscara é ampliado.
 //!
@@ -10,7 +10,7 @@
 //! - **É alvo de cor com blend em todo backend que o motor usa**, inclusive o
 //!   WebGL2 (GLES 3.0 lista `R8` como color-renderable, e `MAX` é blend do
 //!   núcleo). `Motor::abrir_com` confere isso no adaptador
-//!   (`get_texture_format_features`) antes de aceitar uma receita com máscara.
+//!   (`get_texture_format_features`) antes de aceitar uma revelação com máscara.
 //! - **Não é formato de storage no WebGPU**, e por isso o rasterizador é render
 //!   pass mesmo no desktop, que revela por compute. Um rasterizador só dá a mesma
 //!   máscara nas duas entradas.
@@ -30,7 +30,7 @@
 //! limitado à caixa do stroke. Qualquer outra mudança (desfazer, apagar um do
 //! meio) refaz só aquela camada.
 
-use crate::locais::{self, Componente, Forma, Modo, ReceitaLocal, MAXIMO_DE_CAMADAS};
+use crate::locais::{self, Componente, Forma, Modo, ParametrosLocais, MAXIMO_DE_CAMADAS};
 
 const SHADER: &str = include_str!("shaders/mascara.wgsl");
 pub(crate) const FORMATO: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
@@ -53,7 +53,7 @@ pub(crate) fn suportado(adaptador: &wgpu::Adapter) -> bool {
             .contains(wgpu::TextureFormatFeatureFlags::BLENDABLE)
 }
 
-/// Os pipelines do rasterizador — criados na primeira receita com máscara.
+/// Os pipelines do rasterizador — criados na primeira revelação com máscara.
 pub(crate) struct Rasterizador {
     pub(crate) layout_desenho: wgpu::BindGroupLayout,
     layout_compor: wgpu::BindGroupLayout,
@@ -582,7 +582,7 @@ impl Mascaras {
         camadas + rascunho
     }
 
-    /// Leva a textura a dizer o mesmo que a receita. Devolve `true` quando a
+    /// Leva a textura a dizer o mesmo que a revelação. Devolve `true` quando a
     /// textura foi recriada — aí o bind group da revelação tem de ser refeito.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn atualizar(
@@ -591,13 +591,13 @@ impl Mascaras {
         fila: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         rasterizador: Option<&Rasterizador>,
-        receita: &ReceitaLocal,
+        parametros: &ParametrosLocais,
         largura: u32,
         altura: u32,
         medidas: &mut MedidasDosLocais,
     ) -> bool {
         let comeco = relogio();
-        let camadas = &receita.camadas[..receita.camadas.len().min(MAXIMO_DE_CAMADAS)];
+        let camadas = &parametros.camadas[..parametros.camadas.len().min(MAXIMO_DE_CAMADAS)];
         let mut params = vec![0.0f32; (TAMANHO_DOS_PARAMS / 4) as usize];
         params[0] = camadas.len() as f32;
         for (i, c) in camadas.iter().enumerate() {
