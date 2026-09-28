@@ -70,24 +70,32 @@ fn locais_de_json(json: Option<&str>) -> Result<ReceitaLocal, JsValue> {
     }
 }
 
-/// Quantos números o enquadramento carrega.
+/// Quantos números o enquadramento carrega **sem** perspectiva.
 const CAMPOS_DO_CORTE: usize = 8;
+/// …e com ela: os oito, mais o vetor de rotação resolvido (3, em graus), o
+/// foco e o ajuste manual vertical e horizontal (graus).
+const CAMPOS_COM_PERSPECTIVA: usize = CAMPOS_DO_CORTE + 6;
 
 /// O enquadramento vindo do JavaScript: `[x, y, largura, altura, giro_90,
-/// angulo, espelho_h, espelho_v]`, na ordem de `Corte::novo`.
+/// angulo, espelho_h, espelho_v]`, na ordem de `Corte::novo` — e, quando a foto
+/// tem perspectiva guiada, `[…, rx, ry, rz, foco, vertical, horizontal]`.
 ///
 /// Os dois espelhos viajam como 0 ou 1 e o giro como inteiro num `f32`: um
 /// vetor só, do mesmo tipo do dos ajustes, é o que o `wasm-bindgen` passa sem
 /// custo. `Corte::novo` limita tudo, então valor fora da faixa entra corrigido
 /// em vez de virar erro — o mesmo tratamento que o desktop dá.
+///
+/// 🔑 **Oito continua valendo**: o site de hoje manda oito, e a foto sem
+/// perspectiva é exatamente a de antes. Um tamanho que não é nenhum dos dois é
+/// erro — revelar sem a correção que a foto tem seria entregar outra foto.
 fn corte_de_vetor(v: &[f32]) -> Result<Corte, JsValue> {
-    if v.len() != CAMPOS_DO_CORTE {
+    if v.len() != CAMPOS_DO_CORTE && v.len() != CAMPOS_COM_PERSPECTIVA {
         return Err(erro(format!(
-            "esperava {CAMPOS_DO_CORTE} campos de corte, recebi {}",
+            "esperava {CAMPOS_DO_CORTE} ou {CAMPOS_COM_PERSPECTIVA} campos de corte, recebi {}",
             v.len()
         )));
     }
-    Ok(Corte::novo(
+    let corte = Corte::novo(
         v[0],
         v[1],
         v[2],
@@ -96,7 +104,54 @@ fn corte_de_vetor(v: &[f32]) -> Result<Corte, JsValue> {
         v[5],
         v[6] != 0.0,
         v[7] != 0.0,
-    ))
+    );
+    Ok(match v.get(CAMPOS_DO_CORTE..CAMPOS_COM_PERSPECTIVA) {
+        Some(&[rx, ry, rz, foco, vertical, horizontal]) => {
+            corte.com_perspectiva(revelacao_core::perspectiva::Perspectiva::nova(
+                [rx, ry, rz],
+                foco,
+                vertical,
+                horizontal,
+            ))
+        }
+        _ => corte,
+    })
+}
+
+/// A perspectiva sozinha, em pixels do espaço orientado (depois de espelhos e
+/// giro de 90°, antes do endireitar), por linhas — `Corte::homografia_em_pixels`.
+///
+/// É o `matrix3d` que o palco do editor põe entre o giro e o endireitar, para
+/// a prévia mostrar a correção sem refazer conta nenhuma em TypeScript. Sem
+/// perspectiva, a identidade.
+#[wasm_bindgen]
+pub fn homografia_no_espaco(corte: &[f32], largura: u32, altura: u32) -> Result<Vec<f32>, JsValue> {
+    let h = corte_de_vetor(corte)?.homografia_em_pixels(largura, altura);
+    Ok((0..3)
+        .flat_map(|i| (0..3).map(move |j| (i, j)))
+        .map(|(i, j)| h[(i, j)] as f32)
+        .collect())
+}
+
+/// A matriz do enquadramento, do quadro que sai (`s, t` em 0–1) à foto de pé
+/// (`u, v` em 0–1), em nove números por linha — a conta de `Corte::mapa`.
+///
+/// É o que o editor do site usa para **desenhar** a foto com perspectiva (um
+/// `matrix3d` no CSS): a mesma matriz que recorta o JPEG, e nenhuma conta
+/// refeita em TypeScript. `recortar` falso dá o espaço inteiro (o Enquadrar).
+#[wasm_bindgen]
+pub fn matriz_do_enquadramento(
+    corte: &[f32],
+    largura: u32,
+    altura: u32,
+    recortar: bool,
+) -> Result<Vec<f32>, JsValue> {
+    let m = corte_de_vetor(corte)?.mapa(largura, altura, recortar);
+    let m = m / m[(2, 2)];
+    Ok((0..3)
+        .flat_map(|i| (0..3).map(move |j| (i, j)))
+        .map(|(i, j)| m[(i, j)] as f32)
+        .collect())
 }
 
 /// O enquadramento neutro: a foto inteira, sem giro, ângulo ou espelho.

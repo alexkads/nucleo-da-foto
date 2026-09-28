@@ -22,6 +22,9 @@ struct Camada {
     uv_off: vec2<f32>,
     alfa: f32,
     _reservado: f32,
+    // A linha projetiva da perspectiva guiada: (w0, w1, w2, 0). Sem ela,
+    // (0, 0, 1, 0).
+    uv_w: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camada: Camada;
@@ -30,7 +33,10 @@ struct Camada {
 
 struct Saida {
     @builtin(position) posicao: vec4<f32>,
-    @location(0) uv: vec2<f32>,
+    // A UV **homogênea**: numerador em xy, denominador em z. Interpolada assim
+    // e dividida no fragmento, a perspectiva sai certa; interpolar a UV já
+    // dividida entortaria a foto.
+    @location(0) uvw: vec3<f32>,
 };
 
 @vertex
@@ -43,7 +49,9 @@ fn vs(@builtin(vertex_index) indice: u32) -> Saida {
     // da imagem para baixo: o sinal troca aqui, uma vez.
     let p = (canto * 2.0 - 1.0) * camada.escala + camada.centro;
     saida.posicao = vec4<f32>(p.x, -p.y, 0.0, 1.0);
-    saida.uv = camada.uv_off + camada.uv_x * canto.x + camada.uv_y * canto.y;
+    let numerador = camada.uv_off + camada.uv_x * canto.x + camada.uv_y * canto.y;
+    let w = camada.uv_w.x * canto.x + camada.uv_w.y * canto.y + camada.uv_w.z;
+    saida.uvw = vec3<f32>(numerador, w);
     return saida;
 }
 
@@ -52,10 +60,11 @@ fn fs(entrada: Saida) -> @location(0) vec4<f32> {
     // Fora da foto (o endireitamento puxa cantos de fora) fica preto, como o
     // fundo — e não a borda esticada, que na tela do cliente viraria um borrão
     // no canto da foto.
-    let dentro = all(entrada.uv >= vec2<f32>(0.0)) && all(entrada.uv <= vec2<f32>(1.0));
+    let uv = entrada.uvw.xy / entrada.uvw.z;
+    let dentro = entrada.uvw.z > 0.0 && all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
     if (!dentro) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-    let cor = textureSampleLevel(textura, amostrador, entrada.uv, 0.0);
+    let cor = textureSampleLevel(textura, amostrador, uv, 0.0);
     return vec4<f32>(cor.rgb, cor.a * camada.alfa);
 }

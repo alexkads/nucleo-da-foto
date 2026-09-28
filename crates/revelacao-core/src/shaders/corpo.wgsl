@@ -239,6 +239,9 @@ struct QuadroDeSaida {
     linha_x: vec4<f32>,
     // m3, m4, m5, altura do arquivo
     linha_y: vec4<f32>,
+    // w0, w1, w2, 0 — a linha projetiva da perspectiva guiada; `(0, 0, 1)` sem
+    // ela, e a divisão por 1 é exata.
+    linha_w: vec4<f32>,
 }
 
 @group(0) @binding(6) var<uniform> quadro_de_saida: QuadroDeSaida;
@@ -295,10 +298,11 @@ fn exposicao_local(coord: vec2<u32>) -> f32 {
 fn no_quadro(coord: vec2<u32>) -> vec2<f32> {
     let x = f32(coord.x);
     let y = f32(coord.y);
+    let z = quadro_de_saida.linha_w.x * x + quadro_de_saida.linha_w.y * y + quadro_de_saida.linha_w.z;
     return vec2<f32>(
         quadro_de_saida.linha_x.x * x + quadro_de_saida.linha_x.y * y + quadro_de_saida.linha_x.z,
         quadro_de_saida.linha_y.x * x + quadro_de_saida.linha_y.y * y + quadro_de_saida.linha_y.z,
-    );
+    ) / z;
 }
 
 /// O tamanho do arquivo que sai, em pixels.

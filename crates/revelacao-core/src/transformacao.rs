@@ -12,8 +12,17 @@
 //! caminho de ida:
 //!
 //! ```text
-//! original → espelhos → giro de 90° → endireitamento → recorte
+//! original → espelhos → giro de 90° → perspectiva → endireitamento → recorte
 //! ```
+//!
+//! 🔑 **A perspectiva guiada entrou em 27/set/2026 entre o giro e o
+//! endireitamento** ([`crate::perspectiva`]). Ela é **resolvida** na foto de pé
+//! (as guias moram lá, como as máscaras) e **aplicada** no espaço orientado,
+//! conjugada pela orientação — o que dá o mesmo resultado que corrigir antes de
+//! girar, e deixa o ajuste manual nos eixos da tela. Sem perspectiva, todos os
+//! caminhos abaixo são os de antes, byte a byte; com ela, o enquadramento
+//! inteiro vira **uma** matriz projetiva ([`Corte::mapa`]) e uma reamostragem
+//! só, do pixel de saída para a origem.
 //!
 //! O retângulo de corte, portanto, mora no espaço **já girado e já endireitado** —
 //! é isso que faz `CropSettings::to_visual_space` existir no `domain`, e é por
@@ -32,6 +41,9 @@
 //! converte em `infrastructure::transformacao`, e o resultado é o mesmo byte.
 
 use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
+use nalgebra::{Matrix3, Vector3};
+
+use crate::perspectiva::{Orientacao, Perspectiva};
 
 /// O enquadramento: retângulo normalizado (0–1) no espaço já girado e
 /// endireitado, giro em múltiplos de 90°, ângulo fino e espelhos.
@@ -50,6 +62,8 @@ pub struct Corte {
     angulo: f32,
     espelho_h: bool,
     espelho_v: bool,
+    /// A perspectiva guiada — [`Perspectiva::default`] é nenhuma.
+    perspectiva: Perspectiva,
 }
 
 impl Corte {
@@ -83,6 +97,31 @@ impl Corte {
             angulo,
             espelho_h,
             espelho_v,
+            perspectiva: Perspectiva::default(),
+        }
+    }
+
+    /// O mesmo corte com a perspectiva guiada.
+    pub fn com_perspectiva(mut self, perspectiva: Perspectiva) -> Self {
+        self.perspectiva = perspectiva;
+        self
+    }
+
+    pub fn perspectiva(&self) -> &Perspectiva {
+        &self.perspectiva
+    }
+
+    /// Há correção de perspectiva? É o que troca todos os caminhos pelo
+    /// projetivo.
+    pub fn tem_perspectiva(&self) -> bool {
+        !self.perspectiva.e_identidade()
+    }
+
+    pub fn orientacao(&self) -> Orientacao {
+        Orientacao {
+            giro_90: self.giro_90,
+            espelho_h: self.espelho_h,
+            espelho_v: self.espelho_v,
         }
     }
 
@@ -163,7 +202,7 @@ impl Corte {
     /// foto vira borda, não corta o resultado.
     pub fn dimensoes_de_saida(&self, largura: u32, altura: u32) -> (u32, u32) {
         let (l, a) = self.dimensoes_giradas(largura, altura);
-        if self.angulo == 0.0 {
+        if self.angulo == 0.0 && !self.tem_perspectiva() {
             let (_, _, w, h) = self.retangulo(l, a);
             (w, h)
         } else {
@@ -206,6 +245,9 @@ impl Corte {
     pub fn quadro(&self, largura: u32, altura: u32) -> Quadro {
         if e_identidade(self) {
             return Quadro::inteiro(largura, altura);
+        }
+        if self.tem_perspectiva() {
+            return self.quadro_projetivo(largura, altura);
         }
 
         // Da foto revelada ao espaço girado: espelhos, depois o giro — a ordem
@@ -269,7 +311,140 @@ impl Corte {
             largura: sw as f32,
             altura: sh as f32,
             m: m.map(|v| v as f32),
+            w: [0.0, 0.0, 1.0],
         }
+    }
+
+    /// O [`Quadro`] com perspectiva: o inverso do [`Corte::mapa`], em pixels.
+    fn quadro_projetivo(&self, largura: u32, altura: u32) -> Quadro {
+        let (sw, sh) = self.dimensoes_de_saida(largura, altura);
+        let (l, a) = (largura as f64, altura as f64);
+        // Do pixel revelado (centro em +0,5) à foto normalizada…
+        let entrada = Matrix3::new(1.0 / l, 0.0, 0.5 / l, 0.0, 1.0 / a, 0.5 / a, 0.0, 0.0, 1.0);
+        // …e do quadro normalizado ao pixel do arquivo (centro em −0,5).
+        let saida = Matrix3::new(sw as f64, 0.0, -0.5, 0.0, sh as f64, -0.5, 0.0, 0.0, 1.0);
+        let inverso = self
+            .mapa(largura, altura, true)
+            .try_inverse()
+            .unwrap_or_else(Matrix3::identity);
+        let q = saida * inverso * entrada;
+        let q = q / q[(2, 2)];
+        Quadro {
+            largura: sw as f32,
+            altura: sh as f32,
+            m: [
+                q[(0, 0)],
+                q[(0, 1)],
+                q[(0, 2)],
+                q[(1, 0)],
+                q[(1, 1)],
+                q[(1, 2)],
+            ]
+            .map(|v| v as f32),
+            w: [q[(2, 0)], q[(2, 1)], q[(2, 2)]].map(|v| v as f32),
+        }
+    }
+
+    /// 🔑 **A conta única do enquadramento projetivo**: do ponto `(s, t)`
+    /// normalizado no quadro que sai (o arquivo, ou o espaço inteiro quando
+    /// `recortar` é falso) ao ponto `(u, v)` normalizado na foto de pé.
+    ///
+    /// É a cadeia do topo do módulo percorrida ao contrário — recorte,
+    /// endireitamento, perspectiva, orientação —, cada passo uma matriz 3×3 em
+    /// `f64`. O arquivo ([`aplicar`]), a vinheta ([`Corte::quadro`]), a tela do
+    /// cliente ([`mapa_do_enquadramento`]) e os pincéis
+    /// ([`do_quadro_para_a_foto`]) leem daqui.
+    pub fn mapa(&self, largura: u32, altura: u32, recortar: bool) -> Matrix3<f64> {
+        let (l, a) = (largura.max(1) as f64, altura.max(1) as f64);
+        let (lg, ag) = {
+            let (x, y) = self.dimensoes_giradas(largura.max(1), altura.max(1));
+            (x as f64, y as f64)
+        };
+        let r = 0.5 * lg.hypot(ag);
+        let recorte = if recortar {
+            Matrix3::new(
+                self.largura as f64,
+                0.0,
+                self.x as f64,
+                0.0,
+                self.altura as f64,
+                self.y as f64,
+                0.0,
+                0.0,
+                1.0,
+            )
+        } else {
+            Matrix3::identity()
+        };
+        let centrar = Matrix3::new(
+            lg / r,
+            0.0,
+            -0.5 * lg / r,
+            0.0,
+            ag / r,
+            -0.5 * ag / r,
+            0.0,
+            0.0,
+            1.0,
+        );
+        // A mesma rotação de `endireitar_e_recortar`, no plano centrado.
+        let (sen, cos) = (-(self.angulo as f64).to_radians()).sin_cos();
+        let desendireitar = Matrix3::new(cos, -sen, 0.0, sen, cos, 0.0, 0.0, 0.0, 1.0);
+        let desperspectivar = self
+            .perspectiva
+            .homografia(self.orientacao(), lg, ag)
+            .try_inverse()
+            .unwrap_or_else(Matrix3::identity);
+        let desorientar = self.orientacao().matriz().transpose();
+        let na_foto = Matrix3::new(r / l, 0.0, 0.5, 0.0, r / a, 0.5, 0.0, 0.0, 1.0);
+        na_foto * desorientar * desperspectivar * desendireitar * centrar * recorte
+    }
+
+    /// A perspectiva sozinha, em **pixels do espaço orientado**: leva o pixel
+    /// `(x, y)` da foto espelhada e girada (antes do endireitar) ao lugar dele
+    /// na foto corrigida, `H·(x, y, 1)` dividido.
+    ///
+    /// É o passo que o editor do site põe entre o giro de 90° e o endireitar,
+    /// como um `matrix3d` no CSS — a mesma matriz que o [`Corte::mapa`]
+    /// desfaz, só que no sentido de ida e em pixels.
+    pub fn homografia_em_pixels(&self, largura: u32, altura: u32) -> Matrix3<f64> {
+        let (lg, ag) = {
+            let (x, y) = self.dimensoes_giradas(largura.max(1), altura.max(1));
+            (x as f64, y as f64)
+        };
+        let r = 0.5 * lg.hypot(ag);
+        let centrar = Matrix3::new(
+            1.0 / r,
+            0.0,
+            -0.5 * lg / r,
+            0.0,
+            1.0 / r,
+            -0.5 * ag / r,
+            0.0,
+            0.0,
+            1.0,
+        );
+        let descentrar = Matrix3::new(r, 0.0, 0.5 * lg, 0.0, r, 0.5 * ag, 0.0, 0.0, 1.0);
+        let h = descentrar * self.perspectiva.homografia(self.orientacao(), lg, ag) * centrar;
+        h / h[(2, 2)]
+    }
+
+    /// O contorno da foto dentro do **espaço** (girado, corrigido e
+    /// endireitado), normalizado — os quatro cantos da foto, na ordem
+    /// superior-esquerdo, superior-direito, inferior-direito, inferior-esquerdo.
+    ///
+    /// Com perspectiva ou ângulo a foto não cobre o espaço inteiro; o que fica
+    /// de fora deste quadrilátero é canto sem conteúdo. É ele que o "restringir
+    /// ao conteúdo" usa e que o Enquadrar desenha.
+    pub fn contorno_no_espaco(&self, largura: u32, altura: u32) -> [[f64; 2]; 4] {
+        let ida = self
+            .mapa(largura, altura, false)
+            .try_inverse()
+            .unwrap_or_else(Matrix3::identity);
+        [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]].map(|c| {
+            let v = ida * Vector3::new(c[0], c[1], 1.0);
+            [v.x / v.z, v.y / v.z]
+        })
     }
 }
 
@@ -305,8 +480,12 @@ pub struct Quadro {
     pub largura: f32,
     pub altura: f32,
     /// `X = m[0]·x + m[1]·y + m[2]` e `Y = m[3]·x + m[4]·y + m[5]`: do pixel da
-    /// foto revelada ao pixel do arquivo.
+    /// foto revelada ao pixel do arquivo…
     pub m: [f32; 6],
+    /// …divididos por `w[0]·x + w[1]·y + w[2]` — a linha projetiva. Sem
+    /// perspectiva é `[0, 0, 1]`, e a divisão por 1 é exata: a vinheta sai bit a
+    /// bit a de antes.
+    pub w: [f32; 3],
 }
 
 impl Quadro {
@@ -316,6 +495,7 @@ impl Quadro {
             largura: largura as f32,
             altura: altura as f32,
             m: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            w: [0.0, 0.0, 1.0],
         }
     }
 
@@ -325,14 +505,18 @@ impl Quadro {
     /// `corpo.wgsl`). Na identidade, `1·x + 0·y + 0` é `x` exato — e é isso que
     /// deixa a vinheta sem enquadramento bit a bit a de antes.
     pub fn no_quadro(&self, x: f32, y: f32) -> (f32, f32) {
-        let m = &self.m;
-        (m[0] * x + m[1] * y + m[2], m[3] * x + m[4] * y + m[5])
+        let (m, w) = (&self.m, &self.w);
+        let z = w[0] * x + w[1] * y + w[2];
+        (
+            (m[0] * x + m[1] * y + m[2]) / z,
+            (m[3] * x + m[4] * y + m[5]) / z,
+        )
     }
 
-    /// Como a GPU recebe: duas linhas `vec4`, `[m0, m1, m2, largura]` e
-    /// `[m3, m4, m5, altura]`.
-    pub fn para_gpu(&self) -> [f32; 8] {
-        let m = &self.m;
+    /// Como a GPU recebe: três linhas `vec4`, `[m0, m1, m2, largura]`,
+    /// `[m3, m4, m5, altura]` e `[w0, w1, w2, 0]`.
+    pub fn para_gpu(&self) -> [f32; 12] {
+        let (m, w) = (&self.m, &self.w);
         [
             m[0],
             m[1],
@@ -342,6 +526,10 @@ impl Quadro {
             m[4],
             m[5],
             self.altura,
+            w[0],
+            w[1],
+            w[2],
+            0.0,
         ]
     }
 }
@@ -445,6 +633,10 @@ pub fn uvs_do_enquadramento(
 /// [`aplicar`] pixel a pixel: a mão que pinta na tela cai no pixel da foto que
 /// está sob ela, em qualquer enquadramento.
 pub fn do_quadro_para_a_foto(largura: u32, altura: u32, corte: &Corte, s: f32, t: f32) -> [f32; 2] {
+    if corte.tem_perspectiva() {
+        let v = corte.mapa(largura, altura, true) * Vector3::new(s as f64, t as f64, 1.0);
+        return [(v.x / v.z) as f32, (v.y / v.z) as f32];
+    }
     let (ux, uy, uoff) = uvs_do_enquadramento(largura, altura, corte);
     [
         uoff[0] + ux[0] * s + uy[0] * t,
@@ -455,6 +647,13 @@ pub fn do_quadro_para_a_foto(largura: u32, altura: u32, corte: &Corte, s: f32, t
 /// O inverso de [`do_quadro_para_a_foto`]: onde o ponto `(x, y)` da foto cai
 /// no quadro exibido (pode cair fora de `0..1`, se o recorte o deixou de fora).
 pub fn da_foto_para_o_quadro(largura: u32, altura: u32, corte: &Corte, x: f32, y: f32) -> [f32; 2] {
+    if corte.tem_perspectiva() {
+        let Some(ida) = corte.mapa(largura, altura, true).try_inverse() else {
+            return [0.5, 0.5];
+        };
+        let v = ida * Vector3::new(x as f64, y as f64, 1.0);
+        return [(v.x / v.z) as f32, (v.y / v.z) as f32];
+    }
     let (ux, uy, uoff) = uvs_do_enquadramento(largura, altura, corte);
     let (a, b, c, d) = (ux[0], uy[0], ux[1], uy[1]);
     let det = a * d - b * c;
@@ -468,8 +667,40 @@ pub fn da_foto_para_o_quadro(largura: u32, altura: u32, corte: &Corte, x: f32, y
 /// Quantos pixels da foto a largura do quadro exibido atravessa — para levar o
 /// raio de uma máscara (fração do maior lado da foto) a pixels da tela.
 pub fn pixels_da_foto_na_largura_do_quadro(largura: u32, altura: u32, corte: &Corte) -> f32 {
+    if corte.tem_perspectiva() {
+        // Projetivo: a escala muda pela foto; vale a do centro do quadro, que é
+        // onde a mão costuma estar.
+        let a = do_quadro_para_a_foto(largura, altura, corte, 0.45, 0.5);
+        let b = do_quadro_para_a_foto(largura, altura, corte, 0.55, 0.5);
+        let (dx, dy) = (
+            (b[0] - a[0]) * largura as f32,
+            (b[1] - a[1]) * altura as f32,
+        );
+        return 10.0 * dx.hypot(dy);
+    }
     let (ux, _, _) = uvs_do_enquadramento(largura, altura, corte);
     ((ux[0] * largura as f32).powi(2) + (ux[1] * altura as f32).powi(2)).sqrt()
+}
+
+/// O enquadramento como matriz 3×3 (linhas), do quad `(s, t, 1)` da tela à
+/// UV homogênea da textura: `uv = (M·p).xy / (M·p).z`.
+///
+/// Sem perspectiva é a de [`uvs_do_enquadramento`] com a última linha
+/// `[0, 0, 1]` — a mesma conta, e a divisão por 1 é exata. Com perspectiva, é o
+/// [`Corte::mapa`]: a UV varia de forma projetiva no quad, e o shader precisa
+/// dividir **por fragmento** (interpolar a UV já dividida entortaria a foto).
+pub fn mapa_do_enquadramento(largura: u32, altura: u32, corte: &Corte) -> [[f32; 3]; 3] {
+    if corte.tem_perspectiva() {
+        let m = corte.mapa(largura, altura, true);
+        let m = m / m[(2, 2)];
+        return [0, 1, 2].map(|i| [m[(i, 0)], m[(i, 1)], m[(i, 2)]].map(|v| v as f32));
+    }
+    let (ux, uy, uoff) = uvs_do_enquadramento(largura, altura, corte);
+    [
+        [ux[0], uy[0], uoff[0]],
+        [ux[1], uy[1], uoff[1]],
+        [0.0, 0.0, 1.0],
+    ]
 }
 
 /// A foto pronta para a tela.
@@ -491,6 +722,10 @@ pub fn aplicar(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> DynamicI
     // metade de um quadro de 60fps gasta para devolver a mesma imagem.
     if e_identidade(corte) {
         return imagem.clone();
+    }
+
+    if corte.tem_perspectiva() {
+        return aplicar_projetiva(imagem, corte, recortar);
     }
 
     let base = espelhar_e_girar(imagem, corte);
@@ -522,7 +757,8 @@ pub fn aplicar(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> DynamicI
 /// rápido nunca valeria para foto que já passou por gravação.
 fn e_identidade(corte: &Corte) -> bool {
     const FOLGA: f32 = 1e-4;
-    corte.giro_90().rem_euclid(4) == 0
+    !corte.tem_perspectiva()
+        && corte.giro_90().rem_euclid(4) == 0
         && corte.angulo() == 0.0
         && !corte.espelho_h()
         && !corte.espelho_v()
@@ -627,6 +863,146 @@ fn endireitar_e_recortar(base: &DynamicImage, corte: &Corte) -> DynamicImage {
     }
 
     DynamicImage::ImageRgba8(destino)
+}
+
+/// O enquadramento com perspectiva: **uma** reamostragem, do pixel de saída
+/// para a origem, pela matriz de [`Corte::mapa`].
+///
+/// Não há imagem intermediária: espelho, giro, perspectiva, ângulo e recorte
+/// estão todos na matriz, e cada pixel da saída pergunta de onde vem.
+///
+/// O que cai fora da foto:
+/// - no **Enquadrar** (`recortar` falso) fica **transparente** — o palco
+///   aparece por trás, e o operador vê os cantos sem conteúdo antes de cortar;
+/// - no **arquivo** fica **branco**, como no Lightroom. Com "restringir ao
+///   conteúdo" ligado (o padrão) o retângulo nunca chega lá.
+///
+/// Meio pixel de folga na borda gruda na borda, como [`amostrar`]: senão a
+/// última coluna do recorte justo sairia com uma franja branca.
+fn aplicar_projetiva(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> DynamicImage {
+    // 🔑 Sem cópia da origem quando ela já é RGBA — que é o caso da revelada.
+    // O `to_rgba8` sozinho custava um terço do tempo na cópia de trabalho.
+    let convertida;
+    let origem: &RgbaImage = match imagem {
+        DynamicImage::ImageRgba8(rgba) => rgba,
+        outra => {
+            convertida = outra.to_rgba8();
+            &convertida
+        }
+    };
+    let (largura, altura) = origem.dimensions();
+    let (sw, sh) = if recortar {
+        corte.dimensoes_de_saida(largura, altura)
+    } else {
+        corte.dimensoes_giradas(largura, altura)
+    };
+    let m = corte.mapa(largura, altura, recortar);
+    let fora = if recortar { [255u8; 4] } else { [0u8; 4] };
+    let mut destino = vec![0u8; sw as usize * sh as usize * 4];
+    let linha = sw as usize * 4;
+    let preencher = |j0: usize, bloco: &mut [u8]| {
+        for (dj, saida) in bloco.chunks_exact_mut(linha).enumerate() {
+            linha_projetiva(origem, &m, (sw, sh), (j0 + dj) as u32, fora, saida);
+        }
+    };
+    // 🔑 As linhas não dependem umas das outras: fora do navegador elas se
+    // dividem entre os núcleos. No `wasm32` não há threads, e vai uma por vez.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let nucleos = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(16);
+        let por_bloco = (sh as usize).div_ceil(nucleos).max(1);
+        std::thread::scope(|escopo| {
+            for (k, bloco) in destino.chunks_mut(por_bloco * linha).enumerate() {
+                let preencher = &preencher;
+                escopo.spawn(move || preencher(k * por_bloco, bloco));
+            }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    preencher(0, &mut destino);
+    DynamicImage::ImageRgba8(
+        RgbaImage::from_raw(sw, sh, destino).expect("o buffer tem o tamanho da saída"),
+    )
+}
+
+/// Uma linha do [`aplicar_projetiva`].
+///
+/// A linha anda somando a primeira coluna da matriz: o numerador e o
+/// denominador são lineares em `s`, e só a divisão fica por pixel. Meio pixel
+/// de folga na borda gruda na borda, como [`amostrar`].
+fn linha_projetiva(
+    origem: &RgbaImage,
+    m: &Matrix3<f64>,
+    (sw, sh): (u32, u32),
+    j: u32,
+    fora: [u8; 4],
+    saida: &mut [u8],
+) {
+    let (largura, altura) = origem.dimensions();
+    let (lf, af) = (largura as f64, altura as f64);
+    let (folga_u, folga_v) = (0.5 / lf, 0.5 / af);
+    let t = (j as f64 + 0.5) / sh as f64;
+    let passo = m.column(0) / sw as f64;
+    let mut v = m * Vector3::new(0.5 / sw as f64, t, 1.0);
+    let dados = origem.as_raw();
+    for pixel in saida.as_chunks_mut::<4>().0 {
+        let cor = if v.z > 1e-12 {
+            let (u, w) = (v.x / v.z, v.y / v.z);
+            if u >= -folga_u && u <= 1.0 + folga_u && w >= -folga_v && w <= 1.0 + folga_v {
+                amostrar_bruto(
+                    dados,
+                    largura,
+                    altura,
+                    (u * lf - 0.5) as f32,
+                    (w * af - 0.5) as f32,
+                )
+            } else {
+                fora
+            }
+        } else {
+            fora
+        };
+        pixel.copy_from_slice(&cor);
+        v += passo;
+    }
+}
+
+/// [`amostrar`] direto no buffer — a mesma conta, sem `get_pixel`.
+#[inline]
+fn amostrar_bruto(dados: &[u8], largura: u32, altura: u32, u: f32, v: f32) -> [u8; 4] {
+    let max_x = largura as i64 - 1;
+    let max_y = altura as i64 - 1;
+    let x0 = u.floor() as i64;
+    let y0 = v.floor() as i64;
+    let fx = u - x0 as f32;
+    let fy = v - y0 as f32;
+    let em = |x: i64, y: i64| -> usize {
+        let x = x.clamp(0, max_x) as usize;
+        let y = y.clamp(0, max_y) as usize;
+        (y * largura as usize + x) * 4
+    };
+    let (a, b, c, d) = (
+        em(x0, y0),
+        em(x0 + 1, y0),
+        em(x0, y0 + 1),
+        em(x0 + 1, y0 + 1),
+    );
+    let mut canais = [0u8; 4];
+    for k in 0..4 {
+        let (pa, pb, pc, pd) = (
+            dados[a + k] as f32,
+            dados[b + k] as f32,
+            dados[c + k] as f32,
+            dados[d + k] as f32,
+        );
+        let cima = pa + (pb - pa) * fx;
+        let baixo = pc + (pd - pc) * fx;
+        canais[k] = (cima + (baixo - cima) * fy).round().clamp(0.0, 255.0) as u8;
+    }
+    canais
 }
 
 /// A foto inteira girada `angulo` graus em torno do centro, no mesmo tamanho,
@@ -1592,5 +1968,356 @@ mod testes_da_tela_para_a_foto {
         // Girada 90°, a largura do quadro é a altura da foto.
         let girada = Corte::novo(0.0, 0.0, 1.0, 1.0, 1, 0.0, false, false);
         assert!((pixels_da_foto_na_largura_do_quadro(300, 200, &girada) - 200.0).abs() < 1.0);
+    }
+}
+
+#[cfg(test)]
+mod testes_da_perspectiva {
+    use super::*;
+    use crate::perspectiva::{self, Eixo, Guia, Resolucao};
+
+    fn com(corte: Corte, rotacao: [f32; 3], vertical: f32) -> Corte {
+        corte.com_perspectiva(Perspectiva::nova(rotacao, 1.6, vertical, 0.0))
+    }
+
+    /// Foto de 120×80 endereçada: vermelho conta a coluna, verde a linha.
+    fn enderecada() -> DynamicImage {
+        DynamicImage::ImageRgba8(RgbaImage::from_fn(120, 80, |x, y| {
+            Rgba([(x * 2) as u8, (y * 3) as u8, 0, 255])
+        }))
+    }
+
+    /// 🔑 **Sem perspectiva, a matriz geral é a conta de antes.** É o que dá
+    /// confiança na cadeia: a mesma matriz, com a perspectiva ligada, é a que
+    /// produz o arquivo.
+    #[test]
+    fn sem_perspectiva_o_mapa_e_o_das_uvs() {
+        for corte in [
+            Corte::novo(0.1, 0.1, 0.6, 0.6, 0, 12.0, false, false),
+            Corte::novo(0.05, 0.15, 0.7, 0.4, 3, -8.0, false, true),
+            Corte::novo(0.2, 0.1, 0.5, 0.7, 1, 5.0, true, false),
+            Corte::novo(0.0, 0.0, 1.0, 1.0, 2, -3.0, true, true),
+        ] {
+            let m = corte.mapa(300, 200, true);
+            let (ux, uy, uoff) = uvs_do_enquadramento(300, 200, &corte);
+            for (s, t) in [(0.0, 0.0), (1.0, 0.0), (0.3, 0.8), (1.0, 1.0)] {
+                let v = m * Vector3::new(s, t, 1.0);
+                let esperado = [
+                    uoff[0] + ux[0] * s as f32 + uy[0] * t as f32,
+                    uoff[1] + ux[1] * s as f32 + uy[1] * t as f32,
+                ];
+                assert!(
+                    ((v.x / v.z) as f32 - esperado[0]).abs() < 1e-5
+                        && ((v.y / v.z) as f32 - esperado[1]).abs() < 1e-5,
+                    "{corte:?} em ({s},{t}): {:?} × {esperado:?}",
+                    [v.x / v.z, v.y / v.z]
+                );
+            }
+        }
+    }
+
+    /// Com a perspectiva no neutro, nada muda — nem o caminho.
+    #[test]
+    fn perspectiva_neutra_nao_muda_nada() {
+        let corte = Corte::inteiro().com_perspectiva(Perspectiva::default());
+        assert!(corte.e_inteiro());
+        assert!(!corte.tem_perspectiva());
+        let foto = enderecada();
+        assert_eq!(aplicar(&foto, &corte, true).to_rgba8(), foto.to_rgba8());
+    }
+
+    /// 🚨 **As verticais convergentes saem paralelas no arquivo.**
+    ///
+    /// Uma foto sintética de duas colunas escuras que se aproximam no topo (o
+    /// prédio fotografado de baixo). As guias sobre elas vão ao resolvedor, a
+    /// solução vai ao `aplicar`, e no arquivo cada coluna tem de estar na mesma
+    /// posição no alto e embaixo — medida pelo centro de massa da tinta.
+    #[test]
+    fn as_verticais_tortas_saem_retas_no_arquivo() {
+        let (l, a) = (600u32, 400u32);
+        // As colunas: x = 150 → 190 no topo e 450 → 410 no topo.
+        let coluna = |y: f64, base: f64, topo: f64| base + (topo - base) * (1.0 - y / a as f64);
+        let foto = DynamicImage::ImageRgba8(RgbaImage::from_fn(l, a, |x, y| {
+            let yf = y as f64 + 0.5;
+            let xf = x as f64 + 0.5;
+            let perto = (xf - coluna(yf, 150.0, 190.0)).abs() < 3.0
+                || (xf - coluna(yf, 450.0, 410.0)).abs() < 3.0;
+            if perto {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        }));
+        let n = |x: f64, y: f64| [x / l as f64, y / a as f64];
+        let guias = [
+            Guia {
+                de: n(coluna(20.0, 150.0, 190.0), 20.0),
+                ate: n(coluna(380.0, 150.0, 190.0), 380.0),
+                eixo: Eixo::Vertical,
+            },
+            Guia {
+                de: n(coluna(20.0, 450.0, 410.0), 20.0),
+                ate: n(coluna(380.0, 450.0, 410.0), 380.0),
+                eixo: Eixo::Vertical,
+            },
+        ];
+        let Resolucao::Resolvida(s) = perspectiva::resolver(&guias, l, a).resolucao else {
+            panic!("as guias deviam resolver");
+        };
+        let corte = Corte::inteiro().com_perspectiva(s.perspectiva(0.0, 0.0));
+        let saida = aplicar(&foto, &corte, true).to_rgba8();
+        // O centro da tinta de cada coluna, numa linha do arquivo.
+        let centros = |y: u32| -> Vec<f64> {
+            let mut grupos: Vec<(f64, f64)> = Vec::new();
+            for x in 0..saida.width() {
+                let tinta = 255.0 - saida.get_pixel(x, y).0[0] as f64;
+                if tinta < 40.0 {
+                    continue;
+                }
+                match grupos.last_mut() {
+                    Some((soma_x, soma)) if (x as f64 - *soma_x / *soma).abs() < 12.0 => {
+                        *soma_x += x as f64 * tinta;
+                        *soma += tinta;
+                    }
+                    _ => grupos.push((x as f64 * tinta, tinta)),
+                }
+            }
+            grupos.iter().map(|(sx, s)| sx / s).collect()
+        };
+        let (alto, baixo) = (centros(80), centros(320));
+        assert_eq!(alto.len(), 2, "{alto:?}");
+        assert_eq!(baixo.len(), 2, "{baixo:?}");
+        for k in 0..2 {
+            assert!(
+                (alto[k] - baixo[k]).abs() < 1.0,
+                "coluna {k}: {:.2} no alto × {:.2} embaixo",
+                alto[k],
+                baixo[k]
+            );
+        }
+    }
+
+    fn cortes_com_perspectiva() -> Vec<Corte> {
+        vec![
+            com(Corte::inteiro(), [8.0, -3.0, 1.0], 0.0),
+            com(
+                Corte::novo(0.1, 0.15, 0.7, 0.6, 0, 0.0, false, false),
+                [6.0, 4.0, 0.0],
+                0.0,
+            ),
+            com(
+                Corte::novo(0.2, 0.1, 0.6, 0.7, 1, 0.0, false, false),
+                [-5.0, 2.0, 1.0],
+                3.0,
+            ),
+            com(
+                Corte::novo(0.05, 0.1, 0.8, 0.7, 2, 4.0, true, false),
+                [4.0, 0.0, -2.0],
+                0.0,
+            ),
+            com(
+                Corte::novo(0.1, 0.2, 0.7, 0.6, 3, -6.0, false, true),
+                [0.0, 5.0, 0.0],
+                -4.0,
+            ),
+        ]
+    }
+
+    /// 🚨 **O quadro da vinheta é o inverso exato do arquivo**, também com
+    /// perspectiva: o pixel da foto revelada cai, pelo quadro, no pixel do
+    /// arquivo que tem a cor dele.
+    #[test]
+    fn o_quadro_projetivo_devolve_o_pixel_do_arquivo() {
+        let foto = enderecada();
+        for corte in cortes_com_perspectiva() {
+            let arquivo = aplicar(&foto, &corte, true).to_rgba8();
+            let quadro = corte.quadro(120, 80);
+            assert_eq!(
+                (quadro.largura as u32, quadro.altura as u32),
+                arquivo.dimensions()
+            );
+            let mut conferidos = 0;
+            for (x, y) in [(30u32, 20u32), (60, 40), (90, 55), (45, 60), (70, 25)] {
+                let (fx, fy) = quadro.no_quadro(x as f32, y as f32);
+                let (i, j) = (fx.round(), fy.round());
+                if i < 1.0
+                    || j < 1.0
+                    || i >= arquivo.width() as f32 - 1.0
+                    || j >= arquivo.height() as f32 - 1.0
+                {
+                    continue;
+                }
+                let p = arquivo.get_pixel(i as u32, j as u32).0;
+                // A cor diz a coluna e a linha de origem (com a bilinear e o
+                // arredondamento do quadro: até ~1 pixel).
+                let (ox, oy) = (p[0] as f32 / 2.0, p[1] as f32 / 3.0);
+                assert!(
+                    (ox - x as f32).abs() <= 1.5 && (oy - y as f32).abs() <= 1.5,
+                    "{corte:?}: ({x},{y}) → ({fx:.2},{fy:.2}) tem a cor de ({ox},{oy})"
+                );
+                conferidos += 1;
+            }
+            assert!(
+                conferidos >= 3,
+                "{corte:?}: só {conferidos} pontos caíram no arquivo"
+            );
+        }
+    }
+
+    /// A mão que pinta na tela cai no pixel da foto que está sob ela, e volta.
+    #[test]
+    fn ida_e_volta_entre_quadro_e_foto_com_perspectiva() {
+        for corte in cortes_com_perspectiva() {
+            for (s, t) in [(0.2, 0.3), (0.5, 0.5), (0.8, 0.7)] {
+                let [x, y] = do_quadro_para_a_foto(1200, 800, &corte, s, t);
+                let [s2, t2] = da_foto_para_o_quadro(1200, 800, &corte, x, y);
+                assert!((s - s2).abs() < 1e-4 && (t - t2).abs() < 1e-4, "{corte:?}");
+            }
+        }
+    }
+
+    /// 🔑 **A tela do cliente amostra o mesmo pixel que o arquivo.** A GPU lê
+    /// pela matriz de [`mapa_do_enquadramento`] (dividindo por fragmento); o
+    /// arquivo sai de [`aplicar`]. Com a mesma bilinear dos dois lados, a cor
+    /// tem de bater — a tolerância de 2 níveis é o arredondamento `f32` da
+    /// matriz que a GPU recebe.
+    #[test]
+    fn a_tela_do_cliente_amostra_o_que_o_arquivo_tem() {
+        let foto = enderecada();
+        let rgba = foto.to_rgba8();
+        for corte in cortes_com_perspectiva() {
+            let arquivo = aplicar(&foto, &corte, true).to_rgba8();
+            let m = mapa_do_enquadramento(120, 80, &corte);
+            let (sw, sh) = arquivo.dimensions();
+            for (i, j) in [
+                (3u32, 4u32),
+                (sw / 2, sh / 2),
+                (sw - 4, sh - 5),
+                (sw / 3, sh * 2 / 3),
+            ] {
+                let (s, t) = ((i as f32 + 0.5) / sw as f32, (j as f32 + 0.5) / sh as f32);
+                let z = m[2][0] * s + m[2][1] * t + m[2][2];
+                let u = (m[0][0] * s + m[0][1] * t + m[0][2]) / z;
+                let v = (m[1][0] * s + m[1][1] * t + m[1][2]) / z;
+                if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+                    continue;
+                }
+                let gpu = amostrar(&rgba, u * 120.0 - 0.5, v * 80.0 - 0.5).0;
+                let cpu = arquivo.get_pixel(i, j).0;
+                for k in 0..3 {
+                    assert!(
+                        (gpu[k] as i32 - cpu[k] as i32).abs() <= 2,
+                        "{corte:?} ({i},{j}): gpu {gpu:?} cpu {cpu:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 🔑 Girar a foto depois da perspectiva gira o resultado — exato, porque
+    /// o giro de 90° só troca eixos: a foto corrigida e girada é a girada da
+    /// corrigida, pixel a pixel.
+    #[test]
+    fn girar_depois_da_perspectiva_gira_o_resultado() {
+        let foto = enderecada();
+        let p = Perspectiva::nova([7.0, -3.0, 1.5], 1.5, 0.0, 0.0);
+        let reta = aplicar(&foto, &Corte::inteiro().com_perspectiva(p), false).to_rgba8();
+        let girado = Corte::novo(0.0, 0.0, 1.0, 1.0, 1, 0.0, false, false).com_perspectiva(p);
+        let deitada = aplicar(&foto, &girado, false).to_rgba8();
+        let esperada = image::imageops::rotate90(&reta);
+        assert_eq!(deitada.dimensions(), esperada.dimensions());
+        let diferentes = deitada
+            .pixels()
+            .zip(esperada.pixels())
+            .filter(|(a, b)| {
+                a.0.iter()
+                    .zip(b.0)
+                    .any(|(x, y)| (*x as i32 - y as i32).abs() > 1)
+            })
+            .count();
+        assert!(diferentes == 0, "{diferentes} pixels diferentes");
+        // E o espelho.
+        let espelhado = Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, true, false).com_perspectiva(p);
+        let e = aplicar(&foto, &espelhado, false).to_rgba8();
+        let esperada = image::imageops::flip_horizontal(&reta);
+        let diferentes = e
+            .pixels()
+            .zip(esperada.pixels())
+            .filter(|(a, b)| {
+                a.0.iter()
+                    .zip(b.0)
+                    .any(|(x, y)| (*x as i32 - y as i32).abs() > 1)
+            })
+            .count();
+        assert!(diferentes == 0, "espelho: {diferentes} pixels diferentes");
+    }
+
+    /// 🔑 A homografia em pixels (o `matrix3d` do editor do site) é a ida do
+    /// que o [`Corte::mapa`] desfaz: espelhar/girar o ponto da foto e levá-lo
+    /// pela homografia dá o mesmo lugar que o mapa inverso dá.
+    #[test]
+    fn a_homografia_em_pixels_e_a_ida_do_mapa() {
+        let (l, a) = (1200u32, 800u32);
+        for corte in cortes_com_perspectiva() {
+            // Sem ângulo nem recorte: o espaço corrigido é o do Enquadrar.
+            let sem_angulo = Corte::novo(
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                corte.giro_90(),
+                0.0,
+                corte.espelho_h(),
+                corte.espelho_v(),
+            )
+            .com_perspectiva(*corte.perspectiva());
+            let ida = sem_angulo.mapa(l, a, false).try_inverse().unwrap();
+            let h = sem_angulo.homografia_em_pixels(l, a);
+            let (lg, ag) = sem_angulo.dimensoes_giradas(l, a);
+            let t = sem_angulo.orientacao().matriz();
+            for (u, v) in [(0.2, 0.3), (0.7, 0.6), (0.5, 0.5)] {
+                // A foto (u, v) no espaço orientado, em pixels.
+                let r = 0.5 * (l as f64).hypot(a as f64);
+                let c = t * Vector3::new((u - 0.5) * l as f64 / r, (v - 0.5) * a as f64 / r, 1.0);
+                let (ox, oy) = (c.x * r + lg as f64 / 2.0, c.y * r + ag as f64 / 2.0);
+                let p = h * Vector3::new(ox, oy, 1.0);
+                let esperado = ida * Vector3::new(u, v, 1.0);
+                let (ex, ey) = (
+                    esperado.x / esperado.z * lg as f64,
+                    esperado.y / esperado.z * ag as f64,
+                );
+                assert!(
+                    (p.x / p.z - ex).abs() < 1e-6 && (p.y / p.z - ey).abs() < 1e-6,
+                    "{corte:?}: {:?} × {:?}",
+                    (p.x / p.z, p.y / p.z),
+                    (ex, ey)
+                );
+            }
+        }
+    }
+
+    /// No Enquadrar os cantos sem conteúdo aparecem (transparentes); no
+    /// arquivo, fora da foto é branco — e o contorno diz onde a foto está.
+    #[test]
+    fn cantos_sem_conteudo_e_o_contorno() {
+        let foto = enderecada();
+        let corte = com(Corte::inteiro(), [10.0, 0.0, 0.0], 0.0);
+        let inteira = aplicar(&foto, &corte, false).to_rgba8();
+        assert_eq!(inteira.dimensions(), (120, 80));
+        let contorno = corte.contorno_no_espaco(120, 80);
+        // O topo alargou para fora do espaço, a base encolheu para dentro:
+        // os cantos de baixo ficam vazios.
+        assert!(
+            contorno[3][0] > 0.01 && contorno[2][0] < 0.99,
+            "{contorno:?}"
+        );
+        assert_eq!(
+            inteira.get_pixel(0, 79).0[3],
+            0,
+            "canto de baixo sem conteúdo"
+        );
+        assert_eq!(inteira.get_pixel(60, 40).0[3], 255, "o centro tem foto");
+        let arquivo = aplicar(&foto, &corte, true).to_rgba8();
+        assert_eq!(arquivo.get_pixel(0, 79).0, [255, 255, 255, 255]);
     }
 }

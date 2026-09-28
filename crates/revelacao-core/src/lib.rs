@@ -23,12 +23,14 @@
 //! `o_fragmento_revela_o_mesmo_pixel_que_o_compute`, em [`motor`].
 
 pub mod ajustes;
+pub mod cronometro;
 pub mod darktable;
 pub mod jpeg;
 pub mod locais;
 mod mascaras;
 pub mod motor;
 pub mod nivel;
+pub mod perspectiva;
 pub mod preenchimento;
 mod retoque;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -36,12 +38,18 @@ mod testes_das_mascaras;
 pub mod transformacao;
 
 pub use ajustes::{Ajustes, QUANTIDADE};
+pub use cronometro::TemposDaGpu;
 pub use locais::ReceitaLocal;
 pub use mascaras::MedidasDosLocais;
+#[cfg(not(target_arch = "wasm32"))]
+pub use motor::adaptadores_da_maquina;
 /// 🚨 O flush do contexto WebGL2 — quem tem o canvas registra, e a espera do
 /// mapeamento chama. Sem ele a revelação não termina dentro de um Worker; ver
 /// `motor::registrar_flush_da_gpu`.
 #[cfg(target_arch = "wasm32")]
 pub use motor::registrar_flush_da_gpu;
-pub use motor::{Entrada, ErroAoAbrir, ErroDeMascara, Motor};
+pub use motor::{Entrada, ErroAoAbrir, ErroDeMascara, InfoDoAdaptador, Motor, TemposDoMotor};
+/// A álgebra da perspectiva, para quem converte ponto da tela em ponto da
+/// foto pela mesma matriz ([`transformacao::Corte::mapa`]).
+pub use nalgebra;
 pub use transformacao::Corte;
