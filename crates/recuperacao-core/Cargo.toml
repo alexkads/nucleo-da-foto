@@ -1,0 +1,15 @@
+[package]
+name = "recuperacao-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Recupera fotos de um cartão formatado: varre os setores atrás de JPEG e RAW e diz onde cada arquivo começa e termina"
+
+[lib]
+name = "recuperacao_core"
+path = "src/lib.rs"
+
+[dependencies]
+# Nada. O motor é leitura e aritmética sobre `Read + Seek`: o cartão de
+# verdade, a imagem `.img` e o `Cursor` do teste passam pelo mesmo caminho.
