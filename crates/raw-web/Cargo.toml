@@ -1,0 +1,15 @@
+[package]
+name = "raw-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "O RAW da câmera e o DNG do Lightroom abertos no navegador do estúdio — o raw-codec em wasm, sem GPU"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+raw-codec = { path = "../raw-codec" }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
