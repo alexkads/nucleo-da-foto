@@ -249,6 +249,17 @@ mod testes {
         assert_eq!(achadas[0].0.formato, Formato::Arw);
     }
 
+    /// 🚨 O JPEG da Nikon D750 anexa duas prévias depois do `EOI`, e cada uma
+    /// começa em setor: sem o índice MPF, eram três "fotos" por disparo.
+    #[test]
+    fn as_previas_do_mpf_nao_viram_outras_fotos() {
+        let foto = jpeg::testes::jpeg_com_mpf(3, 400_000);
+        let (c, _) = cartao(std::slice::from_ref(&foto), true);
+        let (achadas, _) = recuperar(c);
+        assert_eq!(achadas.len(), 1);
+        assert!(achadas[0].1 == foto, "a foto sai inteira, com as prévias");
+    }
+
     #[test]
     fn a_foto_cortada_no_fim_do_cartao_fica_de_fora() {
         let inteira = jpeg::testes::jpeg_de_camera(1, 50_000);
