@@ -1,0 +1,4 @@
+# O estilo do dnglab, de onde o rawler vem — sem ele o `cargo fmt --all`
+# do workspace reformataria o código vendorizado inteiro.
+tab_spaces = 2
+max_width = 160

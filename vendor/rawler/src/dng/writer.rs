@@ -2,13 +2,12 @@ use std::{
   borrow::Cow,
   io::{self, Seek, Write},
   mem::size_of,
-
 };
 
 use image::{DynamicImage, codecs::jpeg::JpegEncoder, imageops::FilterType};
 use log::debug;
-use web_time::Instant;
 use rayon::prelude::*;
+use web_time::Instant;
 
 use crate::{
   CFA, RawImage, RawImageData,
