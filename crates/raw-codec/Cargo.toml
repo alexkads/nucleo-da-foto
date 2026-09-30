@@ -1,0 +1,15 @@
+[package]
+name = "raw-codec"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Abre o RAW da câmera e o DNG do Lightroom — no desktop e no navegador — e acha o XMP da revelação dentro deles"
+
+[dependencies]
+# 📸 **Rust puro, e é por isso que ele existe ao lado da LibRaw.** A LibRaw do
+# `infrastructure` não vai ao navegador, e a que vem compilada no `rsraw-sys`
+# não abre o DNG com perdas do Lightroom. O rawler abre os dois, nos dois
+# lugares. Vendorizado: ver `vendor/rawler/MUDANCAS.md`.
+rawler = { path = "../../vendor/rawler" }
+image = { version = "0.25", default-features = false }
