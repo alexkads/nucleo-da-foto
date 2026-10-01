@@ -1060,8 +1060,15 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     // Recalculate luminance after tonal adjustments
     let lum2 = (r + g + b) / 3.0;
     
+    // 🎞️ **Com o P&B ligado, Saturação, Vibração e HSL não agem** — como no
+    // Lightroom, que os apaga no painel e guarda o valor. 🚨 Até 2026-10-01 o
+    // P&B vinha com `saturation = -1`, e a foto chegava ao mixer já cinza: os
+    // oito sliders da Mistura de preto e branco não mudavam pixel nenhum, em
+    // todo preset P&B importado do Lightroom.
+    let em_pb = params.bw_ativo != 0.0;
+
     // 9. Saturation (overall color intensity)
-    if (params.saturation != 0.0) {
+    if (params.saturation != 0.0 && !em_pb) {
         let factor = 1.0 + params.saturation;
         r = lum2 + (r - lum2) * factor;
         g = lum2 + (g - lum2) * factor;
@@ -1069,7 +1076,7 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     }
     
     // 10. Vibrance (intelligent saturation - affects muted colors more)
-    if (params.vibrance != 0.0) {
+    if (params.vibrance != 0.0 && !em_pb) {
         let max_diff = max(max(abs(r - lum2), abs(g - lum2)), abs(b - lum2));
         if (max_diff < 64.0) {
             let factor = 1.0 + params.vibrance * 2.0;
@@ -1180,7 +1187,8 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         || params.hsl_yellow_lum != 0.0 || params.hsl_green_lum != 0.0
         || params.hsl_aqua_lum != 0.0 || params.hsl_blue_lum != 0.0
         || params.hsl_purple_lum != 0.0 || params.hsl_magenta_lum != 0.0;
-    let has_hsl = has_hsl_sat || has_hsl_hue || has_hsl_lum;
+    // No P&B o painel HSL vira a Mistura de preto e branco (ver `em_pb`).
+    let has_hsl = (has_hsl_sat || has_hsl_hue || has_hsl_lum) && !em_pb;
 
     if (has_hsl) {
         // Normalize RGB to 0-1 range

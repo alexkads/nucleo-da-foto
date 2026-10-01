@@ -2694,6 +2694,44 @@ mod testes {
         );
     }
 
+    /// 🎞️ **No P&B a Saturação, a Vibração e o HSL guardam o valor e não agem**
+    /// — e o mixer age, mesmo com a saturação em −100.
+    ///
+    /// 🚨 Até 2026-10-01 todo preset P&B importado do Lightroom chegava com
+    /// `bw_ativo = 1` **e** `saturation = -1`. O passo 9 tirava a cor antes do
+    /// mixer, e os oito sliders da Mistura de preto e branco não mudavam pixel
+    /// nenhum — "o maior problema dos presets LRs", nas palavras do dono.
+    #[test]
+    fn no_pb_o_mixer_age_e_a_cor_nao() {
+        let mut motor = motor_pronto();
+        let entrada = amostra();
+        let posicao = |nome: &str| Ajustes::NOMES.iter().position(|n| *n == nome).unwrap();
+        let mut pb = |extra: &[(&str, f32)]| {
+            let mut campos = vec![(posicao("bw_ativo"), 1.0)];
+            campos.extend(extra.iter().map(|(n, v)| (posicao(n), *v)));
+            revelar_e_colher(&mut motor, entrada.clone(), com_campos(&campos))
+        };
+        let so_pb = pb(&[]);
+
+        let misturada = pb(&[("saturation", -1.0), ("bw_blue", -80.0), ("bw_red", 60.0)]);
+        let sem_mistura = pb(&[("saturation", -1.0)]);
+        assert_ne!(
+            misturada, sem_mistura,
+            "com a saturação em −100 o mixer tem de continuar agindo"
+        );
+        for (rotulo, campo, valor) in [
+            ("Saturação", "saturation", -1.0),
+            ("Saturação", "saturation", 0.6),
+            ("Vibração", "vibrance", 0.5),
+            ("HSL / cor", "hsl_blue_sat", -80.0),
+            ("HSL / luminância", "hsl_red_lum", 70.0),
+            ("HSL / matiz", "hsl_green_hue", 90.0),
+        ] {
+            let saida = pb(&[(campo, valor)]);
+            assert_eq!(saida, so_pb, "`{rotulo}` agiu numa foto em P&B");
+        }
+    }
+
     /// 🚨 **O neutro devolve a foto intacta — numa imagem com detalhe.**
     ///
     /// Existe porque `o_neutro_devolve_o_pixel_intacto` **não consegue** ver o
