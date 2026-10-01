@@ -1032,7 +1032,16 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         } else {
             n = clamp(n + (params.highlights * 0.01) * n * n * (1.0 - n), 0.0, 1.0);
         }
-        n = clamp(n + (params.shadows * 0.01) * n * (1.0 - n) * (1.0 - n), 0.0, 1.0);
+        // 🔑 Clarear sombras (positivo) usa `1,4·n(1−n)³` desde 2026-09-30:
+        // o peso de antes, `n(1−n)²`, se estendia até as altas luzes — no DNG
+        // do Estúdio Canela, Sombras +80 sozinho subia o p90 em 15 níveis,
+        // e o Lightroom quase não toca o alto. Derivada ≥ 1 − 1,4·0,25 > 0.
+        if (params.shadows > 0.0) {
+            let e3 = (1.0 - n) * (1.0 - n) * (1.0 - n);
+            n = clamp(n + (params.shadows * 0.01) * 1.4 * n * e3, 0.0, 1.0);
+        } else {
+            n = clamp(n + (params.shadows * 0.01) * n * (1.0 - n) * (1.0 - n), 0.0, 1.0);
+        }
         let e = 1.0 - n;
         n = clamp(n + (params.blacks * 0.01) * e * e * e / 9.0, 0.0, 1.0);
 
