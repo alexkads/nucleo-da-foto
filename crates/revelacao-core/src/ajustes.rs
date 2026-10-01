@@ -318,6 +318,40 @@ pub struct Ajustes {
     pub grain_roughness: f32,
 }
 
+/// A cor que a roda da Gradação de cores do Lightroom mostra no matiz `graus`,
+/// em sRGB 0–1 — a mesma conta do shader (`roda_do_lightroom`): CIELab com
+/// matiz `graus + 28°`, num meio-tom (L* 60) de croma 40. É o trilho do slider.
+pub fn cor_da_roda_do_lightroom(graus: f32) -> [f32; 3] {
+    let h = (graus + 28.0).to_radians();
+    let (l, a, b) = (60.0f32, 40.0 * h.cos(), 40.0 * h.sin());
+    let fy = (l + 16.0) / 116.0;
+    let inv = |t: f32| {
+        if t * t * t > 0.008856 {
+            t * t * t
+        } else {
+            (t - 16.0 / 116.0) / 7.787
+        }
+    };
+    let (x, y, z) = (
+        inv(fy + a / 500.0) * 0.95047,
+        inv(fy),
+        inv(fy - b / 200.0) * 1.08883,
+    );
+    let srgb = |v: f32| {
+        let v = v.clamp(0.0, 1.0);
+        if v <= 0.0031308 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    [
+        srgb(3.2406 * x - 1.5372 * y - 0.4986 * z),
+        srgb(-0.9689 * x + 1.8758 * y + 0.0415 * z),
+        srgb(0.0557 * x - 0.2040 * y + 1.0570 * z),
+    ]
+}
+
 /// Quantos campos a struct tem — e quantos `f32` o vetor posicional carrega.
 ///
 /// ⚠️ **Eram 46 até 2026-09-06, e 53 até 2026-09-12** (a Calibração, o Color
