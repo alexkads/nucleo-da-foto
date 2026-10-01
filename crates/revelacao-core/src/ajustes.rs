@@ -316,6 +316,16 @@ pub struct Ajustes {
     pub pcv_highlights: f32,
     // Aspereza do grão (neutro 50).
     pub grain_roughness: f32,
+    // ------------------------------------------ A versão de processo
+    // 🔑 **0 é a conta de antes; 1 é a do Lightroom medida** (dono, 2026-10-01:
+    // *"versão de processo"*, como o PV2012 do Lightroom). No processo 1 a
+    // Exposição, o Contraste, os Realces, as Sombras, os Brancos, os Pretos e a
+    // vinheta pós-corte leem as tabelas de `lightroom.rs` em vez das contas
+    // antigas. O neutro é **0**: a revelação gravada antes não tem o campo, o
+    // `serde(default)` o completa com 0, e a foto que o operador já entregou
+    // continua igual até alguém a atualizar. Quem liga o 1 é a foto nova e o
+    // preset do Lightroom.
+    pub processo: f32,
 }
 
 /// A cor que a roda da Gradação de cores do Lightroom mostra no matiz `graus`,
@@ -359,13 +369,13 @@ pub fn cor_da_roda_do_lightroom(graus: f32) -> [f32; 3] {
 /// estágio darktable — exposure, vignetting e color balance rgb —, a 157; shadows
 /// and highlights e monochrome, a 171; os controles do Lightroom que faltavam
 /// — Textura, Remover névoa, a vinheta pós-corte e o resto do Detalhe —, a 193
-/// em 2026-09-30). A Tonalização (5) e o
+/// em 2026-09-30; a versão de processo, a 194 em 2026-10-01). A Tonalização (5) e o
 /// Grão (2) entraram primeiro; depois a Calibração de câmera (7), os eixos que
 /// faltavam do Color Grading (5) e o mixer de preto e branco (9). **Todos no
 /// fim da lista**, e não perto do que se parece com eles: a posição de um campo
 /// é o contrato com o shader, e mover `nr_luminance` para junto do grão faria
 /// toda revelação já gravada ler o campo do vizinho.
-pub const QUANTIDADE: usize = 193;
+pub const QUANTIDADE: usize = 194;
 
 /// O tamanho do buffer de `uniform`, arredondado para múltiplo de 16 bytes.
 ///
@@ -707,6 +717,7 @@ impl Ajustes {
         "pcv_feather",
         "pcv_highlights",
         "grain_roughness",
+        "processo",
     ];
 
     /// Os 46 valores, por posição — o que a GPU recebe, como `f32`.
@@ -724,6 +735,20 @@ impl Ajustes {
             return None;
         }
         Some(bytemuck::pod_read_unaligned(bytemuck::cast_slice(valores)))
+    }
+
+    /// Não muda pixel nenhum: todo ajuste no neutro.
+    ///
+    /// 🔑 **A versão de processo não conta.** No neutro os dois processos dão a
+    /// mesma foto (o zero de cada tabela é a identidade), e a foto nova nasce
+    /// no processo 1: comparar com `Ajustes::default()` faria toda foto nova
+    /// parecer revelada — o ponto âmbar aceso, a exportação revelando o que só
+    /// precisava copiar.
+    pub fn sem_efeito(&self) -> bool {
+        Ajustes {
+            processo: 0.0,
+            ..*self
+        } == Ajustes::default()
     }
 
     /// Claridade, Textura ou Remover névoa — os três que leem a guia
@@ -773,7 +798,7 @@ mod testes {
         assert_eq!(neutro.saturation, 0.0);
     }
 
-    /// O layout que vai para a GPU tem os 193 campos, de quatro bytes cada.
+    /// O layout que vai para a GPU tem os 194 campos, de quatro bytes cada.
     ///
     /// Campo a mais desloca **todos** os seguintes na leitura do shader, e o
     /// sintoma é a saturação virando nitidez.
@@ -781,7 +806,7 @@ mod testes {
     /// ⚠️ **O número do `uniform` é escrito à mão de propósito.** Derivá-lo aqui
     /// (`size_of().next_multiple_of(16)`) faria o teste concordar com qualquer
     /// mudança, inclusive com a errada — e é justamente o alinhamento de 16
-    /// bytes do WebGL2 que já derrubou este shader uma vez. 193 × 4 = 772, e o
+    /// bytes do WebGL2 que já derrubou este shader uma vez. 194 × 4 = 776, e o
     /// próximo múltiplo de 16 é 784.
     #[test]
     fn o_layout_tem_os_campos_de_quatro_bytes() {

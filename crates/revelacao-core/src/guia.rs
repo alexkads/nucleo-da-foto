@@ -170,7 +170,9 @@ fn minimo_em_janela(dados: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     for x in 0..w {
         for y in 0..h {
             let (a, b) = (y.saturating_sub(r), (y + r).min(h - 1));
-            saida[y * w + x] = (a..=b).map(|yy| horizontal[yy * w + x]).fold(f32::MAX, f32::min);
+            saida[y * w + x] = (a..=b)
+                .map(|yy| horizontal[yy * w + x])
+                .fold(f32::MAX, f32::min);
         }
     }
     saida
@@ -228,7 +230,11 @@ mod testes {
             }
         }
         let g = calcular(&px, w, h);
-        assert!((g.luz_do_ceu - 225.0 / 255.0).abs() < 0.01, "{}", g.luz_do_ceu);
+        assert!(
+            (g.luz_do_ceu - 225.0 / 255.0).abs() < 0.01,
+            "{}",
+            g.luz_do_ceu
+        );
         let escura = calcular(&liso(w, h, 20), w, h);
         assert_eq!(escura.luz_do_ceu, 0.5);
     }

@@ -238,15 +238,16 @@ struct Params {
     pcv_feather: f32,
     pcv_highlights: f32,
     grain_roughness: f32,
+    // 0: a conta de antes; 1: as tabelas medidas no Lightroom (`lightroom.rs`).
+    processo: f32,
     // 🔑 Enchimento, e não campo: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
     // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 171
-    // `f32` davam 684, e os 193 de hoje dão 772. O Rust manda 772 bytes num
-    // buffer de 784 (`TAMANHO_DO_UNIFORM`); estes nunca são lidos. Ficam DEPOIS dos 193 para não
+    // `f32` davam 684, e os 194 de hoje dão 776. O Rust manda 776 bytes num
+    // buffer de 784 (`TAMANHO_DO_UNIFORM`); estes nunca são lidos. Ficam DEPOIS dos 194 para não
     // deslocar nenhuma posição — e o teste que compara os nomes com o `Ajustes`
     // ignora o que começa com `_`.
     _enchimento_a: f32,
     _enchimento_b: f32,
-    _enchimento_c: f32,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
@@ -295,6 +296,71 @@ struct DadosDaGuia {
 
 @group(0) @binding(9) var guia: texture_2d<f32>;
 @group(0) @binding(10) var<uniform> dados_da_guia: DadosDaGuia;
+
+// As tabelas medidas no Lightroom (`lightroom.rs`): `R32Float`, 256 × 245, uma
+// curva por linha. Só o processo 1 as lê.
+@group(0) @binding(11) var tabelas_lr: texture_2d<f32>;
+
+// O desenho das linhas — a mesma conta de `lightroom.rs`, presa por
+// `o_wgsl_usa_o_mesmo_desenho_das_tabelas`.
+const LR_LINHA_EXPOSICAO: i32 = 0;
+const LR_LINHA_CONTRASTE: i32 = 17;
+const LR_LINHA_REALCES: i32 = 38;
+const LR_LINHA_SOMBRAS: i32 = 59;
+const LR_LINHA_BRANCOS: i32 = 80;
+const LR_LINHA_PRETOS: i32 = 101;
+const LR_LINHA_VINHETA: i32 = 122;
+const LR_LINHA_SOBREPOSICAO: i32 = 143;
+const LR_LINHA_MASCARA: i32 = 164;
+const LR_DISTANCIA_MAXIMA: f32 = 1.45;
+
+/// A linha `linha` da tabela em `x` (0–255), linear entre as colunas.
+fn lr_curva(linha: i32, x: f32) -> f32 {
+    let p = clamp(x, 0.0, 255.0);
+    let i = min(i32(floor(p)), 254);
+    let t = p - f32(i);
+    let a = textureLoad(tabelas_lr, vec2<i32>(i, linha), 0).r;
+    let b = textureLoad(tabelas_lr, vec2<i32>(i + 1, linha), 0).r;
+    return mix(a, b, t);
+}
+
+/// Um slider medido de passo em passo: `posicao` em linhas a partir de
+/// `primeira` (fracionária), linear entre as duas vizinhas.
+fn lr_slider(primeira: i32, linhas: i32, posicao: f32, x: f32) -> f32 {
+    let p = clamp(posicao, 0.0, f32(linhas - 1));
+    let i = min(i32(floor(p)), linhas - 2);
+    let t = p - f32(i);
+    return mix(lr_curva(primeira + i, x), lr_curva(primeira + i + 1, x), t);
+}
+
+/// A forma da vinheta no arredondamento negativo (`r` de 0 a 100, o módulo):
+/// o expoente da superelipse e a compressão da faixa contra a borda, ajustados
+/// aos perfis da régua (erro abaixo de 1,2 nível em −50 … −100). Uma cadeia de
+/// `if`, e não um array constante: o FXC do DX12 engasga com array constante.
+fn lr_forma_negativa(r: f32) -> vec2<f32> {
+    if (r <= 25.0) {
+        return vec2<f32>(2.0, 1.0);
+    } else if (r <= 50.0) {
+        return mix(vec2<f32>(2.0, 1.0), vec2<f32>(2.5, 1.3), (r - 25.0) / 25.0);
+    } else if (r <= 61.0) {
+        return mix(vec2<f32>(2.5, 1.3), vec2<f32>(3.0, 1.6), (r - 50.0) / 11.0);
+    } else if (r <= 80.0) {
+        return mix(vec2<f32>(3.0, 1.6), vec2<f32>(5.5, 2.65), (r - 61.0) / 19.0);
+    } else if (r <= 83.0) {
+        return mix(vec2<f32>(5.5, 2.65), vec2<f32>(6.0, 2.95), (r - 80.0) / 3.0);
+    }
+    return mix(vec2<f32>(6.0, 2.95), vec2<f32>(16.5, 8.05), (min(r, 100.0) - 83.0) / 17.0);
+}
+
+/// Os cinco sliders de −100 a +100 (21 linhas, de 10 em 10), canal a canal.
+fn lr_cem(primeira: i32, valor: f32, cor: vec3<f32>) -> vec3<f32> {
+    let pos = (valor + 100.0) / 10.0;
+    return vec3<f32>(
+        lr_slider(primeira, 21, pos, cor.r),
+        lr_slider(primeira, 21, pos, cor.g),
+        lr_slider(primeira, 21, pos, cor.b),
+    );
+}
 
 /// A guia na posição `pos` da foto revelada (em pixels dela), bilinear à mão —
 /// a textura é `Rgba32Float`, que o WebGL2 não filtra sem extensão.
@@ -910,10 +976,20 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     }
 
     if (params.exposure != 0.0) {
-        let factor = pow(2.0, params.exposure);
-        r *= factor;
-        g *= factor;
-        b *= factor;
+        if (params.processo >= 0.5) {
+            // 🔑 A do Lightroom guarda o branco: −1 EV leva 128 a 83 e 255
+            // continua 255; +1 leva 128 a 181 com ombro até o branco, em vez
+            // de estourar tudo acima do meio. Medida de −2 a +2 EV.
+            let pos = (clamp(params.exposure, -2.0, 2.0) + 2.0) / 0.25;
+            r = lr_slider(LR_LINHA_EXPOSICAO, 17, pos, r);
+            g = lr_slider(LR_LINHA_EXPOSICAO, 17, pos, g);
+            b = lr_slider(LR_LINHA_EXPOSICAO, 17, pos, b);
+        } else {
+            let factor = pow(2.0, params.exposure);
+            r *= factor;
+            g *= factor;
+            b *= factor;
+        }
     }
 
     // 1b. Exposição local — em RGB **linear**, pela máscara de cada camada.
@@ -956,9 +1032,20 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
 
     // 2. Contrast
     if (params.contrast != 1.0) {
-        r = (r - 128.0) * params.contrast + 128.0;
-        g = (g - 128.0) * params.contrast + 128.0;
-        b = (b - 128.0) * params.contrast + 128.0;
+        if (params.processo >= 0.5) {
+            // 🔑 A curva do Lightroom guarda o preto e o branco: Contraste −100
+            // ainda vai de 0 a 255 (a reta de antes virava cinza 128 em tudo),
+            // e −57 leva 64 a 79 em vez de 100. O campo continua multiplicador
+            // (1 + v/100); a tabela é por valor do slider.
+            let c = lr_cem(LR_LINHA_CONTRASTE, (params.contrast - 1.0) * 100.0, vec3<f32>(r, g, b));
+            r = c.r;
+            g = c.g;
+            b = c.b;
+        } else {
+            r = (r - 128.0) * params.contrast + 128.0;
+            g = (g - 128.0) * params.contrast + 128.0;
+            b = (b - 128.0) * params.contrast + 128.0;
+        }
     }
     
     // 3. Temperature (warm/cool balance)
@@ -1010,7 +1097,43 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     // ponto de branco), enquanto `n³` é o contrário — é o que faz "brancos" ser
     // o controle do topo da escala. Quem prende tudo isso é
     // `o_tom_por_regiao_nunca_inverte_nem_da_degrau`.
-    if (params.highlights != 0.0 || params.shadows != 0.0
+    if (params.processo >= 0.5 && (params.highlights != 0.0 || params.shadows != 0.0
+        || params.whites != 0.0 || params.blacks != 0.0)) {
+        // 🔑 **O processo 1: as curvas medidas no Lightroom.** Realces e Sombras
+        // pela luminância, com a cor pela razão (no Lightroom os dois são
+        // locais; numa rampa, a luminância erra metade do que erra o canal a
+        // canal). Brancos e Pretos canal a canal, que é como os dois medem
+        // melhor — e os dois guardam o preto e o branco: Pretos +50 não
+        // levanta mais o 0 para 14.
+        if (params.highlights != 0.0 || params.shadows != 0.0) {
+            let l = clamp(luminancia(vec3<f32>(r, g, b)), 0.0, 255.0);
+            var n = l;
+            if (params.highlights != 0.0) {
+                n = lr_slider(LR_LINHA_REALCES, 21, (params.highlights + 100.0) / 10.0, n);
+            }
+            if (params.shadows != 0.0) {
+                n = lr_slider(LR_LINHA_SOMBRAS, 21, (params.shadows + 100.0) / 10.0, n);
+            }
+            let delta = n - l;
+            let escala = n / max(l, 0.01);
+            let mistura = smoothstep(0.0, 12.0, l);
+            r = mix(r + delta, r * escala, mistura);
+            g = mix(g + delta, g * escala, mistura);
+            b = mix(b + delta, b * escala, mistura);
+        }
+        if (params.whites != 0.0) {
+            let c = lr_cem(LR_LINHA_BRANCOS, params.whites, vec3<f32>(r, g, b));
+            r = c.r;
+            g = c.g;
+            b = c.b;
+        }
+        if (params.blacks != 0.0) {
+            let c = lr_cem(LR_LINHA_PRETOS, params.blacks, vec3<f32>(r, g, b));
+            r = c.r;
+            g = c.g;
+            b = c.b;
+        }
+    } else if (params.highlights != 0.0 || params.shadows != 0.0
         || params.whites != 0.0 || params.blacks != 0.0) {
         let l = clamp(((r + g + b) / 3.0) / 255.0, 0.0, 1.0);
 
@@ -1550,6 +1673,51 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
         let d = pow(pow(q.x, expoente) + pow(q.y, expoente), 1.0 / expoente);
         let canto = pow(pow(canto_q.x, expoente) + pow(canto_q.y, expoente), 1.0 / expoente);
+
+        if (params.processo >= 0.5) {
+            // 🔑 **O processo 1: a vinheta medida no Lightroom.** Na foto cinza
+            // da régua, a do Lightroom é a elipse inscrita no quadro (d = 1 no
+            // meio da borda, √2 no canto) e começa a escurecer a ~40% do raio;
+            // com −61 leva o cinza 128 a 29 no canto (a de antes, a 82). O
+            // modelo que a régua confirmou: a máscara m(d) depende só do ponto
+            // médio e da difusão, e o pixel sai como o efeito inteiro de uma
+            // quantidade menor, `F(valor, quantidade × m)` — a mesma máscara em
+            // todo nível de cinza. Estilos 1 e 2 são idênticos no Lightroom
+            // (até em cor); o 3, sobreposição, tem tabela própria.
+            // A distância elíptica, no referencial do Lightroom. Positivo e
+            // zero: a superelipse acima, com o canto sempre em √2 (a régua:
+            // +100 dá 39 na borda longa e 106 na curta, contra 38 e 106).
+            // Negativo: a caixa de faixa igual nos quatro lados, com o
+            // expoente e a compressão de `lr_forma_negativa`.
+            var d_lr = d / max(canto, 0.001) * 1.41421356;
+            if (arredondamento < 0.0) {
+                let r = -params.pcv_roundness;
+                let nk = lr_forma_negativa(r);
+                let caixa = max(rel - (c - vec2<f32>(curto)), vec2<f32>(0.0)) / curto;
+                let qn = mix(elipse, caixa, clamp(r / 50.0, 0.0, 1.0));
+                let dn = pow(pow(qn.x, nk.x) + pow(qn.y, nk.x), 1.0 / nk.x);
+                d_lr = max(1.0 - (1.0 - dn) * nk.y, 0.0);
+            }
+            let coluna = clamp(d_lr / LR_DISTANCIA_MAXIMA * 255.0, 0.0, 255.0);
+            let pm = clamp(params.pcv_midpoint / 12.5, 0.0, 8.0);
+            let pf = clamp(params.pcv_feather / 12.5, 0.0, 8.0);
+            let im = min(i32(floor(pm)), 7);
+            let jf = min(i32(floor(pf)), 7);
+            let tm = pm - f32(im);
+            let tf = pf - f32(jf);
+            let base = LR_LINHA_MASCARA + im * 9 + jf;
+            let m = mix(
+                mix(lr_curva(base, coluna), lr_curva(base + 1, coluna), tf),
+                mix(lr_curva(base + 9, coluna), lr_curva(base + 10, coluna), tf),
+                tm,
+            );
+            let quantidade = clamp(params.pcv_amount, -100.0, 100.0) * m;
+            let linha = select(LR_LINHA_VINHETA, LR_LINHA_SOBREPOSICAO, i32(round(params.pcv_style)) == 2);
+            let pos = (quantidade + 100.0) / 10.0;
+            r = lr_slider(linha, 21, pos, r);
+            g = lr_slider(linha, 21, pos, g);
+            b = lr_slider(linha, 21, pos, b);
+        } else {
         let fim = mix(0.97, canto, clamp(params.pcv_midpoint * 0.01, 0.0, 1.0));
         let largura = max(pow(clamp(params.pcv_feather * 0.01, 0.0, 1.0), 1.5) * 0.5, 0.004);
         let peso = smoothstep(fim - largura * fim, fim, d);
@@ -1584,6 +1752,7 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         r = cor.r;
         g = cor.g;
         b = cor.b;
+        }
     }
 
     // Grão de filme — por último, e depois até da vinheta.

@@ -140,6 +140,9 @@ struct Recursos {
     mascaras: Mascaras,
     /// Clone e Heal deste tamanho — o resultado que a revelação lê.
     retoques: crate::retoque::Retoques,
+    /// As tabelas medidas no Lightroom (`lightroom.rs`), que o processo 1 lê.
+    /// Fixas: sobem uma vez, na criação.
+    textura_tabelas: wgpu::Texture,
 }
 
 /// A textura que a revelação lê: a entrada original, ou o último retoque.
@@ -152,6 +155,7 @@ fn entrada_efetiva(recursos: &Recursos) -> &wgpu::Texture {
 
 fn criar_recursos(
     dispositivo: &wgpu::Device,
+    fila: &wgpu::Queue,
     pipeline: &Pipeline,
     largura: u32,
     altura: u32,
@@ -223,6 +227,7 @@ fn criar_recursos(
         mapped_at_creation: false,
     });
     let mascaras = Mascaras::nova(dispositivo);
+    let textura_tabelas = textura_das_tabelas(dispositivo, fila);
     let grupo = montar_grupo(
         dispositivo,
         pipeline,
@@ -236,6 +241,7 @@ fn criar_recursos(
         &mascaras,
         &textura_guia,
         &buffer_guia,
+        &textura_tabelas,
     );
 
     let buffer_saida = dispositivo.create_buffer(&wgpu::BufferDescriptor {
@@ -268,7 +274,46 @@ fn criar_recursos(
         pixels_da_guia: None,
         mascaras,
         retoques: Default::default(),
+        textura_tabelas,
     }
+}
+
+/// As tabelas medidas no Lightroom (`lightroom.rs`) como textura `R32Float` —
+/// lidas com `textureLoad`, como as grades, então o WebGL2 não precisa de
+/// filtro de ponto flutuante.
+fn textura_das_tabelas(dispositivo: &wgpu::Device, fila: &wgpu::Queue) -> wgpu::Texture {
+    use crate::lightroom::{tabelas, ALTURA, LARGURA};
+    let tamanho = wgpu::Extent3d {
+        width: LARGURA,
+        height: ALTURA,
+        depth_or_array_layers: 1,
+    };
+    let textura = dispositivo.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Tabelas do Lightroom"),
+        size: tamanho,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    fila.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &textura,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&tabelas()),
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * LARGURA),
+            rows_per_image: Some(ALTURA),
+        },
+        tamanho,
+    );
+    textura
 }
 
 /// O layout do grupo 0: entrada, saída (só no compute), ajustes, as duas grades
@@ -322,6 +367,8 @@ fn criar_layout_do_grupo(
         // A guia da Claridade, da Textura e do Remover névoa, e os dados dela.
         textura(9),
         uniforme(10),
+        // As tabelas medidas no Lightroom, do processo 1.
+        textura(11),
     ];
     if estagio == wgpu::ShaderStages::COMPUTE {
         entradas.push(wgpu::BindGroupLayoutEntry {
@@ -360,10 +407,12 @@ fn montar_grupo(
     mascaras: &Mascaras,
     guia: &wgpu::Texture,
     dados_da_guia: &wgpu::Buffer,
+    tabelas: &wgpu::Texture,
 ) -> wgpu::BindGroup {
     let vista = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
     let v_mascaras = mascaras.vista();
     let v_guia = vista(guia);
+    let v_tabelas = vista(tabelas);
     let (v_entrada, v_saida, v_sh, v_mo) = (
         vista(entrada),
         vista(saida),
@@ -410,6 +459,10 @@ fn montar_grupo(
         wgpu::BindGroupEntry {
             binding: 10,
             resource: dados_da_guia.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 11,
+            resource: wgpu::BindingResource::TextureView(&v_tabelas),
         },
     ];
     match pipeline {
@@ -1523,7 +1576,7 @@ fn preparar<'a>(
     if !cache.contains(&(largura, altura)) {
         cache.put(
             (largura, altura),
-            criar_recursos(dispositivo, pipeline, largura, altura),
+            criar_recursos(dispositivo, fila, pipeline, largura, altura),
         );
     }
     let recursos = cache
@@ -1623,6 +1676,7 @@ fn preparar<'a>(
                 &recursos.mascaras,
                 &recursos.textura_guia,
                 &recursos.buffer_guia,
+                &recursos.textura_tabelas,
             );
             recursos.chave_das_grades = Some(chave);
         }
@@ -1655,6 +1709,7 @@ fn preparar<'a>(
             &recursos.mascaras,
             &recursos.textura_guia,
             &recursos.buffer_guia,
+            &recursos.textura_tabelas,
         );
     }
     fila.write_buffer(&recursos.buffer_ajustes, 0, bytemuck::bytes_of(ajustes));
@@ -1730,6 +1785,7 @@ fn atualizar_mascaras(
             &recursos.mascaras,
             &recursos.textura_guia,
             &recursos.buffer_guia,
+            &recursos.textura_tabelas,
         );
     }
 }
@@ -3004,11 +3060,157 @@ mod testes {
         );
         assert!(com != sem, "a Claridade não mexeu numa foto sem cor");
 
-        let novos = &Ajustes::NOMES[posicao("texture")..];
+        // Até a aspereza do grão: o `processo` que vem depois não é controle,
+        // e sozinho (tudo no neutro) não muda nada de propósito — ver
+        // `o_processo_1_no_neutro_nao_muda_nada`.
+        let novos = &Ajustes::NOMES[posicao("texture")..=posicao("grain_roughness")];
         assert_eq!(novos.len(), 22);
         for nome in novos {
             assert!(vistos.contains(nome), "`{nome}` ficou sem caso no teste");
         }
+    }
+
+    /// 🔑 **Ligar o processo 1 numa foto intocada não muda nada.** O zero de
+    /// cada slider nas tabelas é a identidade exata, e cada bloco do processo 1
+    /// só roda com o slider fora do neutro.
+    #[test]
+    fn o_processo_1_no_neutro_nao_muda_nada() {
+        let mut motor = motor_pronto();
+        let antes = revelar_e_colher(&mut motor, amostra(), Ajustes::default());
+        let depois = revelar_e_colher(
+            &mut motor,
+            amostra(),
+            Ajustes {
+                processo: 1.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(antes, depois);
+    }
+
+    /// O cinza do pixel `i` da rampa revelada.
+    fn nivel(saida: &[u8], i: usize) -> u8 {
+        saida[i * 4 + 1]
+    }
+
+    /// 🚨 **O Contraste do Lightroom guarda o preto e o branco** (régua de
+    /// 1/out/2026). No processo 0 o Contraste −100 é a reta de inclinação zero:
+    /// a foto inteira vira cinza 128. No Lightroom, −100 ainda vai de 0 a 255 e
+    /// leva o 64 a 89.
+    #[test]
+    fn o_contraste_do_processo_1_guarda_o_preto_e_o_branco() {
+        let mut motor = motor_pronto();
+        let menos_cem = |processo| Ajustes {
+            contrast: 0.0,
+            processo,
+            ..Default::default()
+        };
+        let antigo = revelar_e_colher(&mut motor, rampa(), menos_cem(0.0));
+        assert_eq!(
+            (nivel(&antigo, 0), nivel(&antigo, 255)),
+            (128, 128),
+            "o processo 0 continua o de antes"
+        );
+        let novo = revelar_e_colher(&mut motor, rampa(), menos_cem(1.0));
+        assert!(nivel(&novo, 0) <= 3, "o preto foi a {}", nivel(&novo, 0));
+        assert!(
+            nivel(&novo, 255) >= 252,
+            "o branco foi a {}",
+            nivel(&novo, 255)
+        );
+        assert!(
+            (83..=95).contains(&nivel(&novo, 64)),
+            "o Lightroom leva o 64 a 89; saiu {}",
+            nivel(&novo, 64)
+        );
+    }
+
+    /// A Exposição +1 do Lightroom tem ombro: 128 vai a 181 e o branco não
+    /// estoura o que está abaixo dele. A de antes multiplicava o valor sRGB por
+    /// 2 e levava tudo acima de 128 a 255.
+    #[test]
+    fn a_exposicao_do_processo_1_tem_ombro() {
+        let mut motor = motor_pronto();
+        let saida = revelar_e_colher(
+            &mut motor,
+            rampa(),
+            Ajustes {
+                exposure: 1.0,
+                processo: 1.0,
+                ..Default::default()
+            },
+        );
+        assert!(
+            (176..=186).contains(&nivel(&saida, 128)),
+            "128 foi a {}",
+            nivel(&saida, 128)
+        );
+        assert!(
+            (222..=236).contains(&nivel(&saida, 192)),
+            "192 foi a {}",
+            nivel(&saida, 192)
+        );
+        assert!(nivel(&saida, 255) >= 252);
+    }
+
+    /// Os Pretos −100 do Lightroom afundam o escuro de verdade: o 64 vai a ~5.
+    /// O de antes levava o 64 só até 52.
+    #[test]
+    fn os_pretos_do_processo_1_afundam_o_escuro() {
+        let mut motor = motor_pronto();
+        let saida = revelar_e_colher(
+            &mut motor,
+            rampa(),
+            Ajustes {
+                blacks: -100.0,
+                processo: 1.0,
+                ..Default::default()
+            },
+        );
+        assert!(nivel(&saida, 64) <= 12, "64 foi a {}", nivel(&saida, 64));
+        assert!(nivel(&saida, 0) == 0 && nivel(&saida, 255) >= 252);
+    }
+
+    /// 🚨 **A vinheta do Lightroom começa perto do centro e é forte no canto**
+    /// (régua de 1/out/2026, foto cinza 128): com −61, ponto médio 50 e difusão
+    /// 50, o canto vai a 29 e o meio da borda a 66; o centro fica intacto. A de
+    /// antes ia a 82 no canto e não tocava o meio da borda.
+    #[test]
+    fn a_vinheta_do_processo_1_e_a_do_lightroom() {
+        let mut motor = motor_pronto();
+        let lado = 64u32;
+        let entrada = cinza(lado, 128);
+        let saida = motor
+            .revelar(
+                &entrada,
+                lado,
+                lado,
+                &Ajustes {
+                    pcv_amount: -61.0,
+                    pcv_midpoint: 50.0,
+                    pcv_feather: 50.0,
+                    processo: 1.0,
+                    ..Default::default()
+                },
+            )
+            .expect("o motor não devolveu imagem")
+            .into_rgba8();
+        let em = |x: u32, y: u32| saida.get_pixel(x, y)[1];
+        assert!(
+            em(lado / 2, lado / 2) >= 126,
+            "o centro foi a {}",
+            em(lado / 2, lado / 2)
+        );
+        assert!(
+            em(0, 0) <= 40,
+            "o canto foi a {} (o Lightroom: 29)",
+            em(0, 0)
+        );
+        let borda = em(0, lado / 2);
+        assert!(
+            (55..=82).contains(&borda),
+            "o meio da borda foi a {borda} (o Lightroom: 66)"
+        );
     }
 
     /// A amostra em cinzas: as mesmas manchas, sem cor nenhuma.
