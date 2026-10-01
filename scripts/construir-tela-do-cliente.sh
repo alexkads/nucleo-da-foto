@@ -9,6 +9,7 @@
 #   frontend/public/tela-do-cliente/tela_do_cliente_web.js        o glue do wasm-bindgen (--target web)
 #   frontend/public/tela-do-cliente/tela_do_cliente_web_bg.wasm   a tela em wgpu + o revelacao-core
 #   frontend/public/tela-do-cliente/VERSAO                o commit deste repositório
+#   frontend/public/tela-do-cliente/nomes.json            os ajustes que ela lê, na ordem do vetor
 #   frontend/src/app/tela-do-cliente/tela_do_cliente_web.d.ts   os tipos do glue
 #   frontend/src/app/tela-do-cliente/versao.ts          a mesma VERSAO, importável
 #
@@ -92,6 +93,13 @@ wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
 cp "$SAIDA/tela_do_cliente_web.js" "$PUBLICO/tela_do_cliente_web.js"
 cp "$SAIDA/tela_do_cliente_web.d.ts" "$FONTE/tela_do_cliente_web.d.ts"
 
+# 🚨 **A tela do cliente recebe o vetor inteiro da revelação, e recusa outro
+# tamanho** (`Ajustes::de_vetor`). Em 30/09/2026 a revelação do site foi a 193
+# ajustes e este motor ficou nos 171: a tela do cliente parou de mostrar a foto
+# até 01/10, sem erro na tela. O `nomes.json` daqui é conferido contra o da
+# revelação pelo teste `versao-dos-motores` do e-commerce.
+echo "→ nomes.json"
+cargo run -q -p revelacao-core --bin nomes-dos-ajustes > "$PUBLICO/nomes.json"
 echo "→ VERSAO"
 VERSAO="$(git rev-parse --short HEAD)"
 if [[ -n "$(git status --porcelain crates/tela-do-cliente-web crates/revelacao-core)" ]]; then
