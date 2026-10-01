@@ -215,13 +215,38 @@ struct Params {
     dt_monochrome_b: f32,
     dt_monochrome_size: f32,
     dt_monochrome_highlights: f32,
+    // Os controles do Lightroom que faltavam (2026-09-30). Ver `ajustes.rs`.
+    texture: f32,
+    dehaze: f32,
+    tone_curve_split_shadows: f32,
+    tone_curve_split_midtones: f32,
+    tone_curve_split_highlights: f32,
+    split_shadow_lum: f32,
+    split_midtone_lum: f32,
+    split_highlight_lum: f32,
+    split_global_lum: f32,
+    sharpen_detail: f32,
+    sharpen_masking: f32,
+    nr_luminance_detail: f32,
+    nr_luminance_contrast: f32,
+    nr_color_detail: f32,
+    nr_color_smoothness: f32,
+    pcv_style: f32,
+    pcv_amount: f32,
+    pcv_midpoint: f32,
+    pcv_roundness: f32,
+    pcv_feather: f32,
+    pcv_highlights: f32,
+    grain_roughness: f32,
     // 🔑 Enchimento, e não campo: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
     // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 171
-    // `f32` dão 684. O Rust continua mandando 684 bytes num buffer de 688
-    // (`TAMANHO_DO_UNIFORM`); este nunca é lido. Fica DEPOIS dos 171 para não
+    // `f32` davam 684, e os 193 de hoje dão 772. O Rust manda 772 bytes num
+    // buffer de 784 (`TAMANHO_DO_UNIFORM`); estes nunca são lidos. Ficam DEPOIS dos 193 para não
     // deslocar nenhuma posição — e o teste que compara os nomes com o `Ajustes`
     // ignora o que começa com `_`.
     _enchimento_a: f32,
+    _enchimento_b: f32,
+    _enchimento_c: f32,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
@@ -259,6 +284,67 @@ struct ParamsLocais {
 
 @group(0) @binding(7) var mascaras: texture_2d_array<f32>;
 @group(0) @binding(8) var<uniform> locais: ParamsLocais;
+
+// A guia (`guia.rs`): a foto reduzida, com a luminância desfocada larga (`r`,
+// Claridade) e média (`g`, Textura) e o canal escuro (`b`, Remover névoa).
+// Calculada na CPU uma vez por foto, e só quando um dos três está em uso.
+struct DadosDaGuia {
+    // x: a luz do céu do Remover névoa (0–1); y: 1 com guia, 0 sem.
+    dados: vec4<f32>,
+}
+
+@group(0) @binding(9) var guia: texture_2d<f32>;
+@group(0) @binding(10) var<uniform> dados_da_guia: DadosDaGuia;
+
+/// A guia na posição `pos` da foto revelada (em pixels dela), bilinear à mão —
+/// a textura é `Rgba32Float`, que o WebGL2 não filtra sem extensão.
+fn ler_guia(pos: vec2<f32>, dims: vec2<u32>) -> vec4<f32> {
+    let gd = textureDimensions(guia);
+    let escala = vec2<f32>(f32(gd.x), f32(gd.y)) / vec2<f32>(f32(dims.x), f32(dims.y));
+    let ultimo = vec2<f32>(f32(gd.x) - 1.0, f32(gd.y) - 1.0);
+    let p = clamp((pos + 0.5) * escala - 0.5, vec2<f32>(0.0, 0.0), ultimo);
+    let base = floor(p);
+    let f = p - base;
+    let x0 = i32(base.x);
+    let y0 = i32(base.y);
+    let x1 = min(x0 + 1, i32(gd.x) - 1);
+    let y1 = min(y0 + 1, i32(gd.y) - 1);
+    let a = textureLoad(guia, vec2<i32>(x0, y0), 0);
+    let b = textureLoad(guia, vec2<i32>(x1, y0), 0);
+    let c = textureLoad(guia, vec2<i32>(x0, y1), 0);
+    let d = textureLoad(guia, vec2<i32>(x1, y1), 0);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+/// Leva a cor (0–255) da luminância `l` para `n` (0–1) sem mudar o matiz.
+///
+/// É a conta do tom por região: pela razão, que escala os três canais juntos,
+/// e somada abaixo de ~5 % de luz, onde a razão explode.
+fn com_luminancia(cor: vec3<f32>, l: f32, n: f32) -> vec3<f32> {
+    let delta = (n - l) * 255.0;
+    let escala = n / max(l, 0.0001);
+    let mistura = smoothstep(0.0, 0.05, l);
+    return mix(cor + vec3<f32>(delta), cor * escala, mistura);
+}
+
+/// O detalhe `d` (pixel − média) contido: a borda forte conta cada vez menos,
+/// que é o que tira o halo de um contraste local feito com desfoque comum.
+fn detalhe_contido(d: f32, dureza: f32) -> f32 {
+    return d / (1.0 + abs(d) * dureza);
+}
+
+/// Uma zona da curva paramétrica: o triângulo centrado na zona `[a, b]`, com a
+/// largura da própria zona para cada lado. Com as divisões no neutro (25/50/75)
+/// são as quatro zonas fixas de antes, número por número.
+fn zona_da_curva(cor: vec3<f32>, l: f32, a: f32, b: f32, valor: f32) -> vec3<f32> {
+    let largura = b - a;
+    let dist = abs(l - (a + b) * 0.5);
+    if (valor == 0.0 || dist >= largura) {
+        return cor;
+    }
+    let ajuste = valor * 0.01 * (1.0 - dist / largura);
+    return cor + cor * ajuste;
+}
 
 /// sRGB (0–255) → linear, estendido: valores fora de 0–255 continuam a curva,
 /// porque o pipeline deixa passar sobra até o fim (e a exposição global cria).
@@ -460,21 +546,50 @@ fn luminancia(cor: vec3<f32>) -> f32 {
     return dot(cor, vec3<f32>(0.299, 0.587, 0.114));
 }
 
-/// Puxa a cor na direção de um matiz **sem mudar o brilho do pixel**.
-///
-/// 🔑 A recuperação da luminância no fim é o que separa tonalizar de manchar:
-/// misturar com âmbar puro escureceria o azul e clarearia o amarelo, e o
-/// resultado seria uma foto com o contraste redesenhado pela escolha da cor. Do
-/// jeito que está, `forca = 1.0` num cinza dá o matiz puro naquele mesmo nível
-/// de cinza — que é exatamente o que uma sépia é.
-///
-/// ⚠️ O preto puro fica preto: não há brilho que uma cor possa ter e continuar
-/// preto, e a divisão protegida devolve zero em vez de explodir.
-fn tonalizar(cor: vec3<f32>, matiz: f32, forca: f32) -> vec3<f32> {
-    let alvo = cor_do_matiz(matiz) * 255.0;
-    let antes = luminancia(cor);
-    let misturado = mix(cor, alvo, forca);
-    return misturado * (antes / max(luminancia(misturado), 0.0001));
+fn lab_f(t: f32) -> f32 {
+    if (t > 0.008856) {
+        return pow(t, 1.0 / 3.0);
+    }
+    return 7.787 * t + 16.0 / 116.0;
+}
+
+fn lab_f_inversa(t: f32) -> f32 {
+    let t3 = t * t * t;
+    if (t3 > 0.008856) {
+        return t3;
+    }
+    return (t - 16.0 / 116.0) / 7.787;
+}
+
+/// sRGB (0–255, já recolhido à faixa) → CIELab, branco D65.
+fn para_lab(cor: vec3<f32>) -> vec3<f32> {
+    let lin = vec3<f32>(srgb_para_linear(cor.r), srgb_para_linear(cor.g), srgb_para_linear(cor.b));
+    let fx = lab_f(dot(lin, vec3<f32>(0.4124, 0.3576, 0.1805)) / 0.95047);
+    let fy = lab_f(dot(lin, vec3<f32>(0.2126, 0.7152, 0.0722)));
+    let fz = lab_f(dot(lin, vec3<f32>(0.0193, 0.1192, 0.9505)) / 1.08883);
+    return vec3<f32>(116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz));
+}
+
+/// CIELab → sRGB (0–255), recolhido: a cor fora do gamut encosta na borda.
+fn de_lab(lab: vec3<f32>) -> vec3<f32> {
+    let fy = (lab.x + 16.0) / 116.0;
+    let x = lab_f_inversa(fy + lab.y / 500.0) * 0.95047;
+    let y = lab_f_inversa(fy);
+    let z = lab_f_inversa(fy - lab.z / 200.0) * 1.08883;
+    let r = 3.2406 * x - 1.5372 * y - 0.4986 * z;
+    let g = -0.9689 * x + 1.8758 * y + 0.0415 * z;
+    let b = 0.0557 * x - 0.2040 * y + 1.0570 * z;
+    return vec3<f32>(
+        linear_para_srgb(clamp(r, 0.0, 1.0)),
+        linear_para_srgb(clamp(g, 0.0, 1.0)),
+        linear_para_srgb(clamp(b, 0.0, 1.0)),
+    );
+}
+
+/// O deslocamento (a*, b*) de uma roda da Gradação de cores do Lightroom.
+fn roda_do_lightroom(matiz: f32, saturacao: f32) -> vec2<f32> {
+    let angulo = radians(matiz + 28.0);
+    return vec2<f32>(cos(angulo), sin(angulo)) * 0.4 * clamp(saturacao, 0.0, 100.0);
 }
 
 /// Ruído determinístico de 32 bits — o mesmo pixel dá sempre o mesmo grão.
@@ -588,9 +703,25 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         
         // Params
         let sigma_s = 2.0; // NR Spatial
-        let sigma_r = max(params.nr_luminance * 0.002, 0.0001); // NR Range
-        let sigma_color = max(params.nr_color * 0.05, 0.1); // Color NR
+        var sigma_r = max(params.nr_luminance * 0.002, 0.0001); // NR Range
+        var sigma_color = max(params.nr_color * 0.05, 0.1); // Color NR
         let sigma_sharpen = max(params.sharpen_radius, 0.5); // Sharpen Radius
+
+        // O Detalhe e a Suavidade do Lightroom (2026-09-30). Cada um só entra
+        // fora do neutro (50), e por isso a revelação de antes sai bit a bit
+        // igual: mais detalhe estreita o filtro (guarda textura), menos o abre.
+        if (params.nr_luminance_detail != 50.0) {
+            sigma_r *= mix(1.6, 0.4, clamp(params.nr_luminance_detail * 0.01, 0.0, 1.0));
+        }
+        if (params.nr_color_detail != 50.0) {
+            sigma_color *= mix(1.5, 0.5, clamp(params.nr_color_detail * 0.01, 0.0, 1.0));
+        }
+        if (params.nr_color_smoothness != 50.0) {
+            sigma_color *= mix(0.6, 1.4, clamp(params.nr_color_smoothness * 0.01, 0.0, 1.0));
+        }
+        // A Máscara da nitidez mede a borda na vizinhança 3×3.
+        let medir_borda = do_sharpen && params.sharpen_masking > 0.0;
+        var variacao = 0.0;
         
         // 5x5 Kernel
         for (var dy: i32 = -2; dy <= 2; dy++) {
@@ -606,6 +737,9 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
                     
                     let dist_sq = f32(dx*dx + dy*dy);
                     let n_lum = (0.299 * nr + 0.587 * ng + 0.114 * nb) / 255.0;
+                    if (medir_borda && abs(dx) <= 1 && abs(dy) <= 1) {
+                        variacao += abs(n_lum - center_lum_norm);
+                    }
                     
                     // --- Luminance NR (Bilateral) ---
                     if (do_nr_lum) {
@@ -648,6 +782,11 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
             let fg = sum_g_lum / sum_weight_lum;
             let fb = sum_b_lum / sum_weight_lum;
             final_y = 0.299 * fr + 0.587 * fg + 0.114 * fb;
+            // O Contraste do ruído devolve parte do contraste fino que o
+            // filtro levou.
+            if (params.nr_luminance_contrast > 0.0) {
+                final_y = mix(final_y, center_y, clamp(params.nr_luminance_contrast, 0.0, 100.0) * 0.005);
+            }
         }
         
         var final_u = -0.147 * r - 0.289 * g + 0.436 * b;
@@ -668,8 +807,26 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         // --- Apply Sharpening (USM) ---
         if (do_sharpen && sum_weight_sharpen > 0.0) {
             let blurred_y = sum_y_sharpen / sum_weight_sharpen;
-            let detail = final_y - blurred_y;
-            let amount = params.sharpen_amount * 0.05; // Scale 0-100 to approx 0-5
+            var detail = final_y - blurred_y;
+            var amount = params.sharpen_amount * 0.05; // Scale 0-100 to approx 0-5
+
+            // O Detalhe da nitidez (neutro 25, o do Lightroom): abaixo dele o
+            // detalhe grande é contido — é o que tira o halo da borda —, acima
+            // dele a nitidez cresce no detalhe fino.
+            if (params.sharpen_detail != 25.0) {
+                let d = clamp(params.sharpen_detail, 0.0, 100.0);
+                if (d < 25.0) {
+                    detail = mix(detalhe_contido(detail / 255.0, 40.0) * 255.0, detail, d / 25.0);
+                } else {
+                    amount *= 1.0 + (d - 25.0) / 75.0 * 0.8;
+                }
+            }
+            // A Máscara: a nitidez só fica onde há borda. Em 0, a foto inteira.
+            if (medir_borda) {
+                let borda = variacao / 8.0;
+                let limiar = pow(clamp(params.sharpen_masking * 0.01, 0.0, 1.0), 2.0) * 0.12;
+                amount *= smoothstep(limiar * 0.5, limiar, borda);
+            }
             
             // Add detail back to RGB channels
             r += detail * amount;
@@ -774,6 +931,29 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
     }
     
+    // 1c. Remover névoa — antes do contraste, como no Lightroom.
+    //
+    // 🔑 **É o canal escuro de He et al.**: numa cena sem névoa, toda janela
+    // tem algum canal quase preto; o que sobra nele é a névoa, que veio da luz
+    // do céu `A`. A transmissão `t = 1 − ω·escuro/A` diz quanto da cena chegou,
+    // e a cena limpa é `(I − A)/t + A`. O canal escuro e `A` vêm da guia.
+    // Negativo, a névoa entra: a cena se mistura à luz do céu.
+    if (params.dehaze != 0.0) {
+        let gu = ler_guia(origem, dims);
+        let ceu = dados_da_guia.dados.x;
+        let forca = clamp(params.dehaze * 0.01, -1.0, 1.0);
+        var cor = vec3<f32>(r, g, b) / 255.0;
+        if (forca > 0.0) {
+            let t = max(1.0 - 0.9 * forca * gu.b / max(ceu, 0.05), 0.25);
+            cor = (cor - vec3<f32>(ceu)) / t + vec3<f32>(ceu);
+        } else {
+            cor = mix(cor, vec3<f32>(ceu), -forca * 0.6);
+        }
+        r = cor.r * 255.0;
+        g = cor.g * 255.0;
+        b = cor.b * 255.0;
+    }
+
     // 2. Contrast
     if (params.contrast != 1.0) {
         r = (r - 128.0) * params.contrast + 128.0;
@@ -840,10 +1020,21 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         // em -100 com "pretos" em +100 devolveria derivada -1 no preto, que é a
         // inversão de volta. Compostas, a garantia de cada uma basta.
         var n = clamp(l + (params.whites * 0.01) * l * l * l / 3.0, 0.0, 1.0);
-        n = clamp(n + (params.highlights * 0.01) * n * n * (1.0 - n), 0.0, 1.0);
+        // 🔑 Recuperar (negativo) usa outro peso desde 2026-09-30:
+        // `1,2·n³(1−n)`, que poupa o meio-tom — a forma do Lightroom, medida
+        // num DNG revelado lá (Realces −58 quase não mexia na mediana). O peso
+        // de antes, `n²(1−n)`, escurecia o meio-tom com a mesma força do alto.
+        // ⚠️ O Lightroom comprime o alto mais do que isto; mais força aqui
+        // daria derivada acima de 2,2 junto do branco, e composta com
+        // "brancos" vira degrau (`o_tom_por_regiao_nunca_inverte_nem_da_degrau`).
+        if (params.highlights < 0.0) {
+            n = clamp(n + params.highlights * 0.01 * 1.2 * n * n * n * (1.0 - n), 0.0, 1.0);
+        } else {
+            n = clamp(n + (params.highlights * 0.01) * n * n * (1.0 - n), 0.0, 1.0);
+        }
         n = clamp(n + (params.shadows * 0.01) * n * (1.0 - n) * (1.0 - n), 0.0, 1.0);
         let e = 1.0 - n;
-        n = clamp(n + (params.blacks * 0.01) * e * e * e / 3.0, 0.0, 1.0);
+        n = clamp(n + (params.blacks * 0.01) * e * e * e / 9.0, 0.0, 1.0);
 
         // A cor se preserva pela razão, que escala os três canais juntos.
         // Abaixo de ~5% de luz não há razão que se sustente (o divisor tende a
@@ -879,75 +1070,59 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
     }
     
-    // 11. Clarity (local contrast - simplified)
-    if (params.clarity != 0.0) {
-        let factor = 1.0 + (params.clarity * 0.5);
-        let lum3 = (r + g + b) / 3.0;
-        r = lum3 + (r - lum3) * factor;
-        g = lum3 + (g - lum3) * factor;
-        b = lum3 + (b - lum3) * factor;
+    // 11. Claridade e Textura — contraste local, pela guia.
+    //
+    // 🚨 **Até 2026-09-30 a "Claridade" era uma saturação**: escalava a
+    // distância de cada canal à média, o mesmo que o controle de saturação faz,
+    // e a tela a chamava de "Textura". Numa foto P&B ela não fazia nada. Agora
+    // as duas são o que o Lightroom chama por esses nomes: o pixel se afasta da
+    // média da vizinhança — larga na Claridade (σ = 1,2 % do lado maior),
+    // média na Textura (0,25 %).
+    //
+    // 🔑 O detalhe é medido **na foto de entrada**, a mesma de que a guia saiu,
+    // e somado à luminância de agora: medir na foto já revelada misturaria a
+    // exposição e as curvas no "detalhe". O meio-tom pesa mais (o Lightroom
+    // poupa o preto e o branco), e a borda forte é contida — sem isso o
+    // desfoque comum deixa halo em toda silhueta.
+    if (params.clarity != 0.0 || params.texture != 0.0) {
+        let gu = ler_guia(origem, dims);
+        let l = clamp(((r + g + b) / 3.0) / 255.0, 0.0, 1.0);
+        let l0 = (pixel.r + pixel.g + pixel.b) / 3.0;
+        let meio = 1.0 - pow(abs(2.0 * l - 1.0), 3.0);
+        var n = l;
+        if (params.clarity != 0.0) {
+            n += params.clarity * 0.9 * detalhe_contido(l0 - gu.r, 4.0) * meio;
+        }
+        if (params.texture != 0.0) {
+            n += params.texture * 0.012 * detalhe_contido(l0 - gu.g, 8.0) * meio;
+        }
+        let cor = com_luminancia(vec3<f32>(r, g, b), l, clamp(n, 0.0, 1.0));
+        r = cor.r;
+        g = cor.g;
+        b = cor.b;
     }
     
     // 12-15. Tone Curve Parametric Zones
     let lum_final = (r + g + b) / 3.0;
     let norm_lum = lum_final / 255.0;
     
-    // Zone 1: Shadows (0.0 - 0.25 range)
-    if (params.tone_curve_shadows != 0.0) {
-        let zone_center = 0.125;
-        let zone_width = 0.25;
-        let dist = abs(norm_lum - zone_center);
-        if (dist < zone_width) {
-            let weight = 1.0 - (dist / zone_width);
-            let adjustment = params.tone_curve_shadows * 0.01 * weight;
-            r += r * adjustment;
-            g += g * adjustment;
-            b += b * adjustment;
-        }
+    // As quatro zonas, entre as três divisões (o Lightroom abre em 25/50/75 —
+    // e com elas no neutro estas são as zonas fixas de antes). As divisões
+    // ficam em ordem mesmo quando o JSON traz outra coisa.
+    {
+        let d1 = clamp(params.tone_curve_split_shadows * 0.01, 0.0, 1.0);
+        let d2 = clamp(params.tone_curve_split_midtones * 0.01, d1, 1.0);
+        let d3 = clamp(params.tone_curve_split_highlights * 0.01, d2, 1.0);
+        var cor = vec3<f32>(r, g, b);
+        cor = zona_da_curva(cor, norm_lum, 0.0, d1, params.tone_curve_shadows);
+        cor = zona_da_curva(cor, norm_lum, d1, d2, params.tone_curve_darks);
+        cor = zona_da_curva(cor, norm_lum, d2, d3, params.tone_curve_lights);
+        cor = zona_da_curva(cor, norm_lum, d3, 1.0, params.tone_curve_highlights);
+        r = cor.r;
+        g = cor.g;
+        b = cor.b;
     }
-    
-    // Zone 2: Darks (0.25 - 0.5 range)
-    if (params.tone_curve_darks != 0.0) {
-        let zone_center = 0.375;
-        let zone_width = 0.25;
-        let dist = abs(norm_lum - zone_center);
-        if (dist < zone_width) {
-            let weight = 1.0 - (dist / zone_width);
-            let adjustment = params.tone_curve_darks * 0.01 * weight;
-            r += r * adjustment;
-            g += g * adjustment;
-            b += b * adjustment;
-        }
-    }
-    
-    // Zone 3: Lights (0.5 - 0.75 range)
-    if (params.tone_curve_lights != 0.0) {
-        let zone_center = 0.625;
-        let zone_width = 0.25;
-        let dist = abs(norm_lum - zone_center);
-        if (dist < zone_width) {
-            let weight = 1.0 - (dist / zone_width);
-            let adjustment = params.tone_curve_lights * 0.01 * weight;
-            r += r * adjustment;
-            g += g * adjustment;
-            b += b * adjustment;
-        }
-    }
-    
-    // Zone 4: Highlights (0.75 - 1.0 range)
-    if (params.tone_curve_highlights != 0.0) {
-        let zone_center = 0.875;
-        let zone_width = 0.25;
-        let dist = abs(norm_lum - zone_center);
-        if (dist < zone_width) {
-            let weight = 1.0 - (dist / zone_width);
-            let adjustment = params.tone_curve_highlights * 0.01 * weight;
-            r += r * adjustment;
-            g += g * adjustment;
-            b += b * adjustment;
-        }
-    }
-    
+
     // 16. Curva por ponto — depois da paramétrica, como no Lightroom.
     //
     // 🚨 **Era o maior buraco da importação de presets**: 321 de 400 presets
@@ -1224,7 +1399,9 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     // sempre que `f > 0`: não cruza o zero, não inverte, e o fator fica
     // limitado. Quem prende é `a_tonalizacao_nao_mancha_o_que_veio_fora_da_faixa`.
     if (params.split_shadow_sat != 0.0 || params.split_highlight_sat != 0.0
-        || params.split_midtone_sat != 0.0 || params.split_global_sat != 0.0) {
+        || params.split_midtone_sat != 0.0 || params.split_global_sat != 0.0
+        || params.split_shadow_lum != 0.0 || params.split_midtone_lum != 0.0
+        || params.split_highlight_lum != 0.0 || params.split_global_lum != 0.0) {
         var cor = clamp(
             vec3<f32>(r, g, b),
             vec3<f32>(0.0, 0.0, 0.0),
@@ -1251,29 +1428,40 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         // centro, que vale 1 onde as duas empatam e 0 nas extremidades.
         let peso_meio = 1.0 - abs(peso_alta - peso_baixa);
 
-        cor = tonalizar(
-            cor,
-            params.split_shadow_hue,
-            clamp(params.split_shadow_sat * 0.01, 0.0, 1.0) * peso_baixa,
-        );
-        cor = tonalizar(
-            cor,
-            params.split_midtone_hue,
-            clamp(params.split_midtone_sat * 0.01, 0.0, 1.0) * peso_meio,
-        );
-        cor = tonalizar(
-            cor,
-            params.split_highlight_hue,
-            clamp(params.split_highlight_sat * 0.01, 0.0, 1.0) * peso_alta,
-        );
-        // 🔑 O global não tem peso de faixa — é a tinta que cai na foto
-        // inteira, e entra por último para tingir também o que as três faixas
-        // acabaram de fazer.
-        cor = tonalizar(
-            cor,
-            params.split_global_hue,
-            clamp(params.split_global_sat * 0.01, 0.0, 1.0),
-        );
+        // A Luminância de cada faixa (2026-09-30): clareia na direção do
+        // branco e escurece na do preto, proporcionalmente, e nunca estoura.
+        let dl = (params.split_shadow_lum * peso_baixa * peso_baixa
+            + params.split_midtone_lum * peso_meio * peso_meio
+            + params.split_highlight_lum * peso_alta * peso_alta
+            + params.split_global_lum) * 0.01;
+        if (dl != 0.0) {
+            var n = l;
+            if (dl > 0.0) {
+                n = l + min(dl, 1.0) * (1.0 - l);
+            } else {
+                n = l * (1.0 + max(dl, -1.0));
+            }
+            cor = clamp(com_luminancia(cor, l, n), vec3<f32>(0.0), vec3<f32>(255.0));
+        }
+
+        // 🔑 **As rodas são as do Lightroom desde 2026-09-30**: cada uma soma
+        // um deslocamento de cor em CIELab, de croma `0,4 × saturação` e
+        // matiz `matiz + 28°`, pesado pela faixa — e a luminosidade L* fica.
+        // Os dois números saíram de um DNG revelado no Lightroom (o
+        // `_DSC0010-2` do Estúdio Canela): com eles, a cor das sombras, do
+        // meio-tom e das altas luzes da prévia que o Lightroom gravou bate em
+        // ~2 unidades de a*/b*. Até ali cada roda misturava a cor pura do
+        // matiz HSV, e o mesmo número do Lightroom dava outra cor — o amarelo
+        // 59 virava verde nas altas luzes e o vermelho 14 virava roxo.
+        let lab = para_lab(cor);
+        var desvio = roda_do_lightroom(params.split_shadow_hue, params.split_shadow_sat) * peso_baixa
+            + roda_do_lightroom(params.split_midtone_hue, params.split_midtone_sat) * peso_meio
+            + roda_do_lightroom(params.split_highlight_hue, params.split_highlight_sat) * peso_alta
+            + roda_do_lightroom(params.split_global_hue, params.split_global_sat);
+        // O preto puro e o branco puro ficam como estão: não há cor que caiba
+        // em L* 0 ou 100, e a conta voltaria com o canal estourado.
+        desvio *= smoothstep(0.0, 8.0, lab.x) * (1.0 - smoothstep(92.0, 100.0, lab.x));
+        cor = de_lab(vec3<f32>(lab.x, lab.y + desvio.x, lab.z + desvio.y));
         r = cor.r;
         g = cor.g;
         b = cor.b;
@@ -1314,6 +1502,73 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         b *= fator;
     }
 
+    // Vinheta pós-corte — a do painel Efeitos do Lightroom, no quadro que sai.
+    //
+    // 🔑 **A forma é uma superelipse.** No Arredondamento 0 é a elipse do
+    // quadro; para +100 ela vira círculo; para −100 vira um retângulo de cantos
+    // redondos que segue as bordas por igual (a faixa tem a mesma largura em
+    // pixels nos quatro lados, como na do Lightroom). O Ponto médio leva a
+    // linha de força total da borda (0) até o canto (100); a Difusão abre a
+    // transição para dentro. Calibrada contra a prévia do Lightroom de um DNG
+    // do Estúdio Canela (sobreposição branca, arredondamento −83, difusão 35).
+    if (params.pcv_amount != 0.0) {
+        let tam = tamanho_do_quadro();
+        let c = tam * 0.5;
+        let rel = abs(no_quadro(coord) - c);
+        let curto = max(min(c.x, c.y), 1.0);
+        let elipse = rel / max(c, vec2<f32>(1.0));
+        let arredondamento = clamp(params.pcv_roundness * 0.01, -1.0, 1.0);
+        var q = elipse;
+        var expoente = 2.0;
+        var canto_q = vec2<f32>(1.0, 1.0);
+        if (arredondamento < 0.0) {
+            let t = -arredondamento;
+            let caixa = max(rel - (c - vec2<f32>(curto)), vec2<f32>(0.0)) / curto;
+            q = mix(elipse, caixa, t);
+            expoente = 2.0 + 8.0 * t * t;
+        } else if (arredondamento > 0.0) {
+            let circulo = rel / length(c) * 1.41421356;
+            q = mix(elipse, circulo, arredondamento);
+            canto_q = mix(vec2<f32>(1.0), c / length(c) * 1.41421356, arredondamento);
+        }
+        let d = pow(pow(q.x, expoente) + pow(q.y, expoente), 1.0 / expoente);
+        let canto = pow(pow(canto_q.x, expoente) + pow(canto_q.y, expoente), 1.0 / expoente);
+        let fim = mix(0.97, canto, clamp(params.pcv_midpoint * 0.01, 0.0, 1.0));
+        let largura = max(pow(clamp(params.pcv_feather * 0.01, 0.0, 1.0), 1.5) * 0.5, 0.004);
+        let peso = smoothstep(fim - largura * fim, fim, d);
+        let forca = clamp(params.pcv_amount * 0.01, -1.0, 1.0) * peso;
+
+        var cor = clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(255.0));
+        let estilo = i32(round(params.pcv_style));
+        if (estilo == 2) {
+            // Sobreposição de tinta: mistura com branco ou preto.
+            let tinta = select(vec3<f32>(0.0), vec3<f32>(255.0), forca > 0.0);
+            cor = mix(cor, tinta, abs(forca));
+        } else if (forca < 0.0) {
+            // Escurecer. Prioridade de realces: em luz linear, como uma
+            // exposição — e os Realces devolvem o claro que estava ali.
+            // Prioridade de cores: no valor com gama, que guarda o matiz.
+            let l = clamp(luminancia(cor) / 255.0, 0.0, 1.0);
+            let poupar = clamp(params.pcv_highlights * 0.01, 0.0, 1.0) * smoothstep(0.5, 1.0, l);
+            let f = 1.0 + forca * (1.0 - poupar);
+            if (estilo == 0) {
+                cor = vec3<f32>(
+                    linear_para_srgb(srgb_para_linear(cor.r) * f),
+                    linear_para_srgb(srgb_para_linear(cor.g) * f),
+                    linear_para_srgb(srgb_para_linear(cor.b) * f),
+                );
+            } else {
+                cor = cor * f;
+            }
+        } else {
+            // Clarear: em direção ao branco, mais suave que a tinta.
+            cor = cor + (vec3<f32>(255.0) - cor) * forca * select(0.8, 0.65, estilo == 1);
+        }
+        r = cor.r;
+        g = cor.g;
+        b = cor.b;
+    }
+
     // Grão de filme — por último, e depois até da vinheta.
     //
     // 🔑 O grão é da cópia, e não da cena: no filme ele é a prata do negativo,
@@ -1342,7 +1597,24 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         // inválido, e o render pass não escrevia nada: preto, sem erro na tela e
         // com todos os sliders no neutro.
         let semente = embaralhar((celula.x * 0x9e3779b9u) ^ embaralhar(celula.y));
-        let ruido = f32(semente) / 4294967295.0 - 0.5;
+        var ruido = f32(semente) / 4294967295.0 - 0.5;
+
+        // A Aspereza (neutro 50, o de antes): acima, um grão de meia célula se
+        // soma ao grão — irregular; abaixo, o grão se mistura ao das vizinhas
+        // e alisa.
+        if (params.grain_roughness != 50.0) {
+            let k = (clamp(params.grain_roughness, 0.0, 100.0) - 50.0) / 50.0;
+            if (k > 0.0) {
+                let fina = vec2<u32>(u32(f32(coord.x) / max(lado * 0.5, 1.0)), u32(f32(coord.y) / max(lado * 0.5, 1.0)));
+                let s2 = embaralhar((fina.x * 0x85ebca6bu) ^ embaralhar(fina.y + 0x27d4eb2fu));
+                ruido += k * 0.6 * (f32(s2) / 4294967295.0 - 0.5);
+            } else {
+                let sx = embaralhar(((celula.x + 1u) * 0x9e3779b9u) ^ embaralhar(celula.y));
+                let sy = embaralhar((celula.x * 0x9e3779b9u) ^ embaralhar(celula.y + 1u));
+                let vizinhas = (f32(sx) + f32(sy)) / (2.0 * 4294967295.0) - 0.5;
+                ruido = mix(ruido, (ruido + vizinhas) * 0.75, -k);
+            }
+        }
 
         let l = clamp(((r + g + b) / 3.0) / 255.0, 0.0, 1.0);
         let peso = 4.0 * l * (1.0 - l);

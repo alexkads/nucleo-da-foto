@@ -1,4 +1,4 @@
-//! Os 171 ajustes, no layout que o WGSL espera.
+//! Os 193 ajustes, no layout que o WGSL espera.
 
 use serde::{Deserialize, Serialize};
 
@@ -275,6 +275,47 @@ pub struct Ajustes {
     pub dt_monochrome_b: f32,
     pub dt_monochrome_size: f32,
     pub dt_monochrome_highlights: f32,
+    // ------------------------------------------ Os controles do Lightroom
+    // 🔑 **Paridade com o painel do Lightroom** (dono, 2026-09-30: *"na
+    // revelação sRGB preciso dos mesmos controles do Lightroom"*, com um DNG
+    // revelado lá que não se reproduzia aqui). No fim, como todo campo novo: a
+    // revelação gravada antes não os tem, e o `serde(default)` os completa com
+    // o neutro — que é, em cada um, o comportamento de antes, bit a bit.
+    //
+    // Textura e Remover névoa: os dois que o Básico do Lightroom tem e este
+    // não tinha. A Claridade (`clarity`) passou a ser contraste local de verdade
+    // no mesmo dia — ver `corpo.wgsl`.
+    pub texture: f32,
+    pub dehaze: f32,
+    // As três divisões da curva paramétrica (o Lightroom abre em 25/50/75).
+    pub tone_curve_split_shadows: f32,
+    pub tone_curve_split_midtones: f32,
+    pub tone_curve_split_highlights: f32,
+    // A luminância das três faixas e do global da Gradação de cores.
+    pub split_shadow_lum: f32,
+    pub split_midtone_lum: f32,
+    pub split_highlight_lum: f32,
+    pub split_global_lum: f32,
+    // Nitidez: Detalhe (neutro 25, o do Lightroom) e Máscara.
+    pub sharpen_detail: f32,
+    pub sharpen_masking: f32,
+    // Redução de ruído: Detalhe e Contraste da luminância, Detalhe e
+    // Suavidade da cor (neutros 50/0/50/50, os do Lightroom).
+    pub nr_luminance_detail: f32,
+    pub nr_luminance_contrast: f32,
+    pub nr_color_detail: f32,
+    pub nr_color_smoothness: f32,
+    // Vinheta pós-corte: estilo (0 prioridade de realces, 1 prioridade de
+    // cores, 2 sobreposição de tinta), quantidade, ponto médio, arredondamento,
+    // difusão e realces. A `lens_vignette_*` continua sendo a da Lente.
+    pub pcv_style: f32,
+    pub pcv_amount: f32,
+    pub pcv_midpoint: f32,
+    pub pcv_roundness: f32,
+    pub pcv_feather: f32,
+    pub pcv_highlights: f32,
+    // Aspereza do grão (neutro 50).
+    pub grain_roughness: f32,
 }
 
 /// Quantos campos a struct tem — e quantos `f32` o vetor posicional carrega.
@@ -282,13 +323,15 @@ pub struct Ajustes {
 /// ⚠️ **Eram 46 até 2026-09-06, e 53 até 2026-09-12** (a Calibração, o Color
 /// Grading completo e o mixer P&B levaram a 74; a curva por ponto, a 110; o
 /// estágio darktable — exposure, vignetting e color balance rgb —, a 157; shadows
-/// and highlights e monochrome, a 171). A Tonalização (5) e o
+/// and highlights e monochrome, a 171; os controles do Lightroom que faltavam
+/// — Textura, Remover névoa, a vinheta pós-corte e o resto do Detalhe —, a 193
+/// em 2026-09-30). A Tonalização (5) e o
 /// Grão (2) entraram primeiro; depois a Calibração de câmera (7), os eixos que
 /// faltavam do Color Grading (5) e o mixer de preto e branco (9). **Todos no
 /// fim da lista**, e não perto do que se parece com eles: a posição de um campo
 /// é o contrato com o shader, e mover `nr_luminance` para junto do grão faria
 /// toda revelação já gravada ler o campo do vizinho.
-pub const QUANTIDADE: usize = 171;
+pub const QUANTIDADE: usize = 193;
 
 /// O tamanho do buffer de `uniform`, arredondado para múltiplo de 16 bytes.
 ///
@@ -404,6 +447,18 @@ impl Default for Ajustes {
         neutro.dt_shadhi_highlights_ccorrect = 50.0;
         neutro.dt_shadhi_flags = 127.0;
         neutro.dt_monochrome_size = 2.0;
+        // Os neutros do Lightroom que não são zero: em cada um, o motor faz
+        // exatamente o que fazia antes de o controle existir.
+        neutro.tone_curve_split_shadows = 25.0;
+        neutro.tone_curve_split_midtones = 50.0;
+        neutro.tone_curve_split_highlights = 75.0;
+        neutro.sharpen_detail = 25.0;
+        neutro.nr_luminance_detail = 50.0;
+        neutro.nr_color_detail = 50.0;
+        neutro.nr_color_smoothness = 50.0;
+        neutro.pcv_midpoint = 50.0;
+        neutro.pcv_feather = 50.0;
+        neutro.grain_roughness = 50.0;
         neutro
     }
 }
@@ -419,7 +474,7 @@ impl Ajustes {
         0.0, 31.875, 63.75, 95.625, 127.5, 159.375, 191.25, 223.125, 255.0,
     ];
 
-    /// Os 171 nomes, na ordem do `uniform`.
+    /// Os 193 nomes, na ordem do `uniform`.
     ///
     /// 🔑 É a ordem que o vetor posicional ([`Ajustes::como_vetor`]) segue, a
     /// que o `struct Params` do WGSL declara, e a que o site recebe em
@@ -596,6 +651,28 @@ impl Ajustes {
         "dt_monochrome_b",
         "dt_monochrome_size",
         "dt_monochrome_highlights",
+        "texture",
+        "dehaze",
+        "tone_curve_split_shadows",
+        "tone_curve_split_midtones",
+        "tone_curve_split_highlights",
+        "split_shadow_lum",
+        "split_midtone_lum",
+        "split_highlight_lum",
+        "split_global_lum",
+        "sharpen_detail",
+        "sharpen_masking",
+        "nr_luminance_detail",
+        "nr_luminance_contrast",
+        "nr_color_detail",
+        "nr_color_smoothness",
+        "pcv_style",
+        "pcv_amount",
+        "pcv_midpoint",
+        "pcv_roundness",
+        "pcv_feather",
+        "pcv_highlights",
+        "grain_roughness",
     ];
 
     /// Os 46 valores, por posição — o que a GPU recebe, como `f32`.
@@ -615,15 +692,21 @@ impl Ajustes {
         Some(bytemuck::pod_read_unaligned(bytemuck::cast_slice(valores)))
     }
 
-    /// Alguma das duas vinhetas está ligada — a de lente (a pós-corte do
-    /// Lightroom) ou a do estilo darktable?
+    /// Claridade, Textura ou Remover névoa — os três que leem a guia
+    /// (`guia.rs`), a vizinhança larga que o shader sozinho não alcança.
+    pub fn usa_a_guia(&self) -> bool {
+        self.clarity != 0.0 || self.texture != 0.0 || self.dehaze != 0.0
+    }
+
+    /// Alguma das três vinhetas está ligada — a de lente, a pós-corte ou a do
+    /// estilo darktable?
     ///
     /// 🔑 **São os únicos ajustes que dependem do enquadramento** (ver
     /// `Motor::definir_corte`): sem nenhuma delas, mudar o corte não muda pixel
     /// revelado nenhum. Quem reprocessaria a cada arrasto de alça pergunta aqui
     /// antes.
     pub fn vinheta_ligada(&self) -> bool {
-        self.lens_vignette_amount != 0.0 || self.dt_vignette_ativo != 0.0
+        self.lens_vignette_amount != 0.0 || self.dt_vignette_ativo != 0.0 || self.pcv_amount != 0.0
     }
 }
 
@@ -656,7 +739,7 @@ mod testes {
         assert_eq!(neutro.saturation, 0.0);
     }
 
-    /// O layout que vai para a GPU tem os 171 campos, de quatro bytes cada.
+    /// O layout que vai para a GPU tem os 193 campos, de quatro bytes cada.
     ///
     /// Campo a mais desloca **todos** os seguintes na leitura do shader, e o
     /// sintoma é a saturação virando nitidez.
@@ -664,12 +747,12 @@ mod testes {
     /// ⚠️ **O número do `uniform` é escrito à mão de propósito.** Derivá-lo aqui
     /// (`size_of().next_multiple_of(16)`) faria o teste concordar com qualquer
     /// mudança, inclusive com a errada — e é justamente o alinhamento de 16
-    /// bytes do WebGL2 que já derrubou este shader uma vez. 171 × 4 = 684, e o
-    /// próximo múltiplo de 16 é 688.
+    /// bytes do WebGL2 que já derrubou este shader uma vez. 193 × 4 = 772, e o
+    /// próximo múltiplo de 16 é 784.
     #[test]
     fn o_layout_tem_os_campos_de_quatro_bytes() {
         assert_eq!(std::mem::size_of::<Ajustes>(), QUANTIDADE * 4);
-        assert_eq!(TAMANHO_DO_UNIFORM, 688);
+        assert_eq!(TAMANHO_DO_UNIFORM, 784);
     }
 
     /// Os nomes do `struct Params` do WGSL, na ordem em que ele os declara.
@@ -776,7 +859,7 @@ mod testes {
         assert_eq!(neutro[posicao("dt_shadhi_flags")], 127.0);
         assert_eq!(
             neutro.iter().filter(|v| **v != 0.0).count(),
-            3 + 32 + 11 + 8
+            3 + 32 + 11 + 8 + 10
         );
 
         let com_matiz = Ajustes {

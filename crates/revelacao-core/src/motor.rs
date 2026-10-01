@@ -128,6 +128,14 @@ struct Recursos {
     /// A última preparação subiu os pixels para a GPU (foto nova ou tamanho
     /// novo) — o que separa "trocar de foto" de "mexer num slider" no custo.
     subiu_agora: bool,
+    /// A guia da Claridade, da Textura e do Remover névoa (`guia.rs`), de 1×1
+    /// enquanto nenhum dos três está em uso.
+    textura_guia: wgpu::Texture,
+    /// A luz do céu e se há guia (`DadosDaGuia` no WGSL).
+    buffer_guia: wgpu::Buffer,
+    /// Os pixels de que a guia em uso saiu — por identidade de `Arc`, como
+    /// `ultimos_pixels`.
+    pixels_da_guia: Option<Arc<Vec<u8>>>,
     /// As máscaras locais deste tamanho — cache refeito da revelação.
     mascaras: Mascaras,
     /// Clone e Heal deste tamanho — o resultado que a revelação lê.
@@ -207,6 +215,13 @@ fn criar_recursos(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let textura_guia = textura_da_guia(dispositivo, None, None);
+    let buffer_guia = dispositivo.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Dados da guia"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let mascaras = Mascaras::nova(dispositivo);
     let grupo = montar_grupo(
         dispositivo,
@@ -219,6 +234,8 @@ fn criar_recursos(
         &buffer_grades,
         &buffer_quadro,
         &mascaras,
+        &textura_guia,
+        &buffer_guia,
     );
 
     let buffer_saida = dispositivo.create_buffer(&wgpu::BufferDescriptor {
@@ -246,6 +263,9 @@ fn criar_recursos(
         ultimo_pedido_ms: 0.0,
         grades_pendentes: false,
         subiu_agora: false,
+        textura_guia,
+        buffer_guia,
+        pixels_da_guia: None,
         mascaras,
         retoques: Default::default(),
     }
@@ -299,6 +319,9 @@ fn criar_layout_do_grupo(
             count: None,
         },
         uniforme(8),
+        // A guia da Claridade, da Textura e do Remover névoa, e os dados dela.
+        textura(9),
+        uniforme(10),
     ];
     if estagio == wgpu::ShaderStages::COMPUTE {
         entradas.push(wgpu::BindGroupLayoutEntry {
@@ -335,9 +358,12 @@ fn montar_grupo(
     grades: &wgpu::Buffer,
     quadro: &wgpu::Buffer,
     mascaras: &Mascaras,
+    guia: &wgpu::Texture,
+    dados_da_guia: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let vista = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
     let v_mascaras = mascaras.vista();
+    let v_guia = vista(guia);
     let (v_entrada, v_saida, v_sh, v_mo) = (
         vista(entrada),
         vista(saida),
@@ -376,6 +402,14 @@ fn montar_grupo(
         wgpu::BindGroupEntry {
             binding: 8,
             resource: mascaras.buffer_params.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 9,
+            resource: wgpu::BindingResource::TextureView(&v_guia),
+        },
+        wgpu::BindGroupEntry {
+            binding: 10,
+            resource: dados_da_guia.as_entire_binding(),
         },
     ];
     match pipeline {
@@ -435,6 +469,52 @@ fn textura_de_grade(
                 offset: 0,
                 bytes_per_row: Some(4 * grade.largura_do_atlas()),
                 rows_per_image: Some(grade.size_y),
+            },
+            tamanho,
+        );
+    }
+    textura
+}
+
+/// A guia (`guia.rs`) como textura `Rgba32Float`; sem guia, um texel neutro.
+///
+/// `Rgba32Float` porque o shader só usa `textureLoad` (o filtro bilinear é
+/// feito à mão, como em `amostrar`), e assim o WebGL2 não precisa da extensão
+/// de filtro de ponto flutuante.
+fn textura_da_guia(
+    dispositivo: &wgpu::Device,
+    fila: Option<&wgpu::Queue>,
+    guia: Option<&crate::guia::Guia>,
+) -> wgpu::Texture {
+    let (largura, altura) = guia.map_or((1, 1), |g| (g.largura, g.altura));
+    let tamanho = wgpu::Extent3d {
+        width: largura,
+        height: altura,
+        depth_or_array_layers: 1,
+    };
+    let textura = dispositivo.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Guia"),
+        size: tamanho,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    if let (Some(fila), Some(guia)) = (fila, guia) {
+        fila.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &textura,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&guia.texels),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(16 * largura),
+                rows_per_image: Some(altura),
             },
             tamanho,
         );
@@ -1541,9 +1621,41 @@ fn preparar<'a>(
                 &recursos.buffer_grades,
                 &recursos.buffer_quadro,
                 &recursos.mascaras,
+                &recursos.textura_guia,
+                &recursos.buffer_guia,
             );
             recursos.chave_das_grades = Some(chave);
         }
+    }
+    // A guia da Claridade, da Textura e do Remover névoa: só quando um dos três
+    // está em uso, e uma vez por foto — arrastar o slider não a refaz.
+    let guia_em_dia = recursos
+        .pixels_da_guia
+        .as_ref()
+        .is_some_and(|p| Arc::ptr_eq(p, pixels));
+    if ajustes.usa_a_guia() && !guia_em_dia {
+        let guia = crate::guia::calcular(pixels, largura, altura);
+        recursos.textura_guia = textura_da_guia(dispositivo, Some(fila), Some(&guia));
+        fila.write_buffer(
+            &recursos.buffer_guia,
+            0,
+            bytemuck::cast_slice(&[guia.luz_do_ceu, 1.0, 0.0, 0.0]),
+        );
+        recursos.pixels_da_guia = Some(pixels.clone());
+        recursos.grupo = montar_grupo(
+            dispositivo,
+            pipeline,
+            entrada_efetiva(recursos),
+            &recursos.textura_saida,
+            &recursos.buffer_ajustes,
+            &recursos.textura_grade_sh,
+            &recursos.textura_grade_mo,
+            &recursos.buffer_grades,
+            &recursos.buffer_quadro,
+            &recursos.mascaras,
+            &recursos.textura_guia,
+            &recursos.buffer_guia,
+        );
     }
     fila.write_buffer(&recursos.buffer_ajustes, 0, bytemuck::bytes_of(ajustes));
     fila.write_buffer(
@@ -1616,6 +1728,8 @@ fn atualizar_mascaras(
             &recursos.buffer_grades,
             &recursos.buffer_quadro,
             &recursos.mascaras,
+            &recursos.textura_guia,
+            &recursos.buffer_guia,
         );
     }
 }
@@ -2765,6 +2879,113 @@ mod testes {
         assert_ne!(vinheta, neutro, "Lente — a vinheta não moveu nada");
     }
 
+    /// ✅ **Os 22 controles do Lightroom de 2026-09-30 movem a foto** — cada
+    /// um com o que ele precisa ligado junto (o Detalhe da nitidez não age sem
+    /// nitidez, a forma da vinheta não age sem vinheta).
+    ///
+    /// E o neutro de cada um é o comportamento de antes: com os 22 no neutro e
+    /// a nitidez, o ruído, a vinheta e o grão ligados, a foto sai bit a bit a
+    /// mesma que sai sem os campos novos no JSON.
+    #[test]
+    fn os_controles_do_lightroom_chegam_ao_shader() {
+        let mut motor = motor_pronto();
+        let entrada = amostra();
+        let base: &[(&str, f32)] = &[
+            ("sharpen_amount", 60.0),
+            ("nr_luminance", 60.0),
+            ("nr_color", 60.0),
+            ("pcv_amount", -80.0),
+            ("grain_amount", 80.0),
+            ("split_shadow_sat", 40.0),
+            ("tone_curve_darks", 60.0),
+            ("tone_curve_lights", -60.0),
+        ];
+        let posicao = |nome: &str| {
+            Ajustes::NOMES
+                .iter()
+                .position(|n| *n == nome)
+                .unwrap_or_else(|| panic!("`{nome}` não está em NOMES"))
+        };
+        let montar = |extra: &[(&str, f32)]| {
+            let campos: Vec<(usize, f32)> = base
+                .iter()
+                .chain(extra)
+                .map(|(n, v)| (posicao(n), *v))
+                .collect();
+            com_campos(&campos)
+        };
+        let referencia = revelar_e_colher(&mut motor, entrada.clone(), montar(&[]));
+
+        let casos: &[(&str, f32)] = &[
+            ("texture", 80.0),
+            ("dehaze", 80.0),
+            ("dehaze", -80.0),
+            ("tone_curve_split_shadows", 10.0),
+            ("tone_curve_split_midtones", 70.0),
+            ("tone_curve_split_highlights", 90.0),
+            ("split_shadow_lum", -60.0),
+            ("split_midtone_lum", 60.0),
+            ("split_highlight_lum", -60.0),
+            ("split_global_lum", 40.0),
+            ("sharpen_detail", 0.0),
+            ("sharpen_detail", 100.0),
+            ("sharpen_masking", 100.0),
+            ("nr_luminance_detail", 100.0),
+            ("nr_luminance_contrast", 100.0),
+            ("nr_color_detail", 0.0),
+            ("nr_color_smoothness", 100.0),
+            ("pcv_amount", 80.0),
+            ("pcv_style", 1.0),
+            ("pcv_style", 2.0),
+            ("pcv_midpoint", 0.0),
+            // Numa foto quadrada o círculo (+100) é a própria elipse: o −100 é
+            // o caso que se distingue.
+            ("pcv_roundness", -100.0),
+            ("pcv_feather", 0.0),
+            ("pcv_highlights", 100.0),
+            ("grain_roughness", 0.0),
+            ("grain_roughness", 100.0),
+        ];
+        let mut vistos = std::collections::HashSet::new();
+        for (nome, valor) in casos {
+            vistos.insert(*nome);
+            let saida = revelar_e_colher(&mut motor, entrada.clone(), montar(&[(nome, *valor)]));
+            assert!(saida != referencia, "`{nome}` em {valor} não mudou nada");
+        }
+        // A Claridade, que já existia, agora é contraste local: numa foto sem
+        // cor ela tem de mover — a de antes era uma saturação.
+        let cinzas = amostra_sem_cor();
+        let sem = revelar_e_colher(&mut motor, cinzas.clone(), Ajustes::default());
+        let com = revelar_e_colher(
+            &mut motor,
+            cinzas,
+            Ajustes {
+                clarity: 0.8,
+                ..Default::default()
+            },
+        );
+        assert!(com != sem, "a Claridade não mexeu numa foto sem cor");
+
+        let novos = &Ajustes::NOMES[posicao("texture")..];
+        assert_eq!(novos.len(), 22);
+        for nome in novos {
+            assert!(vistos.contains(nome), "`{nome}` ficou sem caso no teste");
+        }
+    }
+
+    /// A amostra em cinzas: as mesmas manchas, sem cor nenhuma.
+    fn amostra_sem_cor() -> Arc<Vec<u8>> {
+        Arc::new(
+            amostra()
+                .chunks(4)
+                .flat_map(|p| {
+                    let y = ((p[0] as u32 + p[1] as u32 + p[2] as u32) / 3) as u8;
+                    [y, y, y, 255]
+                })
+                .collect(),
+        )
+    }
+
     /// 🚨 **Nenhum efeito pode manchar um preto chapado** (dono, 18/set/2026:
     /// *"alguns efeitos estão com o preto manchado de roxo na revelação, de
     /// forma aleatória"* — numa máquina que não é a de desenvolvimento).
@@ -2779,8 +3000,9 @@ mod testes {
     /// indefinido do jeito dela. É por isso que o defeito aparece numa máquina
     /// e não na outra.
     ///
-    /// ⚠️ **Quatro ajustes variam com a posição por construção** e ficam de
-    /// fora: a distorção e a vinheta da lente, a vinheta do darktable e o grão.
+    /// ⚠️ **Cinco ajustes variam com a posição por construção** e ficam de
+    /// fora: a distorção e a vinheta da lente, a vinheta do darktable, a
+    /// vinheta pós-corte e o grão.
     /// Eles são espaciais — manchar o quadro é o trabalho deles.
     #[test]
     fn nenhum_efeito_mancha_um_preto_chapado() {
@@ -2794,6 +3016,7 @@ mod testes {
             nome.starts_with("lens_")
                 || nome.starts_with("grain_")
                 || nome.starts_with("dt_vignette_")
+                || nome.starts_with("pcv_")
         };
 
         let neutro = Ajustes::default().como_vetor();
