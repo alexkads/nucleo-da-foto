@@ -69,6 +69,48 @@ fn curva_da_rampa(img: &RgbImage) -> [f64; 256] {
     c
 }
 
+/// A faixa cinza da rampa, um canal só (0 R, 1 G, 2 B).
+fn canal_da_rampa(img: &RgbImage, canal: usize) -> [f64; 256] {
+    let (w, h) = (img.width() as f64, img.height() as f64);
+    let (y0, y1) = ((0.3 * h / 4.0) as u32, (0.7 * h / 4.0) as u32);
+    let mut c = [0.0; 256];
+    for (i, v) in c.iter_mut().enumerate() {
+        let x0 = ((i as f64 + 0.3) * w / 256.0) as u32;
+        let x1 = (((i as f64 + 0.7) * w / 256.0) as u32).max(x0 + 1);
+        let (mut s, mut n) = (0.0, 0.0);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                s += img.get_pixel(x, y)[canal] as f64;
+                n += 1.0;
+            }
+        }
+        *v = s / n;
+    }
+    c
+}
+
+/// O balanço: para Temperatura e Matiz, de −100 a +100, as três curvas.
+fn balanco(raiz: &Path) -> Vec<[f64; 256]> {
+    let m = casos(&raiz.join("regua-balanco-rampa").join("wb-rampa-cor"));
+    let neutro = abrir(&m["00-neutro"]);
+    let neutros: [[f64; 256]; 3] = std::array::from_fn(|c| canal_da_rampa(&neutro, c));
+    let mut linhas = Vec::new();
+    for chave in ["Temperature", "Tint"] {
+        for passo in 0..21 {
+            let v = -100 + passo * 10;
+            if v == 0 {
+                linhas.extend([identidade(); 3]);
+                continue;
+            }
+            let img = abrir(&m[&format!("{chave}{v:+04}")]);
+            for (c, neutro_c) in neutros.iter().enumerate() {
+                linhas.push(relativa(&canal_da_rampa(&img, c), neutro_c));
+            }
+        }
+    }
+    linhas
+}
+
 /// Sobe sempre, entre 0 e 255.
 fn monotona(c: &mut [f64]) {
     let mut maior = 0.0f64;
@@ -113,7 +155,9 @@ fn tom(raiz: &Path, linhas: &mut Vec<[f64; 256]>) {
     let neutro = curva_da_rampa(&abrir(&m["00-neutro"]));
     let medida = |chave: &str| relativa(&curva_da_rampa(&abrir(&m[chave])), &neutro);
 
-    // Exposição: medida em −2, −1,5, −1, −0,75 … 2; a grade é de 0,25.
+    // Exposição: de −2 a +2 na régua de tom (com ±0,75), e o resto do alcance
+    // do slider — ±2,5, ±3, ±4, ±5 — na régua `casos=exposicao`, na mesma
+    // rampa. A grade é de 0,25, de −5 a +5.
     let medidos = [
         -2.0, -1.5, -1.0, -0.75, -0.5, -0.25, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0,
     ];
@@ -121,10 +165,16 @@ fn tom(raiz: &Path, linhas: &mut Vec<[f64; 256]>) {
         .iter()
         .map(|ev| (*ev, medida(&format!("tom-Exposure2012{ev:+.2}"))))
         .collect();
+    let m_exp = casos(&raiz.join("regua-exposicao").join("rampa-cor"));
+    let neutro_exp = curva_da_rampa(&abrir(&m_exp["00-neutro"]));
+    for ev in [-5.0, -4.0, -3.0, -2.5, 2.5, 3.0, 4.0, 5.0] {
+        let caso = curva_da_rampa(&abrir(&m_exp[&format!("exposicao{ev:+.2}")]));
+        por_ev.push((ev, relativa(&caso, &neutro_exp)));
+    }
     por_ev.push((0.0, identidade()));
     por_ev.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     for i in 0..LINHAS_DE_EXPOSICAO {
-        let ev = -2.0 + i as f64 * 0.25;
+        let ev = -5.0 + i as f64 * 0.25;
         let j = por_ev.iter().position(|(e, _)| *e >= ev - 1e-9).unwrap();
         let curva = if (por_ev[j].0 - ev).abs() < 1e-9 {
             por_ev[j].1
@@ -291,6 +341,8 @@ fn main() {
     linhas.extend(forca(raiz, 3));
     assert_eq!(linhas.len() as u32, LINHA_MASCARA);
     linhas.extend(mascara(raiz, &forca1));
+    assert_eq!(linhas.len() as u32, LINHA_TEMPERATURA);
+    linhas.extend(balanco(raiz));
     assert_eq!(linhas.len() as u32, ALTURA);
 
     let bytes: Vec<u8> = linhas
@@ -318,10 +370,18 @@ fn main() {
                 .join(" ")
         );
     };
-    mostrar("exposição −1", LINHA_EXPOSICAO + 4);
+    mostrar("exposição −1", LINHA_EXPOSICAO + 16);
+    mostrar("exposição +4", LINHA_EXPOSICAO + 36);
     mostrar("contraste −57 ≈ −60", LINHA_CONTRASTE + 4);
     mostrar("pretos −100", LINHA_PRETOS);
     mostrar("vinheta −60, estilo 1", LINHA_VINHETA + 4);
     mostrar("vinheta −60, estilo 3", LINHA_SOBREPOSICAO + 4);
     mostrar("máscara m50 f50 (d×5,7)", LINHA_MASCARA + 4 * 9 + 4);
+    // Temperatura +30 (passo 13): R, G, B
+    for (c, rotulo) in ["R", "G", "B"].iter().enumerate() {
+        mostrar(
+            &format!("temperatura +30, {rotulo}"),
+            LINHA_TEMPERATURA + 13 * 3 + c as u32,
+        );
+    }
 }

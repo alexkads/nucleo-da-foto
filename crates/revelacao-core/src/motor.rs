@@ -3213,6 +3213,31 @@ mod testes {
         );
     }
 
+    /// 🚨 **O balanço do Lightroom esquenta subindo o vermelho e o verde**
+    /// (régua de 1/out/2026, cinza 128 num JPEG): Temperatura +30 dá 176/156/123.
+    /// O de antes, `r += t·10; b −= t·10`, dava 158/129/99 — trocava vermelho
+    /// por azul e escurecia a foto.
+    #[test]
+    fn o_balanco_do_processo_1_e_o_do_lightroom() {
+        let mut motor = motor_pronto();
+        let saida = revelar_e_colher(
+            &mut motor,
+            cinza(16, 128),
+            Ajustes {
+                temperature: 3.0,
+                processo: 1.0,
+                ..Default::default()
+            },
+        );
+        let (r, g, b) = (saida[0] as i32, saida[1] as i32, saida[2] as i32);
+        for (rotulo, valor, lr) in [("R", r, 176), ("G", g, 156), ("B", b, 123)] {
+            assert!(
+                (valor - lr).abs() <= 4,
+                "{rotulo} foi a {valor} (o Lightroom: {lr})"
+            );
+        }
+    }
+
     /// A amostra em cinzas: as mesmas manchas, sem cor nenhuma.
     fn amostra_sem_cor() -> Arc<Vec<u8>> {
         Arc::new(

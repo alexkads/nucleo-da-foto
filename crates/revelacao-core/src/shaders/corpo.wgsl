@@ -297,22 +297,42 @@ struct DadosDaGuia {
 @group(0) @binding(9) var guia: texture_2d<f32>;
 @group(0) @binding(10) var<uniform> dados_da_guia: DadosDaGuia;
 
-// As tabelas medidas no Lightroom (`lightroom.rs`): `R32Float`, 256 × 245, uma
+// As tabelas medidas no Lightroom (`lightroom.rs`): `R32Float`, 256 × 269, uma
 // curva por linha. Só o processo 1 as lê.
 @group(0) @binding(11) var tabelas_lr: texture_2d<f32>;
 
 // O desenho das linhas — a mesma conta de `lightroom.rs`, presa por
 // `o_wgsl_usa_o_mesmo_desenho_das_tabelas`.
 const LR_LINHA_EXPOSICAO: i32 = 0;
-const LR_LINHA_CONTRASTE: i32 = 17;
-const LR_LINHA_REALCES: i32 = 38;
-const LR_LINHA_SOMBRAS: i32 = 59;
-const LR_LINHA_BRANCOS: i32 = 80;
-const LR_LINHA_PRETOS: i32 = 101;
-const LR_LINHA_VINHETA: i32 = 122;
-const LR_LINHA_SOBREPOSICAO: i32 = 143;
-const LR_LINHA_MASCARA: i32 = 164;
+const LR_LINHA_CONTRASTE: i32 = 41;
+const LR_LINHA_REALCES: i32 = 62;
+const LR_LINHA_SOMBRAS: i32 = 83;
+const LR_LINHA_BRANCOS: i32 = 104;
+const LR_LINHA_PRETOS: i32 = 125;
+const LR_LINHA_VINHETA: i32 = 146;
+const LR_LINHA_SOBREPOSICAO: i32 = 167;
+const LR_LINHA_MASCARA: i32 = 188;
 const LR_DISTANCIA_MAXIMA: f32 = 1.45;
+const LR_LINHA_TEMPERATURA: i32 = 269;
+const LR_LINHA_MATIZ: i32 = 332;
+
+/// O balanço de um valor de −100 a +100 (21 passos, três curvas cada: a
+/// linha `primeira + passo·3 + canal`), canal a canal.
+fn lr_balanco(primeira: i32, valor: f32, cor: vec3<f32>) -> vec3<f32> {
+    let p = clamp((valor + 100.0) / 10.0, 0.0, 20.0);
+    let i = min(i32(floor(p)), 19);
+    let t = p - f32(i);
+    let a = primeira + i * 3;
+    let b = a + 3;
+    return vec3<f32>(
+        mix(lr_curva(a, cor.r), lr_curva(b, cor.r), t),
+        mix(lr_curva(a + 1, cor.g), lr_curva(b + 1, cor.g), t),
+        mix(lr_curva(a + 2, cor.b), lr_curva(b + 2, cor.b), t),
+    );
+}
+// A fração da curva da rampa que Realces e Sombras aplicam numa foto — ver o
+// bloco do processo 1 no tom.
+const LR_FORCA_LOCAL: f32 = 0.5;
 
 /// A linha `linha` da tabela em `x` (0–255), linear entre as colunas.
 fn lr_curva(linha: i32, x: f32) -> f32 {
@@ -975,15 +995,35 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         g -= t;
     }
 
+    // 0. O balanço de branco do processo 1 — **antes** da Exposição, como no
+    // Lightroom. Uma curva por canal para cada valor, medida na rampa: o ganho
+    // cai para o branco (Temperatura +30 leva o cinza 128 a 177/156/123; a
+    // conta de antes, a 158/129/99, trocava vermelho por azul). Os campos
+    // continuam na escala de antes (−10 a 10); a tabela é por valor do slider.
+    if (params.processo >= 0.5 && (params.temperature != 0.0 || params.tint != 0.0)) {
+        var cor = vec3<f32>(r, g, b);
+        if (params.temperature != 0.0) {
+            cor = lr_balanco(LR_LINHA_TEMPERATURA, params.temperature * 10.0, cor);
+        }
+        if (params.tint != 0.0) {
+            cor = lr_balanco(LR_LINHA_MATIZ, params.tint * 10.0, cor);
+        }
+        r = cor.r;
+        g = cor.g;
+        b = cor.b;
+    }
+
     if (params.exposure != 0.0) {
         if (params.processo >= 0.5) {
             // 🔑 A do Lightroom guarda o branco: −1 EV leva 128 a 83 e 255
             // continua 255; +1 leva 128 a 181 com ombro até o branco, em vez
-            // de estourar tudo acima do meio. Medida de −2 a +2 EV.
-            let pos = (clamp(params.exposure, -2.0, 2.0) + 2.0) / 0.25;
-            r = lr_slider(LR_LINHA_EXPOSICAO, 17, pos, r);
-            g = lr_slider(LR_LINHA_EXPOSICAO, 17, pos, g);
-            b = lr_slider(LR_LINHA_EXPOSICAO, 17, pos, b);
+            // de estourar tudo acima do meio. Medida de −5 a +5 EV, o alcance
+            // inteiro do slider: até 1/out a tabela parava em ±2, e dali em
+            // diante a foto não mudava mais (o "comportamento esquisito").
+            let pos = (clamp(params.exposure, -5.0, 5.0) + 5.0) / 0.25;
+            r = lr_slider(LR_LINHA_EXPOSICAO, 41, pos, r);
+            g = lr_slider(LR_LINHA_EXPOSICAO, 41, pos, g);
+            b = lr_slider(LR_LINHA_EXPOSICAO, 41, pos, b);
         } else {
             let factor = pow(2.0, params.exposure);
             r *= factor;
@@ -1048,14 +1088,15 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
     }
     
-    // 3. Temperature (warm/cool balance)
-    if (params.temperature != 0.0) {
+    // 3. Temperature (warm/cool balance) — no processo 1 o balanço já entrou,
+    // antes da Exposição (passo 0).
+    if (params.temperature != 0.0 && params.processo < 0.5) {
         r += params.temperature * 10.0;
         b -= params.temperature * 10.0;
     }
     
     // 4. Tint (green/magenta balance)
-    if (params.tint != 0.0) {
+    if (params.tint != 0.0 && params.processo < 0.5) {
         if (params.tint > 0.0) {
             r += params.tint * 5.0;
             b += params.tint * 5.0;
@@ -1106,17 +1147,39 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         // melhor — e os dois guardam o preto e o branco: Pretos +50 não
         // levanta mais o 0 para 14.
         if (params.highlights != 0.0 || params.shadows != 0.0) {
-            let l = clamp(luminancia(vec3<f32>(r, g, b)), 0.0, 255.0);
-            var n = l;
+            // 🔑 **Locais, como no Lightroom.** A curva medida na rampa vale
+            // para uma área lisa; numa foto, aplicada pixel a pixel, ela achata
+            // o detalhe e passa do ponto (Realces −100 escurecia o alto 39
+            // níveis além do Lightroom). A curva age na **base** — a luminância
+            // de agora menos o detalhe, que é medido na foto de entrada contra
+            // a guia larga, como na Claridade — e o ganho da base vai ao
+            // pixel. Numa área lisa a base é o próprio pixel, e o resultado é o
+            // da régua.
+            let l = clamp((r + g + b) / 3.0, 0.0, 255.0);
+            var base = l;
+            if (dados_da_guia.dados.y > 0.5) {
+                let gu = ler_guia(origem, dims);
+                let l0 = (pixel.r + pixel.g + pixel.b) / 3.0;
+                base = clamp(l - (l0 - gu.r) * 255.0, 0.0, 255.0);
+            }
+            // ⚠️ **A força numa foto é ~1/3 a 1/2 da da rampa.** Na rampa (áreas
+            // lisas enormes) o Lightroom aplica o efeito local inteiro; numa
+            // foto de verdade ele age bem menos — um filtro que respeita borda,
+            // que o desfoque gaussiano da guia não imita. Varrido com o
+            // comparar_em_lote (1/out): força 0,35 / 0,5 / 1,0 dá 6,3 / 6,6 /
+            // 9,0 nas fotos e 7,1 / 5,5 / 3,3 na rampa; nos 28 presets em 8
+            // fotos, 15,1 / 15,2 / — (o processo 0 dá 24,4). O raio da base
+            // (1,2 % a 15 % do lado) quase não muda nada.
+            var n = base;
             if (params.highlights != 0.0) {
-                n = lr_slider(LR_LINHA_REALCES, 21, (params.highlights + 100.0) / 10.0, n);
+                n = lr_slider(LR_LINHA_REALCES, 21, (params.highlights * LR_FORCA_LOCAL + 100.0) / 10.0, n);
             }
             if (params.shadows != 0.0) {
-                n = lr_slider(LR_LINHA_SOMBRAS, 21, (params.shadows + 100.0) / 10.0, n);
+                n = lr_slider(LR_LINHA_SOMBRAS, 21, (params.shadows * LR_FORCA_LOCAL + 100.0) / 10.0, n);
             }
-            let delta = n - l;
-            let escala = n / max(l, 0.01);
-            let mistura = smoothstep(0.0, 12.0, l);
+            let delta = n - base;
+            let escala = n / max(base, 0.01);
+            let mistura = smoothstep(0.0, 12.0, base);
             r = mix(r + delta, r * escala, mistura);
             g = mix(g + delta, g * escala, mistura);
             b = mix(b + delta, b * escala, mistura);

@@ -18,15 +18,16 @@
 //!
 //! # O desenho
 //!
-//! Uma textura `R32Float` de [`LARGURA`] × [`ALTURA`]. Cada linha é uma curva de
+//! Uma textura `R32Float` de [`LARGURA`] × [`ALTURA`] (256 × 395). Cada linha é uma curva de
 //! 256 pontos:
 //!
 //! | linhas | o quê | a coluna é |
 //! |---|---|---|
-//! | [`LINHA_EXPOSICAO`] + 0..17 | Exposição de −2 a +2 EV, de 0,25 em 0,25 | o valor de entrada (0–255) |
+//! | [`LINHA_EXPOSICAO`] + 0..41 | Exposição de −5 a +5 EV, de 0,25 em 0,25 | o valor de entrada (0–255) |
 //! | [`LINHA_CONTRASTE`] … [`LINHA_PRETOS`] + 0..21 | cada slider de −100 a +100, de 10 em 10 | o valor de entrada |
 //! | [`LINHA_VINHETA`] + 0..21 | a vinheta nos estilos 1 e 2, de −100 a +100 | o valor de entrada |
 //! | [`LINHA_SOBREPOSICAO`] + 0..21 | a vinheta no estilo 3 (sobreposição) | o valor de entrada |
+//! | [`LINHA_TEMPERATURA`], [`LINHA_MATIZ`] + 0..63 | o balanço: 21 valores × R, G, B (`passo·3 + canal`) | o valor de entrada do canal |
 //! | [`LINHA_MASCARA`] + 0..81 | a máscara da vinheta, ponto médio × difusão (9 × 9, de 12,5 em 12,5) | a distância elíptica, de 0 a [`DISTANCIA_MAXIMA`] |
 //!
 //! O valor 0 de cada slider é a identidade, exata. O WGSL repete estas
@@ -35,22 +36,27 @@
 
 /// Pontos por curva.
 pub const LARGURA: u32 = 256;
-/// Exposição: 17 linhas, de −2 a +2 EV.
+/// Exposição: 41 linhas, de −5 a +5 EV — o alcance inteiro do slider.
 pub const LINHA_EXPOSICAO: u32 = 0;
-pub const LINHAS_DE_EXPOSICAO: u32 = 17;
+pub const LINHAS_DE_EXPOSICAO: u32 = 41;
 /// Os cinco sliders de −100 a +100: 21 linhas cada.
-pub const LINHA_CONTRASTE: u32 = 17;
-pub const LINHA_REALCES: u32 = 38;
-pub const LINHA_SOMBRAS: u32 = 59;
-pub const LINHA_BRANCOS: u32 = 80;
-pub const LINHA_PRETOS: u32 = 101;
+pub const LINHA_CONTRASTE: u32 = 41;
+pub const LINHA_REALCES: u32 = 62;
+pub const LINHA_SOMBRAS: u32 = 83;
+pub const LINHA_BRANCOS: u32 = 104;
+pub const LINHA_PRETOS: u32 = 125;
 /// A força da vinheta: estilos 1 e 2 (iguais no Lightroom, até em cor) e o 3.
-pub const LINHA_VINHETA: u32 = 122;
-pub const LINHA_SOBREPOSICAO: u32 = 143;
+pub const LINHA_VINHETA: u32 = 146;
+pub const LINHA_SOBREPOSICAO: u32 = 167;
 /// A máscara: 9 pontos médios × 9 difusões.
-pub const LINHA_MASCARA: u32 = 164;
+pub const LINHA_MASCARA: u32 = 188;
 pub const PASSOS_DA_MASCARA: u32 = 9;
-pub const ALTURA: u32 = 245;
+/// O balanço de branco de um JPEG: Temperatura e Matiz de −100 a +100, de 10
+/// em 10, **três curvas por valor** (R, G, B — o ganho de cada canal cai para
+/// o branco, que o Lightroom preserva).
+pub const LINHA_TEMPERATURA: u32 = 269;
+pub const LINHA_MATIZ: u32 = 332;
+pub const ALTURA: u32 = 395;
 /// A distância elíptica da última coluna da máscara: além do canto (√2).
 pub const DISTANCIA_MAXIMA: f32 = 1.45;
 
@@ -78,7 +84,7 @@ mod testes {
         let t = tabelas();
         let linha = |l: u32| &t[(l * LARGURA) as usize..((l + 1) * LARGURA) as usize];
         for (rotulo, l) in [
-            ("exposição", LINHA_EXPOSICAO + 8),
+            ("exposição", LINHA_EXPOSICAO + 20),
             ("contraste", LINHA_CONTRASTE + 10),
             ("realces", LINHA_REALCES + 10),
             ("sombras", LINHA_SOMBRAS + 10),
@@ -86,6 +92,12 @@ mod testes {
             ("pretos", LINHA_PRETOS + 10),
             ("vinheta", LINHA_VINHETA + 10),
             ("sobreposição", LINHA_SOBREPOSICAO + 10),
+            ("temperatura R", LINHA_TEMPERATURA + 30),
+            ("temperatura G", LINHA_TEMPERATURA + 31),
+            ("temperatura B", LINHA_TEMPERATURA + 32),
+            ("matiz R", LINHA_MATIZ + 30),
+            ("matiz G", LINHA_MATIZ + 31),
+            ("matiz B", LINHA_MATIZ + 32),
         ] {
             for (i, v) in linha(l).iter().enumerate() {
                 assert_eq!(
@@ -117,7 +129,7 @@ mod testes {
     #[test]
     fn as_curvas_de_tom_nunca_descem() {
         let t = tabelas();
-        for l in LINHA_EXPOSICAO..LINHA_VINHETA {
+        for l in (LINHA_EXPOSICAO..LINHA_VINHETA).chain(LINHA_TEMPERATURA..ALTURA) {
             let c = &t[(l * LARGURA) as usize..((l + 1) * LARGURA) as usize];
             for i in 1..256 {
                 assert!(
@@ -159,6 +171,8 @@ mod testes {
             ("LR_LINHA_VINHETA", LINHA_VINHETA),
             ("LR_LINHA_SOBREPOSICAO", LINHA_SOBREPOSICAO),
             ("LR_LINHA_MASCARA", LINHA_MASCARA),
+            ("LR_LINHA_TEMPERATURA", LINHA_TEMPERATURA),
+            ("LR_LINHA_MATIZ", LINHA_MATIZ),
         ] {
             assert_eq!(
                 constante(nome),
@@ -173,7 +187,7 @@ mod testes {
     #[test]
     fn a_mascara_vai_de_zero_a_um() {
         let t = tabelas();
-        for l in LINHA_MASCARA..ALTURA {
+        for l in LINHA_MASCARA..LINHA_TEMPERATURA {
             let c = &t[(l * LARGURA) as usize..((l + 1) * LARGURA) as usize];
             assert!(c[0] < 0.02, "máscara {l}: o centro já tem {}", c[0]);
             assert!(

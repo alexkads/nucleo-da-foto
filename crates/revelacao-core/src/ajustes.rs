@@ -754,7 +754,11 @@ impl Ajustes {
     /// Claridade, Textura ou Remover névoa — os três que leem a guia
     /// (`guia.rs`), a vizinhança larga que o shader sozinho não alcança.
     pub fn usa_a_guia(&self) -> bool {
-        self.clarity != 0.0 || self.texture != 0.0 || self.dehaze != 0.0
+        self.clarity != 0.0
+            || self.texture != 0.0
+            || self.dehaze != 0.0
+            // No processo 1, Realces e Sombras são locais: agem na base.
+            || (self.processo >= 0.5 && (self.highlights != 0.0 || self.shadows != 0.0))
     }
 
     /// Alguma das três vinhetas está ligada — a de lente, a pós-corte ou a do
