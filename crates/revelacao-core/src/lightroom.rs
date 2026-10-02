@@ -18,7 +18,7 @@
 //!
 //! # O desenho
 //!
-//! Uma textura `R32Float` de [`LARGURA`] × [`ALTURA`] (256 × 395). Cada linha é uma curva de
+//! Uma textura `R32Float` de [`LARGURA`] × [`ALTURA`] (256 × 479). Cada linha é uma curva de
 //! 256 pontos:
 //!
 //! | linhas | o quê | a coluna é |
@@ -28,6 +28,8 @@
 //! | [`LINHA_VINHETA`] + 0..21 | a vinheta nos estilos 1 e 2, de −100 a +100 | o valor de entrada |
 //! | [`LINHA_SOBREPOSICAO`] + 0..21 | a vinheta no estilo 3 (sobreposição) | o valor de entrada |
 //! | [`LINHA_TEMPERATURA`], [`LINHA_MATIZ`] + 0..63 | o balanço: 21 valores × R, G, B (`passo·3 + canal`) | o valor de entrada do canal |
+//! | [`LINHA_SATURACAO`], [`LINHA_VIBRACAO`] + 0..21 | o fator de croma, 24 matizes × 6 saturações (`matiz·6 + saturação`) | — |
+//! | [`LINHA_SATURACAO_L`], [`LINHA_VIBRACAO_L`] + 0..21 | o ΔL* que vem junto, nas mesmas colunas | — |
 //! | [`LINHA_MASCARA`] + 0..81 | a máscara da vinheta, ponto médio × difusão (9 × 9, de 12,5 em 12,5) | a distância elíptica, de 0 a [`DISTANCIA_MAXIMA`] |
 //!
 //! O valor 0 de cada slider é a identidade, exata. O WGSL repete estas
@@ -56,7 +58,17 @@ pub const PASSOS_DA_MASCARA: u32 = 9;
 /// o branco, que o Lightroom preserva).
 pub const LINHA_TEMPERATURA: u32 = 269;
 pub const LINHA_MATIZ: u32 = 332;
-pub const ALTURA: u32 = 395;
+/// Saturação e Vibração de −100 a +100 (21 linhas cada): o **fator de croma**
+/// em Lab de cada matiz × saturação de entrada — 24 matizes de 15° × 6
+/// saturações HSV (0,1 0,25 0,4 0,55 0,75 1), na coluna `matiz·6 + saturação`.
+/// Medido na carta de cores (`casos=cor`); o zero é 1 em tudo.
+pub const LINHA_SATURACAO: u32 = 395;
+pub const LINHA_VIBRACAO: u32 = 416;
+/// O ΔL* de cada matiz × saturação, nos mesmos valores e colunas: o Lightroom
+/// não guarda o L* ao tirar ou pôr cor. O zero é 0 em tudo.
+pub const LINHA_SATURACAO_L: u32 = 437;
+pub const LINHA_VIBRACAO_L: u32 = 458;
+pub const ALTURA: u32 = 479;
 /// A distância elíptica da última coluna da máscara: além do canto (√2).
 pub const DISTANCIA_MAXIMA: f32 = 1.45;
 
@@ -129,7 +141,7 @@ mod testes {
     #[test]
     fn as_curvas_de_tom_nunca_descem() {
         let t = tabelas();
-        for l in (LINHA_EXPOSICAO..LINHA_VINHETA).chain(LINHA_TEMPERATURA..ALTURA) {
+        for l in (LINHA_EXPOSICAO..LINHA_VINHETA).chain(LINHA_TEMPERATURA..LINHA_SATURACAO) {
             let c = &t[(l * LARGURA) as usize..((l + 1) * LARGURA) as usize];
             for i in 1..256 {
                 assert!(
@@ -173,6 +185,10 @@ mod testes {
             ("LR_LINHA_MASCARA", LINHA_MASCARA),
             ("LR_LINHA_TEMPERATURA", LINHA_TEMPERATURA),
             ("LR_LINHA_MATIZ", LINHA_MATIZ),
+            ("LR_LINHA_SATURACAO", LINHA_SATURACAO),
+            ("LR_LINHA_VIBRACAO", LINHA_VIBRACAO),
+            ("LR_LINHA_SATURACAO_L", LINHA_SATURACAO_L),
+            ("LR_LINHA_VIBRACAO_L", LINHA_VIBRACAO_L),
         ] {
             assert_eq!(
                 constante(nome),
@@ -197,6 +213,22 @@ mod testes {
             );
             for i in 1..256 {
                 assert!(c[i] + 1e-4 >= c[i - 1], "máscara {l}: desce em {i}");
+            }
+        }
+    }
+    /// O zero da Saturação e da Vibração é fator 1 em toda cor: no processo 1
+    /// com os dois no neutro, o croma não muda.
+    #[test]
+    fn o_zero_da_cor_e_fator_um() {
+        let t = tabelas();
+        for l in [LINHA_SATURACAO + 10, LINHA_VIBRACAO + 10] {
+            for i in 0..144 {
+                assert_eq!(t[(l * LARGURA) as usize + i], 1.0, "linha {l}, coluna {i}");
+            }
+        }
+        for l in [LINHA_SATURACAO_L + 10, LINHA_VIBRACAO_L + 10] {
+            for i in 0..144 {
+                assert_eq!(t[(l * LARGURA) as usize + i], 0.0, "linha {l}, coluna {i}");
             }
         }
     }

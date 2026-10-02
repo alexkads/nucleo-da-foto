@@ -3238,6 +3238,35 @@ mod testes {
         }
     }
 
+    /// A Vibração −100 do processo 1 tira cor sem trocar de matiz: o laranja
+    /// continua laranja, só mais apagado — o de antes (`1 + v·2`, só nas cores
+    /// apagadas) passava do cinza e invertia a cor. E o cinza fica cinza.
+    #[test]
+    fn a_vibracao_do_processo_1_apaga_sem_inverter() {
+        let mut motor = motor_pronto();
+        let cor = |rgb: [u8; 3]| -> Arc<Vec<u8>> {
+            Arc::new(
+                std::iter::repeat_n([rgb[0], rgb[1], rgb[2], 255], 256)
+                    .flatten()
+                    .collect(),
+            )
+        };
+        let vibracao = Ajustes {
+            vibrance: -1.0,
+            processo: 1.0,
+            ..Default::default()
+        };
+        let s = revelar_e_colher(&mut motor, cor([200, 120, 60]), vibracao);
+        let (r, g, b) = (s[0] as i32, s[1] as i32, s[2] as i32);
+        assert!(r > g && g > b, "o laranja virou {r}/{g}/{b}");
+        assert!(r - b < 140 - 30, "o laranja não apagou: {r}/{g}/{b}");
+
+        let s = revelar_e_colher(&mut motor, cinza(16, 128), vibracao);
+        for c in &s[..3] {
+            assert!((*c as i32 - 128).abs() <= 1, "o cinza mudou: {:?}", &s[..3]);
+        }
+    }
+
     /// A amostra em cinzas: as mesmas manchas, sem cor nenhuma.
     fn amostra_sem_cor() -> Arc<Vec<u8>> {
         Arc::new(

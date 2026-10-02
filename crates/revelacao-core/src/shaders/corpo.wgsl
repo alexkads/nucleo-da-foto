@@ -315,6 +315,57 @@ const LR_LINHA_MASCARA: i32 = 188;
 const LR_DISTANCIA_MAXIMA: f32 = 1.45;
 const LR_LINHA_TEMPERATURA: i32 = 269;
 const LR_LINHA_MATIZ: i32 = 332;
+const LR_LINHA_SATURACAO: i32 = 395;
+const LR_LINHA_VIBRACAO: i32 = 416;
+const LR_LINHA_SATURACAO_L: i32 = 437;
+const LR_LINHA_VIBRACAO_L: i32 = 458;
+
+/// Um ponto da tabela de croma: a linha, o matiz (0–23, dá a volta) e a
+/// saturação (0–5).
+fn lr_croma_em(linha: i32, matiz: i32, sat: i32) -> f32 {
+    return textureLoad(tabelas_lr, vec2<i32>(((matiz % 24) + 24) % 24 * 6 + sat, linha), 0).r;
+}
+
+/// O fator de croma de uma cor (matiz em graus, saturação HSV 0–1) para um
+/// valor de −100 a +100 de Saturação ou Vibração (`primeira` é a linha do −100):
+/// interpolado entre os valores, entre os matizes de 15° e entre as seis
+/// saturações medidas na carta (0,1 0,25 0,4 0,55 0,75 1).
+fn lr_fator_de_croma(primeira: i32, valor: f32, matiz: f32, sat: f32) -> f32 {
+    let p = clamp((valor + 100.0) / 10.0, 0.0, 20.0);
+    let iv = min(i32(floor(p)), 19);
+    let tv = p - f32(iv);
+    let h = matiz / 15.0;
+    let ih = i32(floor(h));
+    let th = h - f32(ih);
+    // A saturação, nos seis pontos da carta (abaixo de 0,1, o de 0,1).
+    let s = clamp(sat, 0.1, 1.0);
+    var is_ = 0;
+    var ts = 0.0;
+    if (s < 0.25) {
+        is_ = 0; ts = (s - 0.1) / 0.15;
+    } else if (s < 0.4) {
+        is_ = 1; ts = (s - 0.25) / 0.15;
+    } else if (s < 0.55) {
+        is_ = 2; ts = (s - 0.4) / 0.15;
+    } else if (s < 0.75) {
+        is_ = 3; ts = (s - 0.55) / 0.2;
+    } else {
+        is_ = 4; ts = (s - 0.75) / 0.25;
+    }
+    let l0 = primeira + iv;
+    let l1 = l0 + 1;
+    let f0 = mix(
+        mix(lr_croma_em(l0, ih, is_), lr_croma_em(l0, ih, is_ + 1), ts),
+        mix(lr_croma_em(l0, ih + 1, is_), lr_croma_em(l0, ih + 1, is_ + 1), ts),
+        th,
+    );
+    let f1 = mix(
+        mix(lr_croma_em(l1, ih, is_), lr_croma_em(l1, ih, is_ + 1), ts),
+        mix(lr_croma_em(l1, ih + 1, is_), lr_croma_em(l1, ih + 1, is_ + 1), ts),
+        th,
+    );
+    return mix(f0, f1, tv);
+}
 
 /// O balanço de um valor de −100 a +100 (21 passos, três curvas cada: a
 /// linha `primeira + passo·3 + canal`), canal a canal.
@@ -1057,7 +1108,15 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     if (params.dehaze != 0.0) {
         let gu = ler_guia(origem, dims);
         let ceu = dados_da_guia.dados.x;
-        let forca = clamp(params.dehaze * 0.01, -1.0, 1.0);
+        // No processo 1, a força que a varredura achou contra o Lightroom
+        // (régua `nevoa`, 6 fotos, lidas em Adobe RGB, 1/out): 0,75 no
+        // positivo (+100: ΔE 4,1; 0,9 já dá 4,2) e 0,6 no negativo (−100:
+        // 8,3 → 7,9; −50: 4,5 → 4,2). A forma do negativo ainda difere: o
+        // Lightroom mira uma névoa mais clara que a nossa luz do céu e poupa o
+        // preto profundo (é por profundidade); com o escuro certo, o nosso
+        // claro sai ~20 abaixo. O estúdio só usa de −12 a −17.
+        let escala_lr = select(1.0, select(0.75, 0.6, params.dehaze < 0.0), params.processo >= 0.5);
+        let forca = clamp(params.dehaze * 0.01 * escala_lr, -1.0, 1.0);
         var cor = vec3<f32>(r, g, b) / 255.0;
         if (forca > 0.0) {
             let t = max(1.0 - 0.9 * forca * gu.b / max(ceu, 0.05), 0.25);
@@ -1253,8 +1312,58 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     // todo preset P&B importado do Lightroom.
     let em_pb = params.bw_ativo != 0.0;
 
+    // 9-10, processo 1: Saturação e Vibração **medidas no Lightroom**, numa
+    // carta de cores (24 matizes × 6 saturações). O croma em Lab é multiplicado
+    // por um fator de cada matiz × saturação de entrada, e o L* fica: a
+    // Vibração de antes (`1 + v·2`) zerava a cor em −50 e a **invertia** em
+    // −100 (fator −1), e só agia abaixo de um corte seco. A do Lightroom tira
+    // mais das cores apagadas no negativo, realça as apagadas no positivo e
+    // protege os vermelhos (a pele).
+    if (params.processo >= 0.5 && !em_pb && (params.saturation != 0.0 || params.vibrance != 0.0)) {
+        let cor = clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(255.0));
+        let maior = max(max(cor.r, cor.g), cor.b);
+        let menor = min(min(cor.r, cor.g), cor.b);
+        let sat = select(0.0, (maior - menor) / maior, maior > 0.5);
+        if (sat > 0.001) {
+            // O matiz HSV, em graus.
+            var h = 0.0;
+            let d = maior - menor;
+            if (maior == cor.r) {
+                h = 60.0 * (((cor.g - cor.b) / d) % 6.0);
+            } else if (maior == cor.g) {
+                h = 60.0 * ((cor.b - cor.r) / d + 2.0);
+            } else {
+                h = 60.0 * ((cor.r - cor.g) / d + 4.0);
+            }
+            if (h < 0.0) {
+                h += 360.0;
+            }
+            // O ΔL* medido vem junto com o croma; abaixo da menor saturação da
+            // carta (0,1) ele cai a zero com ela, para o cinza não mudar de claro.
+            var fator = 1.0;
+            var claro = 0.0;
+            if (params.saturation != 0.0) {
+                let v = params.saturation * 100.0;
+                fator *= lr_fator_de_croma(LR_LINHA_SATURACAO, v, h, sat);
+                claro += lr_fator_de_croma(LR_LINHA_SATURACAO_L, v, h, sat);
+            }
+            if (params.vibrance != 0.0) {
+                let v = params.vibrance * 100.0;
+                fator *= lr_fator_de_croma(LR_LINHA_VIBRACAO, v, h, sat);
+                claro += lr_fator_de_croma(LR_LINHA_VIBRACAO_L, v, h, sat);
+            }
+            var lab = para_lab(cor);
+            claro *= min(sat / 0.1, 1.0);
+            lab = vec3<f32>(clamp(lab.x + claro, 0.0, 100.0), lab.y * fator, lab.z * fator);
+            let nova = de_lab(lab);
+            r = nova.r;
+            g = nova.g;
+            b = nova.b;
+        }
+    }
+
     // 9. Saturation (overall color intensity)
-    if (params.saturation != 0.0 && !em_pb) {
+    if (params.saturation != 0.0 && !em_pb && params.processo < 0.5) {
         let factor = 1.0 + params.saturation;
         r = lum2 + (r - lum2) * factor;
         g = lum2 + (g - lum2) * factor;
@@ -1262,7 +1371,7 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     }
     
     // 10. Vibrance (intelligent saturation - affects muted colors more)
-    if (params.vibrance != 0.0 && !em_pb) {
+    if (params.vibrance != 0.0 && !em_pb && params.processo < 0.5) {
         let max_diff = max(max(abs(r - lum2), abs(g - lum2)), abs(b - lum2));
         if (max_diff < 64.0) {
             let factor = 1.0 + params.vibrance * 2.0;

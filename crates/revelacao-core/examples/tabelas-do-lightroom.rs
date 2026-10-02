@@ -111,6 +111,83 @@ fn balanco(raiz: &Path) -> Vec<[f64; 256]> {
     linhas
 }
 
+/// O Lab (D65) da média do miolo de uma mancha da carta de cores (24 × 18).
+fn lab_da_mancha(img: &RgbImage, i: u32, j: u32) -> [f64; 3] {
+    let (pw, ph) = (img.width() as f64 / 24.0, img.height() as f64 / 18.0);
+    let (cx, cy) = (
+        ((i as f64 + 0.5) * pw) as u32,
+        ((j as f64 + 0.5) * ph) as u32,
+    );
+    let mut s = [0.0f64; 3];
+    for y in cy - 8..cy + 8 {
+        for x in cx - 8..cx + 8 {
+            let p = img.get_pixel(x, y);
+            for c in 0..3 {
+                s[c] += p[c] as f64 / 256.0;
+            }
+        }
+    }
+    let lin = s.map(|v| {
+        let v = v / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    let f = |t: f64| {
+        if t > 0.008856 {
+            t.cbrt()
+        } else {
+            7.787 * t + 16.0 / 116.0
+        }
+    };
+    let fx = f((0.4124 * lin[0] + 0.3576 * lin[1] + 0.1805 * lin[2]) / 0.95047);
+    let fy = f(0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]);
+    let fz = f((0.0193 * lin[0] + 0.1192 * lin[1] + 0.9505 * lin[2]) / 1.08883);
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// Saturação e Vibração: para cada valor, o fator de croma de cada matiz × saturação
+/// de entrada (a média das três luminosidades da carta), na coluna `matiz·6 + sat`;
+/// depois, nas mesmas colunas, o ΔL* que vem junto.
+fn cor(raiz: &Path) -> Vec<[f64; 256]> {
+    let m = casos(&raiz.join("regua-cor").join("carta-cor"));
+    let neutro = abrir(&m["00-neutro"]);
+    let (mut fatores, mut claros) = (Vec::new(), Vec::new());
+    for chave in ["Saturation", "Vibrance"] {
+        for passo in 0..21 {
+            let v = -100 + passo * 10;
+            let (mut fator, mut claro) = ([0.0f64; 256], [0.0f64; 256]);
+            if v == 0 {
+                fator[..144].fill(1.0);
+                fatores.push(fator);
+                claros.push(claro);
+                continue;
+            }
+            let img = abrir(&m[&format!("{chave}{v:+04}")]);
+            for i in 0..24u32 {
+                for si in 0..6u32 {
+                    let (mut cin, mut cout, mut dl) = (0.0, 0.0, 0.0);
+                    for b in 0..3u32 {
+                        let a = lab_da_mancha(&neutro, i, b * 6 + si);
+                        let c = lab_da_mancha(&img, i, b * 6 + si);
+                        cin += a[1].hypot(a[2]);
+                        cout += c[1].hypot(c[2]);
+                        dl += (c[0] - a[0]) / 3.0;
+                    }
+                    fator[(i * 6 + si) as usize] = cout / cin.max(1e-6);
+                    claro[(i * 6 + si) as usize] = dl;
+                }
+            }
+            fatores.push(fator);
+            claros.push(claro);
+        }
+    }
+    fatores.extend(claros);
+    fatores
+}
+
 /// Sobe sempre, entre 0 e 255.
 fn monotona(c: &mut [f64]) {
     let mut maior = 0.0f64;
@@ -343,6 +420,8 @@ fn main() {
     linhas.extend(mascara(raiz, &forca1));
     assert_eq!(linhas.len() as u32, LINHA_TEMPERATURA);
     linhas.extend(balanco(raiz));
+    assert_eq!(linhas.len() as u32, LINHA_SATURACAO);
+    linhas.extend(cor(raiz));
     assert_eq!(linhas.len() as u32, ALTURA);
 
     let bytes: Vec<u8> = linhas
