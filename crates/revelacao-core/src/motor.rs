@@ -2744,6 +2744,7 @@ mod testes {
     /// Luminância fica antes. Com ela depois, a borda que a vinheta +100
     /// clareia escurecia de novo com a Luminância negativa dos realces — o RF
     /// Bem Velhão (vinheta +100, realces −38) foi de ΔE 29 a 59 na `tudo-5`.
+    /// Ele saiu das LRs em 2/out; a combinação continua valendo para as outras.
     #[test]
     fn no_processo_1_a_luminancia_da_viragem_nao_apaga_a_vinheta_branca() {
         let mut motor = motor_pronto();

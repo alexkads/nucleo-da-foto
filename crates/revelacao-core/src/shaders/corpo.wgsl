@@ -446,8 +446,9 @@ fn faixas_da_viragem(l: f32) -> vec3<f32> {
 /// (2/out/2026). A régua `vinheta-viragem` provou que a cor das sombras e dos
 /// realces fica dentro da vinheta — e nada sobre a Luminância. Com ela junto,
 /// depois da vinheta, a borda que a vinheta +100 clareia escurecia de novo
-/// com a Luminância negativa dos realces, e o RF Bem Velhão foi de ΔE 29 a 59
-/// (rodada `tudo-5`); na `tudo-4a`, com ela antes, eram 29.
+/// com a Luminância negativa dos realces, e o RF Bem Velhão (vinheta +100,
+/// realces −38; fora das LRs desde 2/out) foi de ΔE 29 a 59 (rodada `tudo-5`);
+/// na `tudo-4a`, com ela antes, eram 29.
 fn luminancia_da_viragem(entrada: vec3<f32>, l: f32) -> vec3<f32> {
     let faixas = faixas_da_viragem(l);
     let dl = (params.split_shadow_lum * faixas.x * faixas.x
