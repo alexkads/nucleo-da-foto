@@ -18,7 +18,7 @@
 //!
 //! # O desenho
 //!
-//! Uma textura `R32Float` de [`LARGURA`] × [`ALTURA`] (256 × 479). Cada linha é uma curva de
+//! Uma textura `R32Float` de [`LARGURA`] × [`ALTURA`] (256 × 547). Cada linha é uma curva de
 //! 256 pontos:
 //!
 //! | linhas | o quê | a coluna é |
@@ -30,6 +30,9 @@
 //! | [`LINHA_TEMPERATURA`], [`LINHA_MATIZ`] + 0..63 | o balanço: 21 valores × R, G, B (`passo·3 + canal`) | o valor de entrada do canal |
 //! | [`LINHA_SATURACAO`], [`LINHA_VIBRACAO`] + 0..21 | o fator de croma, 24 matizes × 6 saturações (`matiz·6 + saturação`) | — |
 //! | [`LINHA_SATURACAO_L`], [`LINHA_VIBRACAO_L`] + 0..21 | o ΔL* que vem junto, nas mesmas colunas | — |
+//! | [`LINHA_VIRAGEM`] + 0..48 | a Divisão de tons: Δa*, Δb* por região × matiz (saturação 50) | o nível de entrada |
+//! | [`LINHA_VIRAGEM_SATURACAO`] + 0..2 | o fator de cada saturação sobre a de 50, por região | a saturação, 0–100 |
+//! | [`LINHA_VIRAGEM_EQUILIBRIO`] + 0..18 | o ganho de cada Equilíbrio (−100..100, de 25 em 25) por região | o nível de entrada |
 //! | [`LINHA_MASCARA`] + 0..81 | a máscara da vinheta, ponto médio × difusão (9 × 9, de 12,5 em 12,5) | a distância elíptica, de 0 a [`DISTANCIA_MAXIMA`] |
 //!
 //! O valor 0 de cada slider é a identidade, exata. O WGSL repete estas
@@ -68,7 +71,17 @@ pub const LINHA_VIBRACAO: u32 = 416;
 /// não guarda o L* ao tirar ou pôr cor. O zero é 0 em tudo.
 pub const LINHA_SATURACAO_L: u32 = 437;
 pub const LINHA_VIBRACAO_L: u32 = 458;
-pub const ALTURA: u32 = 479;
+/// A Divisão de tons (régua `viragem`, na faixa cinza da rampa): por região
+/// (0 sombras, 1 realces) e matiz (12, de 30 em 30°), o Δa* e o Δb* que o
+/// Lightroom põe em cada nível de entrada, com saturação 50 e equilíbrio 0 —
+/// a linha `LINHA_VIRAGEM + (região·12 + matiz)·2 + componente`.
+pub const LINHA_VIRAGEM: u32 = 479;
+/// Quanto cada saturação (0–100, coluna) vale em relação à de 50, por região.
+pub const LINHA_VIRAGEM_SATURACAO: u32 = 527;
+/// O ganho de cada nível com o Equilíbrio de −100 a +100 (9 valores, de 25 em
+/// 25) sobre o Equilíbrio 0, por região: `+ região·9 + passo`.
+pub const LINHA_VIRAGEM_EQUILIBRIO: u32 = 529;
+pub const ALTURA: u32 = 547;
 /// A distância elíptica da última coluna da máscara: além do canto (√2).
 pub const DISTANCIA_MAXIMA: f32 = 1.45;
 
@@ -189,6 +202,9 @@ mod testes {
             ("LR_LINHA_VIBRACAO", LINHA_VIBRACAO),
             ("LR_LINHA_SATURACAO_L", LINHA_SATURACAO_L),
             ("LR_LINHA_VIBRACAO_L", LINHA_VIBRACAO_L),
+            ("LR_LINHA_VIRAGEM", LINHA_VIRAGEM),
+            ("LR_LINHA_VIRAGEM_SATURACAO", LINHA_VIRAGEM_SATURACAO),
+            ("LR_LINHA_VIRAGEM_EQUILIBRIO", LINHA_VIRAGEM_EQUILIBRIO),
         ] {
             assert_eq!(
                 constante(nome),

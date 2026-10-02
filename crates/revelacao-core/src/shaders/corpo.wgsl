@@ -259,6 +259,9 @@ const LR_LINHA_SATURACAO: i32 = 395;
 const LR_LINHA_VIBRACAO: i32 = 416;
 const LR_LINHA_SATURACAO_L: i32 = 437;
 const LR_LINHA_VIBRACAO_L: i32 = 458;
+const LR_LINHA_VIRAGEM: i32 = 479;
+const LR_LINHA_VIRAGEM_SATURACAO: i32 = 527;
+const LR_LINHA_VIRAGEM_EQUILIBRIO: i32 = 529;
 
 /// Um ponto da tabela de croma: a linha, o matiz (0–23, dá a volta) e a
 /// saturação (0–5).
@@ -465,15 +468,49 @@ fn viragem(entrada: vec3<f32>) -> vec3<f32> {
     // matiz HSV, e o mesmo número do Lightroom dava outra cor — o amarelo
     // 59 virava verde nas altas luzes e o vermelho 14 virava roxo.
     let lab = para_lab(cor);
-    var desvio = roda_do_lightroom(params.split_shadow_hue, params.split_shadow_sat) * peso_baixa
-        + roda_do_lightroom(params.split_midtone_hue, params.split_midtone_sat) * peso_meio
-        + roda_do_lightroom(params.split_highlight_hue, params.split_highlight_sat) * peso_alta
+    var desvio = roda_do_lightroom(params.split_midtone_hue, params.split_midtone_sat) * peso_meio
         + roda_do_lightroom(params.split_global_hue, params.split_global_sat);
+    if (params.processo >= 0.5) {
+        // 🔑 **No processo 1, sombras e realces são os do Lightroom medidos**
+        // (régua `viragem`, 2/out/2026): as duas regiões se SOMAM, e o
+        // Equilíbrio desloca e amplia cada uma — com as duas em 45°/50, o −100
+        // dobra a cor dos meios-tons. A roda de antes repartia uma cor só entre
+        // as duas, e pintava os realces quase 2× mais que o Lightroom.
+        let nivel = l * 255.0;
+        desvio += lr_viragem(0, params.split_shadow_hue, params.split_shadow_sat, nivel)
+            + lr_viragem(1, params.split_highlight_hue, params.split_highlight_sat, nivel);
+    } else {
+        desvio += roda_do_lightroom(params.split_shadow_hue, params.split_shadow_sat) * peso_baixa
+            + roda_do_lightroom(params.split_highlight_hue, params.split_highlight_sat) * peso_alta;
+    }
     // O preto puro e o branco puro ficam como estão: não há cor que caiba
     // em L* 0 ou 100, e a conta voltaria com o canal estourado.
     desvio *= smoothstep(0.0, 8.0, lab.x) * (1.0 - smoothstep(92.0, 100.0, lab.x));
     cor = de_lab(vec3<f32>(lab.x, lab.y + desvio.x, lab.z + desvio.y));
     return cor;
+}
+
+/// O Δa*, Δb* que a Divisão de tons do Lightroom põe num nível de entrada
+/// (0–255), numa região (0 sombras, 1 realces) — as tabelas da régua
+/// `viragem` (`lightroom.rs`): o matiz entre os 12 medidos, a saturação pelo
+/// fator sobre a de 50, e o Equilíbrio pelo ganho de cada nível.
+fn lr_viragem(regiao: i32, matiz: f32, saturacao: f32, nivel: f32) -> vec2<f32> {
+    if (saturacao <= 0.0) {
+        return vec2<f32>(0.0);
+    }
+    let h = (((matiz % 360.0) + 360.0) % 360.0) / 30.0;
+    let k0 = i32(floor(h)) % 12;
+    let k1 = (k0 + 1) % 12;
+    let t = h - floor(h);
+    let base = LR_LINHA_VIRAGEM + regiao * 24;
+    let d0 = vec2<f32>(lr_curva(base + k0 * 2, nivel), lr_curva(base + k0 * 2 + 1, nivel));
+    let d1 = vec2<f32>(lr_curva(base + k1 * 2, nivel), lr_curva(base + k1 * 2 + 1, nivel));
+    let fator = lr_curva(LR_LINHA_VIRAGEM_SATURACAO + regiao, clamp(saturacao, 0.0, 100.0));
+    let p = clamp((params.split_balance + 100.0) / 25.0, 0.0, 8.0);
+    let i = min(i32(floor(p)), 7);
+    let linha_e = LR_LINHA_VIRAGEM_EQUILIBRIO + regiao * 9 + i;
+    let ganho = mix(lr_curva(linha_e, nivel), lr_curva(linha_e + 1, nivel), p - f32(i));
+    return mix(d0, d1, t) * fator * ganho;
 }
 
 

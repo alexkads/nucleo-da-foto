@@ -127,6 +127,11 @@ fn lab_da_mancha(img: &RgbImage, i: u32, j: u32) -> [f64; 3] {
             }
         }
     }
+    lab_de(s)
+}
+
+/// O Lab (D65) de uma cor sRGB de 0 a 255.
+fn lab_de(s: [f64; 3]) -> [f64; 3] {
     let lin = s.map(|v| {
         let v = v / 255.0;
         if v <= 0.04045 {
@@ -186,6 +191,83 @@ fn cor(raiz: &Path) -> Vec<[f64; 256]> {
     }
     fatores.extend(claros);
     fatores
+}
+
+/// A Divisão de tons (régua `viragem`, na faixa cinza da `rampa-cor.jpg`):
+/// as linhas de [`LINHA_VIRAGEM`] a [`ALTURA`].
+///
+/// - por região e matiz (de 30 em 30°, saturação 50): o Δa* e o Δb* de cada
+///   nível, contra o neutro;
+/// - por região: o fator de cada saturação (0–100) sobre a de 50, pelo croma
+///   médio da metade da rampa onde a região age (matiz 45°);
+/// - por região e Equilíbrio (−100..100, de 25 em 25): o ganho do croma em cada
+///   nível sobre o do Equilíbrio 0 (matiz 45°). Onde a região quase não pinta,
+///   o `+0,5` do denominador segura a razão perto de 1.
+fn viragem(raiz: &Path) -> Vec<[f64; 256]> {
+    let m = casos(&raiz.join("regua-viragem").join("vir_rampa-cor"));
+    let lab_da_rampa = |nome: &str| -> Vec<[f64; 3]> {
+        let img = abrir(&m[nome]);
+        let canais: [[f64; 256]; 3] = std::array::from_fn(|c| canal_da_rampa(&img, c));
+        (0..256)
+            .map(|i| lab_de([canais[0][i], canais[1][i], canais[2][i]]))
+            .collect()
+    };
+    let neutro = lab_da_rampa("00-neutro");
+    let delta = |nome: &str| -> Vec<[f64; 2]> {
+        lab_da_rampa(nome)
+            .iter()
+            .zip(&neutro)
+            .map(|(c, n)| [c[1] - n[1], c[2] - n[2]])
+            .collect()
+    };
+    let croma = |d: &[[f64; 2]]| -> Vec<f64> { d.iter().map(|v| v[0].hypot(v[1])).collect() };
+    let regioes = ["sombra", "realce"];
+
+    let mut linhas = Vec::new();
+    for regiao in regioes {
+        for k in 0..12 {
+            let d = delta(&format!("{regiao}-h{:03}-s050", k * 30));
+            linhas.push(std::array::from_fn(|i| d[i][0]));
+            linhas.push(std::array::from_fn(|i| d[i][1]));
+        }
+    }
+    for (r, regiao) in regioes.iter().enumerate() {
+        // A metade da rampa onde a região age.
+        let faixa = if r == 0 { 0..128 } else { 128..256 };
+        let media = |sat: u32| -> f64 {
+            let c = croma(&delta(&format!("{regiao}-h045-s{sat:03}")));
+            c[faixa.clone()].iter().sum::<f64>() / 128.0
+        };
+        let base = media(50);
+        let pontos: Vec<(f64, f64)> = std::iter::once((0.0, 0.0))
+            .chain([10, 25, 50, 75, 100].map(|s| (s as f64, media(s) / base)))
+            .collect();
+        let mut linha = [0.0; 256];
+        for (s, v) in linha.iter_mut().enumerate().take(101) {
+            let s = s as f64;
+            let j = pontos
+                .iter()
+                .position(|p| p.0 >= s)
+                .unwrap_or(pontos.len() - 1)
+                .max(1);
+            let ((s0, v0), (s1, v1)) = (pontos[j - 1], pontos[j]);
+            *v = v0 + (v1 - v0) * ((s - s0) / (s1 - s0)).clamp(0.0, 1.0);
+        }
+        linhas.push(linha);
+    }
+    for regiao in regioes {
+        let zero = croma(&delta(&format!("{regiao}-h045-s050")));
+        for passo in 0..9 {
+            let e = -100 + passo * 25;
+            if e == 0 {
+                linhas.push([1.0; 256]);
+                continue;
+            }
+            let c = croma(&delta(&format!("{regiao}-equilibrio{e:+04}")));
+            linhas.push(std::array::from_fn(|i| (c[i] + 0.5) / (zero[i] + 0.5)));
+        }
+    }
+    linhas
 }
 
 /// Sobe sempre, entre 0 e 255.
@@ -422,6 +504,8 @@ fn main() {
     linhas.extend(balanco(raiz));
     assert_eq!(linhas.len() as u32, LINHA_SATURACAO);
     linhas.extend(cor(raiz));
+    assert_eq!(linhas.len() as u32, LINHA_VIRAGEM);
+    linhas.extend(viragem(raiz));
     assert_eq!(linhas.len() as u32, ALTURA);
 
     let bytes: Vec<u8> = linhas

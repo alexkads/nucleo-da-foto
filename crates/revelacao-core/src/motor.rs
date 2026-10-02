@@ -2723,13 +2723,14 @@ mod testes {
             bw_ativo: 1.0,
             split_highlight_hue: 45.0,
             split_highlight_sat: 40.0,
-            pcv_amount: 80.0,
+            pcv_amount: 40.0,
             pcv_midpoint: 0.0,
             processo: 1.0,
             ..Default::default()
         };
         let s = revelar_e_colher(&mut motor, cinza(16, 150), ajustes);
-        // O canto (0, 0): clareado pela vinheta e ainda quente.
+        // O canto (0, 0): clareado pela vinheta e ainda quente. (Quase no branco
+        // a viragem do Lightroom some; por isso a vinheta é moderada.)
         let (r, b) = (s[0] as i32, s[2] as i32);
         assert!(r > 150, "a vinheta não clareou o canto: {:?}", &s[..3]);
         assert!(
