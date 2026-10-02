@@ -24,7 +24,6 @@
 
 pub mod ajustes;
 pub mod cronometro;
-pub mod darktable;
 pub mod guia;
 pub mod jpeg;
 pub mod lightroom;

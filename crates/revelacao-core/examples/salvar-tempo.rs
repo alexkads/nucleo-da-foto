@@ -30,31 +30,19 @@ fn main() {
 
     let mut motor = Motor::abrir().expect("sem GPU");
     let neutro = Ajustes::default();
+    // Um P&B com o que pesa no RecordarFotos P&B (`use_cases::presets::
+    // RECORDARFOTOS_PB`): Sombras locais (a guia), viragem e as duas vinhetas.
     let estilo = Ajustes {
-        dt_exposure_ativo: 1.0,
-        dt_exposure_black: -0.0019,
-        dt_exposure_exposure: 0.163,
-        dt_shadhi_ativo: 1.0,
-        dt_shadhi_shadows: 65.38,
-        dt_shadhi_highlights: -20.51,
-        dt_monochrome_ativo: 1.0,
-        dt_vignette_ativo: 1.0,
-        dt_vignette_scale: 87.82,
-        dt_vignette_falloff_scale: 45.51,
-        dt_vignette_brightness: 0.99999,
-        dt_vignette_saturation: 0.147,
-        dt_vignette_autoratio: 1.0,
-        dt_vignette_shape: 0.48,
-        dt_cb_ativo: 1.0,
-        dt_cb_shadows_c: 0.1747,
-        dt_cb_shadows_h: 71.54,
-        dt_cb_midtones_h: 73.85,
-        dt_cb_highlights_y: 0.0449,
-        dt_cb_highlights_c: 0.0833,
-        dt_cb_highlights_h: 71.54,
-        dt_cb_saturation_highlights: 0.1603,
-        dt_cb_saturation_midtones: 0.1346,
-        dt_cb_brilliance_midtones: 0.1474,
+        bw_ativo: 1.0,
+        processo: 1.0,
+        shadows: 100.0,
+        clarity: 0.11,
+        split_shadow_hue: 51.41,
+        split_shadow_sat: 36.5,
+        split_highlight_hue: 50.63,
+        split_highlight_sat: 70.5,
+        lens_vignette_amount: 98.0,
+        pcv_amount: 43.75,
         ..Default::default()
     };
 
@@ -62,8 +50,8 @@ fn main() {
     for (nome, ajustes) in [
         ("revelar neutro (1ª: cria texturas)", &neutro),
         ("revelar neutro (2ª)", &neutro),
-        ("revelar estilo P&B (grades em CPU)", &estilo),
-        ("revelar estilo P&B (grades em cache)", &estilo),
+        ("revelar P&B (1ª: calcula a guia)", &estilo),
+        ("revelar P&B (guia em cache)", &estilo),
     ] {
         let t = Instant::now();
         revelada = Some(motor.revelar(&pixels, w, h, ajustes).expect("revelar"));

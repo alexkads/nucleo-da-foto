@@ -50,16 +50,12 @@ use crate::transformacao::{Corte, Quadro};
 /// O shader do desktop: o corpo mais a entrada por compute.
 const SHADER_COMPUTE: &str = concat!(
     include_str!("shaders/corpo.wgsl"),
-    include_str!("shaders/darktable_constantes.wgsl"),
-    include_str!("shaders/darktable.wgsl"),
     include_str!("shaders/entrada_compute.wgsl")
 );
 
 /// O shader do navegador: o corpo mais a entrada por vértice e fragmento.
 const SHADER_FRAGMENTO: &str = concat!(
     include_str!("shaders/corpo.wgsl"),
-    include_str!("shaders/darktable_constantes.wgsl"),
-    include_str!("shaders/darktable.wgsl"),
     include_str!("shaders/entrada_fragmento.wgsl")
 );
 
@@ -109,22 +105,9 @@ struct Recursos {
     /// não por conteúdo. Comparar 24 MB byte a byte para decidir se vale subir
     /// 24 MB custaria quase o mesmo que subir.
     ultimos_pixels: Option<Arc<Vec<u8>>>,
-    /// As grades bilaterais do estágio darktable — `shadows and highlights` e
-    /// `monochrome` —, de 1×1 enquanto nenhum dos dois está ligado.
-    textura_grade_sh: wgpu::Texture,
-    textura_grade_mo: wgpu::Texture,
-    /// Tamanho e sigmas das duas grades (`DadosDasGrades` no WGSL).
-    buffer_grades: wgpu::Buffer,
     /// O quadro do arquivo que sai (`QuadroDeSaida` no WGSL) — ver
     /// [`Motor::definir_corte`].
     buffer_quadro: wgpu::Buffer,
-    /// O que produziu as grades em uso — ver [`ChaveDasGrades`].
-    chave_das_grades: Option<ChaveDasGrades>,
-    /// A última combinação pedida e quando ela chegou — ver [`adiar_as_grades`].
-    grades_pedidas: Option<ChaveDasGrades>,
-    ultimo_pedido_ms: f64,
-    /// O último desenho saiu com grades de antes.
-    grades_pendentes: bool,
     /// A última preparação subiu os pixels para a GPU (foto nova ou tamanho
     /// novo) — o que separa "trocar de foto" de "mexer num slider" no custo.
     subiu_agora: bool,
@@ -202,15 +185,6 @@ fn criar_recursos(
         mapped_at_creation: false,
     });
 
-    let vazia = crate::darktable::GradeParaGpu::vazia();
-    let textura_grade_sh = textura_de_grade(dispositivo, None, &vazia);
-    let textura_grade_mo = textura_de_grade(dispositivo, None, &vazia);
-    let buffer_grades = dispositivo.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Dados das grades"),
-        size: 64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
     // Três linhas `vec4` (a terceira é a projetiva da perspectiva guiada):
     // 48 bytes, múltiplo de 16 como o WebGL2 exige.
     let buffer_quadro = dispositivo.create_buffer(&wgpu::BufferDescriptor {
@@ -234,9 +208,6 @@ fn criar_recursos(
         &textura_entrada,
         &textura_saida,
         &buffer_ajustes,
-        &textura_grade_sh,
-        &textura_grade_mo,
-        &buffer_grades,
         &buffer_quadro,
         &mascaras,
         &textura_guia,
@@ -260,14 +231,7 @@ fn criar_recursos(
         bytes_por_linha_alinhado,
         bytes_por_linha,
         ultimos_pixels: None,
-        textura_grade_sh,
-        textura_grade_mo,
-        buffer_grades,
         buffer_quadro,
-        chave_das_grades: None,
-        grades_pedidas: None,
-        ultimo_pedido_ms: 0.0,
-        grades_pendentes: false,
         subiu_agora: false,
         textura_guia,
         buffer_guia,
@@ -279,7 +243,7 @@ fn criar_recursos(
 }
 
 /// As tabelas medidas no Lightroom (`lightroom.rs`) como textura `R32Float` —
-/// lidas com `textureLoad`, como as grades, então o WebGL2 não precisa de
+/// lidas com `textureLoad`, sem filtro, então o WebGL2 não precisa de
 /// filtro de ponto flutuante.
 fn textura_das_tabelas(dispositivo: &wgpu::Device, fila: &wgpu::Queue) -> wgpu::Texture {
     use crate::lightroom::{tabelas, ALTURA, LARGURA};
@@ -316,11 +280,12 @@ fn textura_das_tabelas(dispositivo: &wgpu::Device, fila: &wgpu::Queue) -> wgpu::
     textura
 }
 
-/// O layout do grupo 0: entrada, saída (só no compute), ajustes, as duas grades
-/// bilaterais e os dados delas.
+/// O layout do grupo 0: entrada, saída (só no compute), ajustes, o quadro, as
+/// máscaras, a guia e as tabelas do Lightroom. As ligações 3, 4 e 5 eram as
+/// grades bilaterais do estágio darktable, que saiu em 2/out/2026.
 ///
 /// Todas as texturas lidas são `Float { filterable: false }`: o shader só usa
-/// `textureLoad`, e o `R32Float` das grades não é filtrável sem feature extra.
+/// `textureLoad`, e o `R32Float` das tabelas não é filtrável sem feature extra.
 fn criar_layout_do_grupo(
     dispositivo: &wgpu::Device,
     estagio: wgpu::ShaderStages,
@@ -348,9 +313,6 @@ fn criar_layout_do_grupo(
     let mut entradas = vec![
         textura(0),
         uniforme(2),
-        textura(3),
-        textura(4),
-        uniforme(5),
         uniforme(6),
         // As máscaras locais: uma camada `R8Unorm` por máscara, e os ajustes delas.
         wgpu::BindGroupLayoutEntry {
@@ -388,11 +350,9 @@ fn criar_layout_do_grupo(
     })
 }
 
-/// O bind group do passe: entrada, saída (só no compute), ajustes e as grades.
-///
-/// 🔑 **É refeito quando as grades mudam de tamanho**, e não a cada quadro: a
-/// textura de uma grade é recriada quando outra foto ou outro raio muda o
-/// número de células, e o grupo antigo apontaria para a textura destruída.
+/// O bind group do passe: entrada, saída (só no compute), ajustes, quadro,
+/// máscaras, guia e tabelas. É refeito quando uma dessas texturas é recriada
+/// (a guia de outra foto), e não a cada quadro.
 #[allow(clippy::too_many_arguments)]
 fn montar_grupo(
     dispositivo: &wgpu::Device,
@@ -400,9 +360,6 @@ fn montar_grupo(
     entrada: &wgpu::Texture,
     saida: &wgpu::Texture,
     ajustes: &wgpu::Buffer,
-    grade_sh: &wgpu::Texture,
-    grade_mo: &wgpu::Texture,
-    grades: &wgpu::Buffer,
     quadro: &wgpu::Buffer,
     mascaras: &Mascaras,
     guia: &wgpu::Texture,
@@ -413,12 +370,7 @@ fn montar_grupo(
     let v_mascaras = mascaras.vista();
     let v_guia = vista(guia);
     let v_tabelas = vista(tabelas);
-    let (v_entrada, v_saida, v_sh, v_mo) = (
-        vista(entrada),
-        vista(saida),
-        vista(grade_sh),
-        vista(grade_mo),
-    );
+    let (v_entrada, v_saida) = (vista(entrada), vista(saida));
     let mut entradas = vec![
         wgpu::BindGroupEntry {
             binding: 0,
@@ -427,18 +379,6 @@ fn montar_grupo(
         wgpu::BindGroupEntry {
             binding: 2,
             resource: ajustes.as_entire_binding(),
-        },
-        wgpu::BindGroupEntry {
-            binding: 3,
-            resource: wgpu::BindingResource::TextureView(&v_sh),
-        },
-        wgpu::BindGroupEntry {
-            binding: 4,
-            resource: wgpu::BindingResource::TextureView(&v_mo),
-        },
-        wgpu::BindGroupEntry {
-            binding: 5,
-            resource: grades.as_entire_binding(),
         },
         wgpu::BindGroupEntry {
             binding: 6,
@@ -488,47 +428,6 @@ fn montar_grupo(
     }
 }
 
-/// Uma grade bilateral como textura `R32Float`, com as fatias de L lado a lado.
-fn textura_de_grade(
-    dispositivo: &wgpu::Device,
-    fila: Option<&wgpu::Queue>,
-    grade: &crate::darktable::GradeParaGpu,
-) -> wgpu::Texture {
-    let tamanho = wgpu::Extent3d {
-        width: grade.largura_do_atlas(),
-        height: grade.size_y,
-        depth_or_array_layers: 1,
-    };
-    let textura = dispositivo.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Grade bilateral"),
-        size: tamanho,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R32Float,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    if let Some(fila) = fila {
-        fila.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &textura,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&grade.dados),
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * grade.largura_do_atlas()),
-                rows_per_image: Some(grade.size_y),
-            },
-            tamanho,
-        );
-    }
-    textura
-}
-
 /// A guia (`guia.rs`) como textura `Rgba32Float`; sem guia, um texel neutro.
 ///
 /// `Rgba32Float` porque o shader só usa `textureLoad` (o filtro bilinear é
@@ -573,77 +472,6 @@ fn textura_da_guia(
         );
     }
     textura
-}
-
-/// Quanto tempo sem mudança nos ajustes que alimentam as grades antes de refazê-las.
-const OCIOSO_ANTES_DAS_GRADES_MS: f64 = 150.0;
-
-/// Desenhar com as grades de antes, em vez de refazê-las agora?
-///
-/// 🚨 **Refazer as grades custa centenas de milissegundos numa cópia de 2048
-/// px** (medido no nativo; o wasm é mais lento), e o editor desenha a cada
-/// quadro de um arrasto: com o estilo P&B ligado, arrastar a exposição virava
-/// um slide travado (dono, 2026-09-12: *"achei os novos controles RGB meio
-/// travado para deslizar"*).
-///
-/// 🔑 **Enquanto os ajustes continuam mudando, a GPU desenha com a grade de
-/// antes** — a exposição, as cores e a vinheta respondem na hora, e só a
-/// vizinhança do `shadhi` e o filtro do `monochrome` ficam um instante para
-/// trás. Parado o arrasto por [`OCIOSO_ANTES_DAS_GRADES_MS`], a grade exata é
-/// refeita. Nunca adia sem relógio (exportação, desktop), numa foto nova, na
-/// primeira grade, ou quando um módulo acabou de ligar.
-fn adiar_as_grades(
-    feitas: Option<&ChaveDasGrades>,
-    pedida: &ChaveDasGrades,
-    relogio: Option<f64>,
-    ultimo_pedido_ms: f64,
-) -> bool {
-    let (Some(agora), Some(feitas)) = (relogio, feitas) else {
-        return false;
-    };
-    feitas.pixels == pedida.pixels
-        && feitas.escala == pedida.escala
-        && feitas.modulos == pedida.modulos
-        && agora - ultimo_pedido_ms < OCIOSO_ANTES_DAS_GRADES_MS
-}
-
-/// O que decide se as grades em uso ainda valem.
-///
-/// 🔑 **Mexer num controle nosso não refaz a grade**: ela depende só dos
-/// pixels (pela identidade do `Arc`, como a textura de entrada), da escala e
-/// dos parâmetros de `exposure`, `shadhi` e `monochrome`. Refazê-la a cada
-/// arrasto de slider custaria o módulo inteiro em CPU por quadro.
-#[derive(Clone, PartialEq)]
-struct ChaveDasGrades {
-    pixels: usize,
-    escala: u32,
-    parametros: Vec<u32>,
-    /// `shadhi` e `monochrome` ligados. Uma grade de antes só serve com os
-    /// mesmos módulos: sem ela, o módulo recém-ligado leria uma grade vazia.
-    modulos: (bool, bool),
-}
-
-impl ChaveDasGrades {
-    fn nova(pixels: &Arc<Vec<u8>>, ajustes: &Ajustes, escala: f32) -> Self {
-        let vetor = ajustes.como_vetor();
-        let posicao = |nome: &str| {
-            Ajustes::NOMES
-                .iter()
-                .position(|n| *n == nome)
-                .expect("campo do estágio darktable")
-        };
-        let exposure = posicao("dt_exposure_ativo")..=posicao("dt_exposure_exposure");
-        let locais = posicao("dt_shadhi_ativo")..=posicao("dt_monochrome_highlights");
-        Self {
-            pixels: Arc::as_ptr(pixels) as usize,
-            modulos: (
-                ajustes.dt_shadhi_ativo != 0.0,
-                ajustes.dt_monochrome_ativo != 0.0,
-            ),
-            escala: escala.to_bits(),
-            parametros: exposure.chain(locais).map(|i| vetor[i].to_bits()).collect(),
-        }
-    }
 }
 
 /// Por que o motor não abriu num adaptador que respondeu.
@@ -750,13 +578,6 @@ pub struct Motor {
     /// "a GPU está mesmo sendo usada, e por qual caminho" — a pergunta que
     /// aparece toda vez que alguém acha o arrasto lento.
     backend: &'static str,
-    /// A razão entre a imagem revelada e a foto original — ver
-    /// [`Motor::definir_escala_do_original`].
-    escala_do_original: f32,
-    /// Ver [`Motor::definir_relogio`].
-    relogio_ms: Option<f64>,
-    /// Ver [`Motor::grades_pendentes`].
-    grades_pendentes: bool,
     /// O enquadramento da foto que vai ser revelada — ver [`Motor::definir_corte`].
     corte: Corte,
     /// A revelação local da foto que vai ser revelada — ver [`Motor::definir_locais`].
@@ -856,8 +677,7 @@ pub fn adaptadores_da_maquina() -> Vec<InfoDoAdaptador> {
 /// só existe com timestamp query.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TemposDoMotor {
-    /// CPU: recursos, subida da textura (se a foto mudou), grades bilaterais
-    /// do estágio darktable e uniformes.
+    /// CPU: recursos, subida da textura (se a foto mudou), a guia e os uniformes.
     pub preparo_ms: f32,
     /// CPU: gravar o encoder (máscaras, retoques, a passada) e o `submit`.
     pub gravacao_ms: f32,
@@ -1003,7 +823,7 @@ impl Motor {
                     source: wgpu::ShaderSource::Wgsl(SHADER_COMPUTE.into()),
                 });
                 // 🚨 Explícito também aqui: o layout automático declara toda
-                // `texture_2d<f32>` como filtrável, e a grade bilateral é
+                // `texture_2d<f32>` como filtrável, e as tabelas do Lightroom são
                 // `R32Float`, que não é.
                 let layout_do_grupo =
                     criar_layout_do_grupo(&dispositivo, wgpu::ShaderStages::COMPUTE);
@@ -1063,9 +883,6 @@ impl Motor {
             fila,
             pipeline,
             cache: LruCache::new(NonZeroUsize::new(5).expect("5 não é zero")),
-            escala_do_original: 1.0,
-            relogio_ms: None,
-            grades_pendentes: false,
             corte: Corte::inteiro(),
             locais: ParametrosLocais::default(),
             mascaras_suportadas: crate::mascaras::suportado(adaptador),
@@ -1124,51 +941,34 @@ impl Motor {
         &self.fila
     }
 
-    /// A razão entre a imagem que vai ser revelada e a foto original.
-    ///
-    /// 🚨 **Os módulos locais do estágio darktable medem em pixels da foto
-    /// original**: o raio de 100 px do `shadows and highlights` é um pedaço da
-    /// foto, e numa cópia de trabalho de 2048 px de uma foto de 6016 ele é um
-    /// raio de 34. Sem isto, a cópia mostraria um estilo e o arquivo sairia com
-    /// outro. Padrão 1 — a exportação em tamanho cheio.
-    pub fn definir_escala_do_original(&mut self, escala: f32) {
-        self.escala_do_original = if escala.is_finite() && escala > 0.0 {
-            escala
-        } else {
-            1.0
-        };
-    }
+    /// Sem efeito desde 2/out/2026. Era a escala dos módulos locais do estágio
+    /// darktable, que saiu do motor; fica porque o site (`revelacao-web`,
+    /// `tela-do-cliente-web`) ainda a chama — sai junto com a próxima versão dele.
+    pub fn definir_escala_do_original(&mut self, _escala: f32) {}
 
-    /// O relógio de quem desenha em tempo real, em milissegundos — o
-    /// `performance.now()` do navegador, o `agora` do `requestAnimationFrame`.
-    ///
-    /// Com relógio, [`Motor::desenhar`] adia as grades bilaterais enquanto os
-    /// ajustes que as alimentam continuam mudando (ver `adiar_as_grades`).
-    /// `None`, o padrão, é sem pressa: toda revelação sai com as grades exatas.
-    /// [`Motor::revelar`] ignora o relógio — o arquivo exportado é sempre exato.
-    pub fn definir_relogio(&mut self, agora_ms: Option<f64>) {
-        self.relogio_ms = agora_ms.filter(|v| v.is_finite());
-    }
+    /// Sem efeito desde 2/out/2026: o relógio adiava as grades bilaterais do
+    /// estágio darktable. Fica pelo mesmo motivo de
+    /// [`Motor::definir_escala_do_original`].
+    pub fn definir_relogio(&mut self, _agora_ms: Option<f64>) {}
 
-    /// O último [`Motor::desenhar`] saiu com grades de antes: desenhe de novo,
-    /// com os mesmos ajustes, no próximo quadro — é o que as refaz quando o
-    /// arrasto parar.
+    /// Sempre `false` desde 2/out/2026 (não há mais grade para refazer). Fica
+    /// porque o `aplicar` do site devolve isto ao JavaScript.
     pub fn grades_pendentes(&self) -> bool {
-        self.grades_pendentes
+        false
     }
 
     /// O enquadramento da foto que vai ser revelada — é onde as vinhetas moram.
     ///
     /// 🚨 **O shader revela a foto inteira, e as vinhetas são do recorte.** Quem
-    /// recorta continua sendo [`crate::transformacao::aplicar`], depois — as
-    /// grades bilaterais, o ruído e a nitidez leem a foto inteira, e a prévia do
+    /// recorta continua sendo [`crate::transformacao::aplicar`], depois — o ruído
+    /// e a nitidez leem a foto inteira, e a prévia do
     /// editor do site recorta por CSS. O corte entra aqui só para as duas
-    /// vinhetas (a de lente e a do darktable) medirem centro, proporção e escala
+    /// vinhetas (a de lente e a pós-corte) medirem centro, proporção e escala
     /// no quadro do arquivo ([`Corte::quadro`]). Sem isto, uma foto 3:2 recortada
     /// em 3:4 saía com a vinheta centrada e na proporção da foto inteira —
     /// laterais do recorte limpas (dono, 2026-09-13).
     ///
-    /// ⚠️ **Vale até ser trocado**, como [`Motor::definir_escala_do_original`]:
+    /// ⚠️ **Vale até ser trocado**, como [`Motor::definir_locais`]:
     /// quem revela fotos diferentes no mesmo motor define antes de cada uma.
     /// Padrão: [`Corte::inteiro`], em que as vinhetas saem bit a bit as de antes.
     pub fn definir_corte(&mut self, corte: &Corte) {
@@ -1326,7 +1126,6 @@ impl Motor {
         altura: u32,
         ajustes: &Ajustes,
     ) -> Option<DynamicImage> {
-        let escala = self.escala_do_original;
         let quadro = self.corte.quadro(largura, altura);
         let relogio = crate::cronometro::relogio_ms;
         let comeco = relogio();
@@ -1352,8 +1151,6 @@ impl Motor {
             largura,
             altura,
             ajustes,
-            escala,
-            None,
             &quadro,
         );
         let preparado = relogio();
@@ -1499,8 +1296,6 @@ impl Motor {
         if !matches!(self.pipeline, Pipeline::Fragmento { .. }) {
             return None;
         }
-        let escala = self.escala_do_original;
-        let relogio = self.relogio_ms;
         let quadro = self.corte.quadro(largura, altura);
         let Motor {
             dispositivo,
@@ -1521,12 +1316,8 @@ impl Motor {
             largura,
             altura,
             ajustes,
-            escala,
-            relogio,
             &quadro,
         );
-        let pendentes = recursos.grades_pendentes;
-
         let mut encoder = dispositivo.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Revelação Encoder (superfície)"),
         });
@@ -1553,7 +1344,6 @@ impl Motor {
             formato,
         );
         fila.submit(std::iter::once(encoder.finish()));
-        self.grades_pendentes = pendentes;
         Some(())
     }
 }
@@ -1569,8 +1359,6 @@ fn preparar<'a>(
     largura: u32,
     altura: u32,
     ajustes: &Ajustes,
-    escala: f32,
-    relogio: Option<f64>,
     quadro: &Quadro,
 ) -> &'a mut Recursos {
     if !cache.contains(&(largura, altura)) {
@@ -1612,75 +1400,6 @@ fn preparar<'a>(
     }
     recursos.subiu_agora = precisa_subir;
 
-    // Estágio darktable: as grades bilaterais só se refazem quando a chave muda.
-    recursos.grades_pendentes = false;
-    if ajustes.dt_shadhi_ativo != 0.0 || ajustes.dt_monochrome_ativo != 0.0 {
-        let chave = ChaveDasGrades::nova(pixels, ajustes, escala);
-        if let Some(agora) = relogio {
-            if recursos.grades_pedidas.as_ref() != Some(&chave) {
-                recursos.ultimo_pedido_ms = agora;
-                recursos.grades_pedidas = Some(chave.clone());
-            }
-        }
-        if recursos.chave_das_grades.as_ref() != Some(&chave)
-            && adiar_as_grades(
-                recursos.chave_das_grades.as_ref(),
-                &chave,
-                relogio,
-                recursos.ultimo_pedido_ms,
-            )
-        {
-            recursos.grades_pendentes = true;
-        } else if recursos.chave_das_grades.as_ref() != Some(&chave) {
-            let grades = crate::darktable::grades_do_estagio(
-                pixels,
-                largura as usize,
-                altura as usize,
-                ajustes,
-                escala,
-            );
-            let mut dados = [0.0f32; 16];
-            if let Some(g) = &grades.shadhi {
-                recursos.textura_grade_sh = textura_de_grade(dispositivo, Some(fila), g);
-                dados[..6].copy_from_slice(&[
-                    g.size_x as f32,
-                    g.size_y as f32,
-                    g.size_z as f32,
-                    0.0,
-                    g.sigma_s,
-                    g.sigma_r,
-                ]);
-            }
-            if let Some(g) = &grades.monochrome {
-                recursos.textura_grade_mo = textura_de_grade(dispositivo, Some(fila), g);
-                dados[8..14].copy_from_slice(&[
-                    g.size_x as f32,
-                    g.size_y as f32,
-                    g.size_z as f32,
-                    0.0,
-                    g.sigma_s,
-                    g.sigma_r,
-                ]);
-            }
-            fila.write_buffer(&recursos.buffer_grades, 0, bytemuck::cast_slice(&dados));
-            recursos.grupo = montar_grupo(
-                dispositivo,
-                pipeline,
-                entrada_efetiva(recursos),
-                &recursos.textura_saida,
-                &recursos.buffer_ajustes,
-                &recursos.textura_grade_sh,
-                &recursos.textura_grade_mo,
-                &recursos.buffer_grades,
-                &recursos.buffer_quadro,
-                &recursos.mascaras,
-                &recursos.textura_guia,
-                &recursos.buffer_guia,
-                &recursos.textura_tabelas,
-            );
-            recursos.chave_das_grades = Some(chave);
-        }
-    }
     // A guia da Claridade, da Textura e do Remover névoa: só quando um dos três
     // está em uso, e uma vez por foto — arrastar o slider não a refaz.
     let guia_em_dia = recursos
@@ -1702,9 +1421,6 @@ fn preparar<'a>(
             entrada_efetiva(recursos),
             &recursos.textura_saida,
             &recursos.buffer_ajustes,
-            &recursos.textura_grade_sh,
-            &recursos.textura_grade_mo,
-            &recursos.buffer_grades,
             &recursos.buffer_quadro,
             &recursos.mascaras,
             &recursos.textura_guia,
@@ -1778,9 +1494,6 @@ fn atualizar_mascaras(
             entrada_efetiva(recursos),
             &recursos.textura_saida,
             &recursos.buffer_ajustes,
-            &recursos.textura_grade_sh,
-            &recursos.textura_grade_mo,
-            &recursos.buffer_grades,
             &recursos.buffer_quadro,
             &recursos.mascaras,
             &recursos.textura_guia,
@@ -2047,40 +1760,6 @@ mod testes {
         );
     }
 
-    #[test]
-    fn as_grades_esperam_o_arrasto_parar_e_so_ele() {
-        let chave = |pixels, parametro: u32, modulos| super::ChaveDasGrades {
-            pixels,
-            escala: 1,
-            parametros: vec![parametro],
-            modulos,
-        };
-        let adiar = super::adiar_as_grades;
-        let feitas = chave(1, 10, (true, true));
-        let arrastando = chave(1, 11, (true, true));
-        // Sem relógio — a exportação e o desktop: sempre a grade exata.
-        assert!(!adiar(Some(&feitas), &arrastando, None, 0.0));
-        // Mudou há 20 ms: desenha com a de antes.
-        assert!(adiar(Some(&feitas), &arrastando, Some(1020.0), 1000.0));
-        // Parado há 150 ms: refaz.
-        assert!(!adiar(Some(&feitas), &arrastando, Some(1150.0), 1000.0));
-        // Outra foto, a primeira grade, ou um módulo que acabou de ligar: não há
-        // grade de antes que sirva.
-        assert!(!adiar(
-            Some(&feitas),
-            &chave(2, 11, (true, true)),
-            Some(1020.0),
-            1000.0
-        ));
-        assert!(!adiar(None, &arrastando, Some(1020.0), 1000.0));
-        assert!(!adiar(
-            Some(&feitas),
-            &chave(1, 11, (true, false)),
-            Some(1020.0),
-            1000.0
-        ));
-    }
-
     use super::*;
 
     /// Espera a thread abrir o dispositivo, e falha se não houver GPU.
@@ -2275,239 +1954,6 @@ mod testes {
             let saida = revelar_e_colher(&mut motor, entrada.clone(), com_campos(campos));
             assert_ne!(saida, neutro, "Detalhe — `{rotulo}` não fez efeito nenhum");
         }
-    }
-
-    /// O estilo `RecordarFotos P&B`, com os cinco módulos.
-    fn estilo_recordarfotos_pb() -> Ajustes {
-        Ajustes {
-            dt_exposure_ativo: 1.0,
-            dt_exposure_black: -0.0019,
-            dt_exposure_exposure: 0.163,
-            dt_shadhi_ativo: 1.0,
-            dt_shadhi_shadows: 65.38,
-            dt_shadhi_highlights: -20.51,
-            dt_monochrome_ativo: 1.0,
-            dt_vignette_ativo: 1.0,
-            dt_vignette_scale: 87.82,
-            dt_vignette_falloff_scale: 45.51,
-            dt_vignette_brightness: 0.99999,
-            dt_vignette_saturation: 0.147,
-            dt_vignette_autoratio: 1.0,
-            dt_vignette_shape: 0.48,
-            dt_cb_ativo: 1.0,
-            dt_cb_shadows_c: 0.1747,
-            dt_cb_shadows_h: 71.54,
-            dt_cb_midtones_h: 73.85,
-            dt_cb_highlights_y: 0.0449,
-            dt_cb_highlights_c: 0.0833,
-            dt_cb_highlights_h: 71.54,
-            dt_cb_saturation_highlights: 0.1603,
-            dt_cb_saturation_midtones: 0.1346,
-            dt_cb_brilliance_midtones: 0.1474,
-            ..Default::default()
-        }
-    }
-
-    /// O gabarito de CPU (`darktable.rs`) sobre pixels RGBA.
-    fn oraculo_darktable(
-        entrada: &[u8],
-        largura: usize,
-        altura: usize,
-        ajustes: &Ajustes,
-    ) -> Vec<u8> {
-        use crate::darktable as dt;
-        let tub = dt::Tubulacao::nova();
-        let mut px: Vec<dt::Rgb> = entrada
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| tub.entrar([c[0], c[1], c[2]]))
-            .collect();
-        if ajustes.dt_exposure_ativo != 0.0 {
-            dt::exposure(&mut px, dt::Exposure::de(ajustes));
-        }
-        if ajustes.dt_shadhi_ativo != 0.0 {
-            dt::shadhi(
-                &mut px,
-                largura,
-                altura,
-                &tub,
-                dt::ShadowsHighlights::de(ajustes),
-                1.0,
-            );
-        }
-        if ajustes.dt_monochrome_ativo != 0.0 {
-            dt::monochrome(
-                &mut px,
-                largura,
-                altura,
-                &tub,
-                dt::Monochrome::de(ajustes),
-                1.0,
-            );
-        }
-        if ajustes.dt_vignette_ativo != 0.0 {
-            dt::vignette(&mut px, largura, altura, dt::Vignette::de(ajustes));
-        }
-        if ajustes.dt_cb_ativo != 0.0 {
-            dt::color_balance_rgb(&mut px, &tub, &dt::ColorBalanceRgb::de(ajustes));
-        }
-        px.iter()
-            .flat_map(|c| {
-                let s = tub.sair(*c);
-                [s[0], s[1], s[2], 255]
-            })
-            .collect()
-    }
-
-    /// Cores saturadas em todos os matizes e uma rampa de cinza, 64×40.
-    fn carta_colorida() -> Arc<Vec<u8>> {
-        let (w, h) = (64u32, 40u32);
-        let mut px = Vec::with_capacity((w * h * 4) as usize);
-        for y in 0..h {
-            for x in 0..w {
-                let cor = if y < 30 {
-                    // Matiz pela coluna, valor e saturação pela linha.
-                    let hh = x as f32 / w as f32 * 6.0;
-                    let (v, s) = (1.0 - (y / 10) as f32 * 0.3, 1.0 - (y % 10) as f32 * 0.09);
-                    let c = v * s;
-                    let xx = c * (1.0 - (hh % 2.0 - 1.0).abs());
-                    let m = v - c;
-                    let (r, g, b) = match hh as u32 {
-                        0 => (c, xx, 0.0),
-                        1 => (xx, c, 0.0),
-                        2 => (0.0, c, xx),
-                        3 => (0.0, xx, c),
-                        4 => (xx, 0.0, c),
-                        _ => (c, 0.0, xx),
-                    };
-                    [
-                        ((r + m) * 255.0) as u8,
-                        ((g + m) * 255.0) as u8,
-                        ((b + m) * 255.0) as u8,
-                    ]
-                } else {
-                    [(x * 4) as u8; 3]
-                };
-                px.extend_from_slice(&[cor[0], cor[1], cor[2], 255]);
-            }
-        }
-        Arc::new(px)
-    }
-
-    /// O estágio darktable da GPU é o do gabarito de CPU, pixel a pixel —
-    /// inclusive o fatiamento das grades bilaterais calculadas em CPU.
-    ///
-    /// # Por que este é o teste que vale
-    ///
-    /// 🚨 **O gabarito já foi medido contra o darktable-cli 5.6.1** (máximo de 1
-    /// nível numa carta de teste). O que falta provar é que o WGSL é a mesma
-    /// conta — e é aqui que um `pow(0, 0)` indefinido, uma matriz com linha e
-    /// coluna trocadas ou uma constante com um dígito errado apareceriam.
-    ///
-    /// ⚠️ **Tolerância de 1 nível**, e só por arredondamento: a GPU pode fundir
-    /// multiplicação e soma (FMA) e errar na sétima casa. Uma conta errada move
-    /// o pixel dezenas de níveis.
-    /// 🚨 O preto absoluto passa pelo `soft_clip` do color balance rgb com
-    /// faixa zero (`exp(−x/0)` no C). Nas GPUs Intel/AMD dos Macs antigos a
-    /// divisão por zero do fast math saía NaN, e os pretos do "RecordarFotos
-    /// P&B" ficavam roxos: o preto tem de sair o preto do gabarito.
-    #[test]
-    fn o_preto_absoluto_no_pb_sai_o_preto_do_gabarito() {
-        let mut motor = motor_pronto();
-        let (w, h) = (8usize, 8usize);
-        let entrada: Arc<Vec<u8>> = Arc::new((0..w * h).flat_map(|_| [0u8, 0, 0, 255]).collect());
-        let estilo = estilo_recordarfotos_pb();
-        for (rotulo, ajustes) in [
-            (
-                "color balance rgb",
-                Ajustes {
-                    dt_exposure_ativo: 0.0,
-                    dt_shadhi_ativo: 0.0,
-                    dt_monochrome_ativo: 0.0,
-                    dt_vignette_ativo: 0.0,
-                    ..estilo
-                },
-            ),
-            ("os cinco", estilo),
-        ] {
-            let gpu = motor
-                .revelar(&entrada, w as u32, h as u32, &ajustes)
-                .expect("o motor devolveu imagem")
-                .into_rgba8()
-                .into_raw();
-            let cpu = oraculo_darktable(&entrada, w, h, &ajustes);
-            for (a, b) in gpu.as_chunks::<4>().0.iter().zip(cpu.as_chunks::<4>().0) {
-                assert!(
-                    (0..3).all(|c| a[c].abs_diff(b[c]) <= 1),
-                    "{rotulo}: o preto saiu {:?} na GPU e {:?} no gabarito",
-                    &a[..3],
-                    &b[..3]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn o_estagio_darktable_por_pixel_bate_com_o_oraculo() {
-        let mut motor = motor_pronto();
-        let entrada = carta_colorida();
-        let (w, h) = (64usize, 40usize);
-        let estilo = estilo_recordarfotos_pb();
-        // Um módulo ligado de cada vez, e os cinco juntos.
-        let so = |modulo: &str| Ajustes {
-            dt_exposure_ativo: (modulo == "exposure") as u8 as f32,
-            dt_shadhi_ativo: (modulo == "shadhi") as u8 as f32,
-            dt_monochrome_ativo: (modulo == "monochrome") as u8 as f32,
-            dt_vignette_ativo: (modulo == "vignette") as u8 as f32,
-            dt_cb_ativo: (modulo == "cb") as u8 as f32,
-            ..estilo
-        };
-        let casos = [
-            ("exposure", so("exposure")),
-            ("shadows and highlights", so("shadhi")),
-            ("monochrome", so("monochrome")),
-            ("vignetting", so("vignette")),
-            ("color balance rgb", so("cb")),
-            ("os cinco, na ordem do darktable", estilo),
-        ];
-        for (rotulo, ajustes) in casos {
-            let gpu = motor
-                .revelar(&entrada, w as u32, h as u32, &ajustes)
-                .expect("o motor devolveu imagem")
-                .into_rgba8()
-                .into_raw();
-            let cpu = oraculo_darktable(&entrada, w, h, &ajustes);
-            let mut pior = (0u8, 0usize);
-            for (i, (a, b)) in gpu.iter().zip(cpu.iter()).enumerate() {
-                if i % 4 == 3 {
-                    continue;
-                }
-                let d = a.abs_diff(*b);
-                if d > pior.0 {
-                    pior = (d, i);
-                }
-            }
-            let k = pior.1 / 4 * 4;
-            assert!(
-                pior.0 <= 1,
-                "{rotulo}: pixel ({}, {}) saiu {:?} na GPU e {:?} no gabarito",
-                (k / 4) % w,
-                (k / 4) / w,
-                &gpu[k..k + 3],
-                &cpu[k..k + 3]
-            );
-        }
-        // E desligado ele não existe: o neutro continua devolvendo a foto.
-        let neutro = motor
-            .revelar(&entrada, w as u32, h as u32, &Ajustes::default())
-            .unwrap()
-            .into_rgba8()
-            .into_raw();
-        assert_eq!(
-            neutro, *entrada,
-            "o estágio darktable desligado mexeu na foto"
-        );
     }
 
     /// A curva por ponto age, é monótona, e no neutro devolve a foto intacta.
@@ -3320,9 +2766,8 @@ mod testes {
     /// indefinido do jeito dela. É por isso que o defeito aparece numa máquina
     /// e não na outra.
     ///
-    /// ⚠️ **Cinco ajustes variam com a posição por construção** e ficam de
-    /// fora: a distorção e a vinheta da lente, a vinheta do darktable, a
-    /// vinheta pós-corte e o grão.
+    /// ⚠️ **Quatro ajustes variam com a posição por construção** e ficam de
+    /// fora: a distorção e a vinheta da lente, a vinheta pós-corte e o grão.
     /// Eles são espaciais — manchar o quadro é o trabalho deles.
     #[test]
     fn nenhum_efeito_mancha_um_preto_chapado() {
@@ -3333,10 +2778,7 @@ mod testes {
         let nomes = Ajustes::NOMES;
         let espacial = |i: usize| {
             let nome = nomes[i];
-            nome.starts_with("lens_")
-                || nome.starts_with("grain_")
-                || nome.starts_with("dt_vignette_")
-                || nome.starts_with("pcv_")
+            nome.starts_with("lens_") || nome.starts_with("grain_") || nome.starts_with("pcv_")
         };
 
         let neutro = Ajustes::default().como_vetor();
@@ -3444,11 +2886,11 @@ mod testes {
         )
     }
 
-    /// As duas vinhetas, cada uma sozinha: a de lente (a pós-corte que os
-    /// presets do Lightroom trazem) e a do darktable (a do `RecordarFotos P&B`),
-    /// com uma queda que não satura no meio da borda. O terceiro campo diz se a
-    /// borda esquerda e a de cima caem juntas — a proporção automática do
-    /// darktable; a de lente mede distância em pixels e não tem isso.
+    /// As duas vinhetas, cada uma sozinha: a de lente e a pós-corte (a que os
+    /// presets do Lightroom trazem), com uma queda que não satura no meio da
+    /// borda. O terceiro campo diz se a borda esquerda e a de cima caem juntas —
+    /// a elipse da pós-corte segue a proporção do quadro; a de lente mede
+    /// distância em pixels e não tem isso.
     fn as_duas_vinhetas() -> [(&'static str, Ajustes, bool); 2] {
         [
             (
@@ -3461,19 +2903,13 @@ mod testes {
                 false,
             ),
             (
-                "vinheta do darktable",
+                "vinheta pós-corte",
                 Ajustes {
-                    dt_vignette_ativo: 1.0,
-                    dt_vignette_scale: 60.0,
-                    dt_vignette_falloff_scale: 80.0,
-                    dt_vignette_brightness: -0.8,
-                    dt_vignette_saturation: 0.0,
-                    dt_vignette_center_x: 0.0,
-                    dt_vignette_center_y: 0.0,
-                    dt_vignette_autoratio: 1.0,
-                    dt_vignette_whratio: 1.0,
-                    dt_vignette_shape: 1.0,
-                    dt_vignette_unbound: 0.0,
+                    pcv_amount: -80.0,
+                    pcv_midpoint: 0.0,
+                    // Difusão inteira: a queda mais suave, como a do teste
+                    // pede ("uma queda que não satura no meio da borda").
+                    pcv_feather: 100.0,
                     ..Default::default()
                 },
                 true,
@@ -3498,8 +2934,8 @@ mod testes {
     }
 
     /// O gabarito: recorta **antes** e revela a foto já recortada, sem corte
-    /// nenhum no motor. É a ordem do darktable, onde o `vignette` vem depois do
-    /// `crop`.
+    /// nenhum no motor. É a ordem do Lightroom e do darktable, onde a vinheta
+    /// vem depois do recorte.
     fn recortar_e_revelar(
         motor: &mut Motor,
         pixels: &Arc<Vec<u8>>,
@@ -3536,11 +2972,11 @@ mod testes {
     }
 
     /// Confere a vinheta de um recorte `largura × altura` já recortado: centro
-    /// intacto, cantos simétricos e escuros, e — para a do darktable — a borda
+    /// intacto, cantos simétricos e escuros, e — para a pós-corte — a borda
     /// esquerda caindo junto com a de cima.
     ///
     /// ⚠️ **Os cantos são 1 e `largura − 1`**, e não 0 e `largura − 1`: o centro
-    /// das duas vinhetas é `largura / 2` (é a conta do darktable), e os pares
+    /// das duas vinhetas é `largura / 2`, e os pares
     /// simétricos em torno dele são `i` e `largura − i`.
     fn confere_a_vinheta_do_recorte(saida: &image::RgbaImage, rotulo: &str, bordas_juntas: bool) {
         let (w, h) = saida.dimensions();
@@ -3679,9 +3115,7 @@ mod testes {
     ///
     /// A de lente é conferida pela conta de antes: no canto (0, 0) de uma foto
     /// 120×80 a distância normalizada é 1, o fator é `1 − 0,8` e o cinza 160 vira
-    /// 32. A do darktable tem o gabarito de CPU bit a bit
-    /// (`sem_enquadramento_a_vinheta_e_a_de_antes`, em `darktable.rs`) e o
-    /// estágio inteiro contra ele (`o_estagio_darktable_por_pixel_bate_com_o_oraculo`).
+    /// 32. A pós-corte é conferida contra ela mesma, antes e depois de um corte.
     #[test]
     fn sem_corte_as_vinhetas_sao_as_de_antes() {
         let mut motor = motor_pronto();

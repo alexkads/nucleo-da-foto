@@ -1,4 +1,4 @@
-//! Os 193 ajustes, no layout que o WGSL espera.
+//! Os 133 ajustes, no layout que o WGSL espera.
 
 use serde::{Deserialize, Serialize};
 
@@ -197,84 +197,6 @@ pub struct Ajustes {
     pub curva_b6: f32,
     pub curva_b7: f32,
     pub curva_b8: f32,
-    // ------------------------------------------------ Estágio darktable 5.6.1
-    // 🚨 **Os módulos do darktable, com a conta do darktable** (2026-09-12). O
-    // dono pediu o estilo `RecordarFotos P&B` fiel, e a conferência provou que
-    // nenhum controle nosso fazia a mesma conta: o darktable opera em RGB linear
-    // Rec.2020, nós em sRGB com gama. Estes campos têm **os nomes e as escalas
-    // do `.dtstyle`** — o importador copia número, não converte —, e o gabarito
-    // do shader é `darktable.rs`, medido contra o `darktable-cli`.
-    //
-    // 🔑 **Cada módulo tem um interruptor (`*_ativo`)**, e desligado ele não
-    // existe: os outros campos guardam o `$DEFAULT` do darktable, para o módulo
-    // ligar com os valores que o darktable abre, e não com zeros.
-    pub dt_exposure_ativo: f32,
-    pub dt_exposure_black: f32,
-    pub dt_exposure_exposure: f32,
-    pub dt_vignette_ativo: f32,
-    pub dt_vignette_scale: f32,
-    pub dt_vignette_falloff_scale: f32,
-    pub dt_vignette_brightness: f32,
-    pub dt_vignette_saturation: f32,
-    pub dt_vignette_center_x: f32,
-    pub dt_vignette_center_y: f32,
-    pub dt_vignette_autoratio: f32,
-    pub dt_vignette_whratio: f32,
-    pub dt_vignette_shape: f32,
-    pub dt_vignette_unbound: f32,
-    pub dt_cb_ativo: f32,
-    pub dt_cb_shadows_y: f32,
-    pub dt_cb_shadows_c: f32,
-    pub dt_cb_shadows_h: f32,
-    pub dt_cb_midtones_y: f32,
-    pub dt_cb_midtones_c: f32,
-    pub dt_cb_midtones_h: f32,
-    pub dt_cb_highlights_y: f32,
-    pub dt_cb_highlights_c: f32,
-    pub dt_cb_highlights_h: f32,
-    pub dt_cb_global_y: f32,
-    pub dt_cb_global_c: f32,
-    pub dt_cb_global_h: f32,
-    pub dt_cb_shadows_weight: f32,
-    pub dt_cb_white_fulcrum: f32,
-    pub dt_cb_highlights_weight: f32,
-    pub dt_cb_chroma_shadows: f32,
-    pub dt_cb_chroma_highlights: f32,
-    pub dt_cb_chroma_global: f32,
-    pub dt_cb_chroma_midtones: f32,
-    pub dt_cb_saturation_global: f32,
-    pub dt_cb_saturation_highlights: f32,
-    pub dt_cb_saturation_midtones: f32,
-    pub dt_cb_saturation_shadows: f32,
-    pub dt_cb_hue_angle: f32,
-    pub dt_cb_brilliance_global: f32,
-    pub dt_cb_brilliance_highlights: f32,
-    pub dt_cb_brilliance_midtones: f32,
-    pub dt_cb_brilliance_shadows: f32,
-    pub dt_cb_mask_grey_fulcrum: f32,
-    pub dt_cb_vibrance: f32,
-    pub dt_cb_grey_fulcrum: f32,
-    pub dt_cb_contrast: f32,
-    // Shadows and highlights (algoritmo bilateral) e monochrome: os dois módulos
-    // LOCAIS do estágio darktable. A grade bilateral de cada um é calculada em
-    // CPU, uma vez por foto e por parâmetros, e o shader a fatia — ver
-    // `darktable::grades_do_estagio`. `dt_shadhi_flags` são as flags `UNBOUND_*`
-    // do darktable, guardadas como número porque decidem quais recortes a
-    // conta faz.
-    pub dt_shadhi_ativo: f32,
-    pub dt_shadhi_radius: f32,
-    pub dt_shadhi_shadows: f32,
-    pub dt_shadhi_whitepoint: f32,
-    pub dt_shadhi_highlights: f32,
-    pub dt_shadhi_compress: f32,
-    pub dt_shadhi_shadows_ccorrect: f32,
-    pub dt_shadhi_highlights_ccorrect: f32,
-    pub dt_shadhi_flags: f32,
-    pub dt_monochrome_ativo: f32,
-    pub dt_monochrome_a: f32,
-    pub dt_monochrome_b: f32,
-    pub dt_monochrome_size: f32,
-    pub dt_monochrome_highlights: f32,
     // ------------------------------------------ Os controles do Lightroom
     // 🔑 **Paridade com o painel do Lightroom** (dono, 2026-09-30: *"na
     // revelação sRGB preciso dos mesmos controles do Lightroom"*, com um DNG
@@ -369,13 +291,20 @@ pub fn cor_da_roda_do_lightroom(graus: f32) -> [f32; 3] {
 /// estágio darktable — exposure, vignetting e color balance rgb —, a 157; shadows
 /// and highlights e monochrome, a 171; os controles do Lightroom que faltavam
 /// — Textura, Remover névoa, a vinheta pós-corte e o resto do Detalhe —, a 193
-/// em 2026-09-30; a versão de processo, a 194 em 2026-10-01). A Tonalização (5) e o
+/// em 2026-09-30; a versão de processo, a 194 em 2026-10-01; sem o estágio
+/// darktable, a 133 em 2026-10-02).
+/// A Tonalização (5) e o
 /// Grão (2) entraram primeiro; depois a Calibração de câmera (7), os eixos que
 /// faltavam do Color Grading (5) e o mixer de preto e branco (9). **Todos no
 /// fim da lista**, e não perto do que se parece com eles: a posição de um campo
 /// é o contrato com o shader, e mover `nr_luminance` para junto do grão faria
 /// toda revelação já gravada ler o campo do vizinho.
-pub const QUANTIDADE: usize = 194;
+///
+/// 🚨 **A única vez que saiu um bloco do meio** (2/out/2026): os 61 campos
+/// `dt_*`, quando o dono decidiu um motor só. Tudo depois deles andou 61 posições
+/// — o shader, o wasm e o `nomes.json` do site mudaram juntos, e o banco não
+/// sentiu, porque guarda por nome.
+pub const QUANTIDADE: usize = 133;
 
 /// O tamanho do buffer de `uniform`, arredondado para múltiplo de 16 bytes.
 ///
@@ -471,26 +400,6 @@ impl Default for Ajustes {
         neutro.curva_b6 = identidade[6];
         neutro.curva_b7 = identidade[7];
         neutro.curva_b8 = identidade[8];
-        // O estágio darktable nasce desligado, com os `$DEFAULT` do darktable 5.6.1.
-        neutro.dt_vignette_scale = 80.0;
-        neutro.dt_vignette_falloff_scale = 50.0;
-        neutro.dt_vignette_brightness = -0.5;
-        neutro.dt_vignette_saturation = -0.5;
-        neutro.dt_vignette_whratio = 1.0;
-        neutro.dt_vignette_shape = 1.0;
-        neutro.dt_vignette_unbound = 1.0;
-        neutro.dt_cb_shadows_weight = 1.0;
-        neutro.dt_cb_highlights_weight = 1.0;
-        neutro.dt_cb_mask_grey_fulcrum = 0.1845;
-        neutro.dt_cb_grey_fulcrum = 0.1845;
-        neutro.dt_shadhi_radius = 100.0;
-        neutro.dt_shadhi_shadows = 50.0;
-        neutro.dt_shadhi_highlights = -50.0;
-        neutro.dt_shadhi_compress = 50.0;
-        neutro.dt_shadhi_shadows_ccorrect = 100.0;
-        neutro.dt_shadhi_highlights_ccorrect = 50.0;
-        neutro.dt_shadhi_flags = 127.0;
-        neutro.dt_monochrome_size = 2.0;
         // Os neutros do Lightroom que não são zero: em cada um, o motor faz
         // exatamente o que fazia antes de o controle existir.
         neutro.tone_curve_split_shadows = 25.0;
@@ -518,7 +427,7 @@ impl Ajustes {
         0.0, 31.875, 63.75, 95.625, 127.5, 159.375, 191.25, 223.125, 255.0,
     ];
 
-    /// Os 193 nomes, na ordem do `uniform`.
+    /// Os 133 nomes, na ordem do `uniform`.
     ///
     /// 🔑 É a ordem que o vetor posicional ([`Ajustes::como_vetor`]) segue, a
     /// que o `struct Params` do WGSL declara, e a que o site recebe em
@@ -634,67 +543,6 @@ impl Ajustes {
         "curva_b6",
         "curva_b7",
         "curva_b8",
-        "dt_exposure_ativo",
-        "dt_exposure_black",
-        "dt_exposure_exposure",
-        "dt_vignette_ativo",
-        "dt_vignette_scale",
-        "dt_vignette_falloff_scale",
-        "dt_vignette_brightness",
-        "dt_vignette_saturation",
-        "dt_vignette_center_x",
-        "dt_vignette_center_y",
-        "dt_vignette_autoratio",
-        "dt_vignette_whratio",
-        "dt_vignette_shape",
-        "dt_vignette_unbound",
-        "dt_cb_ativo",
-        "dt_cb_shadows_y",
-        "dt_cb_shadows_c",
-        "dt_cb_shadows_h",
-        "dt_cb_midtones_y",
-        "dt_cb_midtones_c",
-        "dt_cb_midtones_h",
-        "dt_cb_highlights_y",
-        "dt_cb_highlights_c",
-        "dt_cb_highlights_h",
-        "dt_cb_global_y",
-        "dt_cb_global_c",
-        "dt_cb_global_h",
-        "dt_cb_shadows_weight",
-        "dt_cb_white_fulcrum",
-        "dt_cb_highlights_weight",
-        "dt_cb_chroma_shadows",
-        "dt_cb_chroma_highlights",
-        "dt_cb_chroma_global",
-        "dt_cb_chroma_midtones",
-        "dt_cb_saturation_global",
-        "dt_cb_saturation_highlights",
-        "dt_cb_saturation_midtones",
-        "dt_cb_saturation_shadows",
-        "dt_cb_hue_angle",
-        "dt_cb_brilliance_global",
-        "dt_cb_brilliance_highlights",
-        "dt_cb_brilliance_midtones",
-        "dt_cb_brilliance_shadows",
-        "dt_cb_mask_grey_fulcrum",
-        "dt_cb_vibrance",
-        "dt_cb_grey_fulcrum",
-        "dt_cb_contrast",
-        "dt_shadhi_ativo",
-        "dt_shadhi_radius",
-        "dt_shadhi_shadows",
-        "dt_shadhi_whitepoint",
-        "dt_shadhi_highlights",
-        "dt_shadhi_compress",
-        "dt_shadhi_shadows_ccorrect",
-        "dt_shadhi_highlights_ccorrect",
-        "dt_shadhi_flags",
-        "dt_monochrome_ativo",
-        "dt_monochrome_a",
-        "dt_monochrome_b",
-        "dt_monochrome_size",
-        "dt_monochrome_highlights",
         "texture",
         "dehaze",
         "tone_curve_split_shadows",
@@ -761,15 +609,14 @@ impl Ajustes {
             || (self.processo >= 0.5 && (self.highlights != 0.0 || self.shadows != 0.0))
     }
 
-    /// Alguma das três vinhetas está ligada — a de lente, a pós-corte ou a do
-    /// estilo darktable?
+    /// Alguma das duas vinhetas está ligada — a de lente ou a pós-corte?
     ///
     /// 🔑 **São os únicos ajustes que dependem do enquadramento** (ver
     /// `Motor::definir_corte`): sem nenhuma delas, mudar o corte não muda pixel
     /// revelado nenhum. Quem reprocessaria a cada arrasto de alça pergunta aqui
     /// antes.
     pub fn vinheta_ligada(&self) -> bool {
-        self.lens_vignette_amount != 0.0 || self.dt_vignette_ativo != 0.0 || self.pcv_amount != 0.0
+        self.lens_vignette_amount != 0.0 || self.pcv_amount != 0.0
     }
 }
 
@@ -802,7 +649,7 @@ mod testes {
         assert_eq!(neutro.saturation, 0.0);
     }
 
-    /// O layout que vai para a GPU tem os 194 campos, de quatro bytes cada.
+    /// O layout que vai para a GPU tem os 133 campos, de quatro bytes cada.
     ///
     /// Campo a mais desloca **todos** os seguintes na leitura do shader, e o
     /// sintoma é a saturação virando nitidez.
@@ -810,12 +657,12 @@ mod testes {
     /// ⚠️ **O número do `uniform` é escrito à mão de propósito.** Derivá-lo aqui
     /// (`size_of().next_multiple_of(16)`) faria o teste concordar com qualquer
     /// mudança, inclusive com a errada — e é justamente o alinhamento de 16
-    /// bytes do WebGL2 que já derrubou este shader uma vez. 194 × 4 = 776, e o
-    /// próximo múltiplo de 16 é 784.
+    /// bytes do WebGL2 que já derrubou este shader uma vez. 133 × 4 = 532, e o
+    /// próximo múltiplo de 16 é 544.
     #[test]
     fn o_layout_tem_os_campos_de_quatro_bytes() {
         assert_eq!(std::mem::size_of::<Ajustes>(), QUANTIDADE * 4);
-        assert_eq!(TAMANHO_DO_UNIFORM, 784);
+        assert_eq!(TAMANHO_DO_UNIFORM, 544);
     }
 
     /// Os nomes do `struct Params` do WGSL, na ordem em que ele os declara.
@@ -914,16 +761,7 @@ mod testes {
         assert_eq!(neutro[posicao("curva_m8")], 255.0);
         assert_eq!(neutro[posicao("curva_b4")], 127.5);
         assert_eq!(neutro[posicao("curva_r0")], 0.0);
-        // 🔑 E os onze `$DEFAULT` não-nulos do estágio darktable — que nasce
-        // DESLIGADO, e é por isso que eles não mexem na foto.
-        assert_eq!(neutro[posicao("dt_vignette_scale")], 80.0);
-        assert_eq!(neutro[posicao("dt_cb_grey_fulcrum")], 0.1845);
-        assert_eq!(neutro[posicao("dt_cb_ativo")], 0.0);
-        assert_eq!(neutro[posicao("dt_shadhi_flags")], 127.0);
-        assert_eq!(
-            neutro.iter().filter(|v| **v != 0.0).count(),
-            3 + 32 + 11 + 8 + 10
-        );
+        assert_eq!(neutro.iter().filter(|v| **v != 0.0).count(), 3 + 32 + 10);
 
         let com_matiz = Ajustes {
             hsl_green_hue: 33.0,

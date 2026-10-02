@@ -5,8 +5,7 @@
 //! revela um pixel por vez e só alcança a vizinhança 5×5 (ruído e nitidez); o
 //! contraste local da Claridade mede dezenas de pixels, e o Remover névoa
 //! precisa do "canal escuro" de uma janela inteira e da luz do céu da foto. Os
-//! dois saem daqui, calculados uma vez por foto na CPU, como as grades do
-//! estágio darktable (`darktable::grades_do_estagio`).
+//! dois saem daqui, calculados uma vez por foto na CPU.
 //!
 //! ## Os quatro canais
 //!

@@ -153,68 +153,6 @@ struct Params {
     curva_b6: f32,
     curva_b7: f32,
     curva_b8: f32,
-    // Estágio darktable 5.6.1: nomes e escalas do `.dtstyle`. Ver `darktable.wgsl`.
-    dt_exposure_ativo: f32,
-    dt_exposure_black: f32,
-    dt_exposure_exposure: f32,
-    dt_vignette_ativo: f32,
-    dt_vignette_scale: f32,
-    dt_vignette_falloff_scale: f32,
-    dt_vignette_brightness: f32,
-    dt_vignette_saturation: f32,
-    dt_vignette_center_x: f32,
-    dt_vignette_center_y: f32,
-    dt_vignette_autoratio: f32,
-    dt_vignette_whratio: f32,
-    dt_vignette_shape: f32,
-    dt_vignette_unbound: f32,
-    dt_cb_ativo: f32,
-    dt_cb_shadows_y: f32,
-    dt_cb_shadows_c: f32,
-    dt_cb_shadows_h: f32,
-    dt_cb_midtones_y: f32,
-    dt_cb_midtones_c: f32,
-    dt_cb_midtones_h: f32,
-    dt_cb_highlights_y: f32,
-    dt_cb_highlights_c: f32,
-    dt_cb_highlights_h: f32,
-    dt_cb_global_y: f32,
-    dt_cb_global_c: f32,
-    dt_cb_global_h: f32,
-    dt_cb_shadows_weight: f32,
-    dt_cb_white_fulcrum: f32,
-    dt_cb_highlights_weight: f32,
-    dt_cb_chroma_shadows: f32,
-    dt_cb_chroma_highlights: f32,
-    dt_cb_chroma_global: f32,
-    dt_cb_chroma_midtones: f32,
-    dt_cb_saturation_global: f32,
-    dt_cb_saturation_highlights: f32,
-    dt_cb_saturation_midtones: f32,
-    dt_cb_saturation_shadows: f32,
-    dt_cb_hue_angle: f32,
-    dt_cb_brilliance_global: f32,
-    dt_cb_brilliance_highlights: f32,
-    dt_cb_brilliance_midtones: f32,
-    dt_cb_brilliance_shadows: f32,
-    dt_cb_mask_grey_fulcrum: f32,
-    dt_cb_vibrance: f32,
-    dt_cb_grey_fulcrum: f32,
-    dt_cb_contrast: f32,
-    dt_shadhi_ativo: f32,
-    dt_shadhi_radius: f32,
-    dt_shadhi_shadows: f32,
-    dt_shadhi_whitepoint: f32,
-    dt_shadhi_highlights: f32,
-    dt_shadhi_compress: f32,
-    dt_shadhi_shadows_ccorrect: f32,
-    dt_shadhi_highlights_ccorrect: f32,
-    dt_shadhi_flags: f32,
-    dt_monochrome_ativo: f32,
-    dt_monochrome_a: f32,
-    dt_monochrome_b: f32,
-    dt_monochrome_size: f32,
-    dt_monochrome_highlights: f32,
     // Os controles do Lightroom que faltavam (2026-09-30). Ver `ajustes.rs`.
     texture: f32,
     dehaze: f32,
@@ -242,12 +180,14 @@ struct Params {
     processo: f32,
     // 🔑 Enchimento, e não campo: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
     // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 171
-    // `f32` davam 684, e os 194 de hoje dão 776. O Rust manda 776 bytes num
-    // buffer de 784 (`TAMANHO_DO_UNIFORM`); estes nunca são lidos. Ficam DEPOIS dos 194 para não
+    // `f32` davam 684, os 194 davam 776, e os 133 de hoje (sem o estágio darktable, 2/out/2026)
+    // dão 532. O Rust manda 532 bytes num buffer de 544 (`TAMANHO_DO_UNIFORM`); estes nunca são
+    // lidos. Ficam DEPOIS dos 133 para não
     // deslocar nenhuma posição — e o teste que compara os nomes com o `Ajustes`
     // ignora o que começa com `_`.
     _enchimento_a: f32,
     _enchimento_b: f32,
+    _enchimento_c: f32,
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
@@ -257,7 +197,7 @@ struct Params {
 //
 // 🔑 **É o que deixa as vinhetas no recorte.** O shader revela a foto inteira e
 // o enquadramento vem depois (`transformacao::aplicar`); as duas vinhetas — a
-// de lente e a do darktable — levam o pixel a este quadro antes de medir
+// de lente e a pós-corte — levam o pixel a este quadro antes de medir
 // centro, proporção e escala. Sem enquadramento, é a identidade com as
 // dimensões da foto, e as duas saem bit a bit as de antes.
 struct QuadroDeSaida {
@@ -1046,25 +986,6 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
         
     }
-    // Estágio darktable — a base, e os nossos controles por cima.
-    //
-    // 🔑 **Vem antes de todo ajuste de cor nosso, e depois do ruído e da
-    // nitidez.** Um estilo do darktable é um visual inteiro, e o que o operador
-    // mexe na revelação é retoque sobre ele — a mesma relação de um preset com
-    // os sliders. Ruído e nitidez ficam antes porque leem a vizinhança da
-    // textura de entrada, e não do pixel já revelado.
-    //
-    // Desligado, nenhum dos três módulos toca o pixel — nem a ida e volta ao
-    // espaço linear, que custaria arredondamento à toa.
-    if (params.dt_exposure_ativo != 0.0 || params.dt_shadhi_ativo != 0.0
-        || params.dt_monochrome_ativo != 0.0 || params.dt_vignette_ativo != 0.0
-        || params.dt_cb_ativo != 0.0) {
-        let dt_saida = dt_estagio(vec3<f32>(r, g, b), coord);
-        r = dt_saida.r;
-        g = dt_saida.g;
-        b = dt_saida.b;
-    }
-
     // 0. Calibração de câmera — **antes de tudo**, e é essa posição que a define.
     //
     // 🔑 No Lightroom ela age nos primários do perfil da câmera, antes de
@@ -2025,8 +1946,7 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
 ///
 /// Aqui não há indeterminação: `NaN` falha em **toda** comparação, então ele
 /// não entra em nenhum dos dois ramos e cai no `0.0` do fim. `+∞` vira 255,
-/// `-∞` vira 0, e todo número normal atravessa igual — os testes do gabarito
-/// (`o_estagio_darktable_por_pixel_bate_com_o_oraculo`) continuam batendo.
+/// `-∞` vira 0, e todo número normal atravessa igual.
 ///
 /// ⚠️ **Isto é a rede, e não o conserto.** Um `NaN` aqui quer dizer que alguma
 /// conta lá atrás dividiu por zero ou elevou um negativo — e o lugar de achar
