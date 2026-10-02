@@ -464,6 +464,80 @@ fn com_luminancia(cor: vec3<f32>, l: f32, n: f32) -> vec3<f32> {
     return mix(cor + vec3<f32>(delta), cor * escala, mistura);
 }
 
+/// A Divisão de tons e o Color Grading (as rodas e a luminância de cada faixa).
+///
+/// 🔑 **No processo 1 ela vem depois das vinhetas** (régua `vinheta-viragem`,
+/// 2/out/2026): numa foto P&B com viragem sépia, a borda que a vinheta branca
+/// do Lightroom clareia continua sépia — a vinheta é uma camada dentro do
+/// efeito, e não por cima dele, como no darktable. Com a viragem antes, a
+/// vinheta levava a borda ao branco neutro (−11 a −16 de "quente" nos
+/// realces). No processo 0 a ordem é a de antes, e foto revelada não muda.
+fn viragem(entrada: vec3<f32>) -> vec3<f32> {
+    var cor = clamp(
+        entrada,
+        vec3<f32>(0.0, 0.0, 0.0),
+        vec3<f32>(255.0, 255.0, 255.0),
+    );
+    let l = ((cor.r + cor.g + cor.b) / 3.0) / 255.0;
+
+    // O balanço desloca o ponto em que uma ponta cede para a outra:
+    // positivo dá mais foto às altas luzes, negativo às sombras.
+    let balanco = clamp(params.split_balance * 0.01, -1.0, 1.0);
+    let centro = 0.5 - balanco * 0.4;
+
+    // 🔑 **A mistura vira a LARGURA da transição**, que é o que o
+    // `Blending` da Adobe faz: em 0 as faixas têm borda quase dura, em 100
+    // elas se sobrepõem quase inteiras. No neutro (50) a meia-largura dá
+    // **0,35** — exatamente o valor fixo que estava aqui antes de
+    // 2026-09-12, e é por isso que toda revelação já gravada continua
+    // saindo idêntica.
+    let mistura = clamp(params.split_blending * 0.01, 0.0, 1.0);
+    let meia = 0.10 + mistura * 0.50;
+    let peso_alta = smoothstep(centro - meia, centro + meia, l);
+    let peso_baixa = 1.0 - peso_alta;
+    // O meio é o que as duas pontas não reivindicam — um sino em torno do
+    // centro, que vale 1 onde as duas empatam e 0 nas extremidades.
+    let peso_meio = 1.0 - abs(peso_alta - peso_baixa);
+
+    // A Luminância de cada faixa (2026-09-30): clareia na direção do
+    // branco e escurece na do preto, proporcionalmente, e nunca estoura.
+    let dl = (params.split_shadow_lum * peso_baixa * peso_baixa
+        + params.split_midtone_lum * peso_meio * peso_meio
+        + params.split_highlight_lum * peso_alta * peso_alta
+        + params.split_global_lum) * 0.01;
+    if (dl != 0.0) {
+        var n = l;
+        if (dl > 0.0) {
+            n = l + min(dl, 1.0) * (1.0 - l);
+        } else {
+            n = l * (1.0 + max(dl, -1.0));
+        }
+        cor = clamp(com_luminancia(cor, l, n), vec3<f32>(0.0), vec3<f32>(255.0));
+    }
+
+    // 🔑 **As rodas são as do Lightroom desde 2026-09-30**: cada uma soma
+    // um deslocamento de cor em CIELab, de croma `0,4 × saturação` e
+    // matiz `matiz + 28°`, pesado pela faixa — e a luminosidade L* fica.
+    // Os dois números saíram de um DNG revelado no Lightroom (o
+    // `_DSC0010-2` do Estúdio Canela): com eles, a cor das sombras, do
+    // meio-tom e das altas luzes da prévia que o Lightroom gravou bate em
+    // ~2 unidades de a*/b*. Até ali cada roda misturava a cor pura do
+    // matiz HSV, e o mesmo número do Lightroom dava outra cor — o amarelo
+    // 59 virava verde nas altas luzes e o vermelho 14 virava roxo.
+    let lab = para_lab(cor);
+    var desvio = roda_do_lightroom(params.split_shadow_hue, params.split_shadow_sat) * peso_baixa
+        + roda_do_lightroom(params.split_midtone_hue, params.split_midtone_sat) * peso_meio
+        + roda_do_lightroom(params.split_highlight_hue, params.split_highlight_sat) * peso_alta
+        + roda_do_lightroom(params.split_global_hue, params.split_global_sat);
+    // O preto puro e o branco puro ficam como estão: não há cor que caiba
+    // em L* 0 ou 100, e a conta voltaria com o canal estourado.
+    desvio *= smoothstep(0.0, 8.0, lab.x) * (1.0 - smoothstep(92.0, 100.0, lab.x));
+    cor = de_lab(vec3<f32>(lab.x, lab.y + desvio.x, lab.z + desvio.y));
+    return cor;
+}
+
+
+
 /// O detalhe `d` (pixel − média) contido: a borda forte conta cada vez menos,
 /// que é o que tira o halo de um contraste local feito com desfoque comum.
 fn detalhe_contido(d: f32, dureza: f32) -> f32 {
@@ -1710,73 +1784,12 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     // do matiz`, soma de dois termos não-negativos com um deles positivo
     // sempre que `f > 0`: não cruza o zero, não inverte, e o fator fica
     // limitado. Quem prende é `a_tonalizacao_nao_mancha_o_que_veio_fora_da_faixa`.
-    if (params.split_shadow_sat != 0.0 || params.split_highlight_sat != 0.0
-        || params.split_midtone_sat != 0.0 || params.split_global_sat != 0.0
-        || params.split_shadow_lum != 0.0 || params.split_midtone_lum != 0.0
-        || params.split_highlight_lum != 0.0 || params.split_global_lum != 0.0) {
-        var cor = clamp(
-            vec3<f32>(r, g, b),
-            vec3<f32>(0.0, 0.0, 0.0),
-            vec3<f32>(255.0, 255.0, 255.0),
-        );
-        let l = ((cor.r + cor.g + cor.b) / 3.0) / 255.0;
-
-        // O balanço desloca o ponto em que uma ponta cede para a outra:
-        // positivo dá mais foto às altas luzes, negativo às sombras.
-        let balanco = clamp(params.split_balance * 0.01, -1.0, 1.0);
-        let centro = 0.5 - balanco * 0.4;
-
-        // 🔑 **A mistura vira a LARGURA da transição**, que é o que o
-        // `Blending` da Adobe faz: em 0 as faixas têm borda quase dura, em 100
-        // elas se sobrepõem quase inteiras. No neutro (50) a meia-largura dá
-        // **0,35** — exatamente o valor fixo que estava aqui antes de
-        // 2026-09-12, e é por isso que toda revelação já gravada continua
-        // saindo idêntica.
-        let mistura = clamp(params.split_blending * 0.01, 0.0, 1.0);
-        let meia = 0.10 + mistura * 0.50;
-        let peso_alta = smoothstep(centro - meia, centro + meia, l);
-        let peso_baixa = 1.0 - peso_alta;
-        // O meio é o que as duas pontas não reivindicam — um sino em torno do
-        // centro, que vale 1 onde as duas empatam e 0 nas extremidades.
-        let peso_meio = 1.0 - abs(peso_alta - peso_baixa);
-
-        // A Luminância de cada faixa (2026-09-30): clareia na direção do
-        // branco e escurece na do preto, proporcionalmente, e nunca estoura.
-        let dl = (params.split_shadow_lum * peso_baixa * peso_baixa
-            + params.split_midtone_lum * peso_meio * peso_meio
-            + params.split_highlight_lum * peso_alta * peso_alta
-            + params.split_global_lum) * 0.01;
-        if (dl != 0.0) {
-            var n = l;
-            if (dl > 0.0) {
-                n = l + min(dl, 1.0) * (1.0 - l);
-            } else {
-                n = l * (1.0 + max(dl, -1.0));
-            }
-            cor = clamp(com_luminancia(cor, l, n), vec3<f32>(0.0), vec3<f32>(255.0));
-        }
-
-        // 🔑 **As rodas são as do Lightroom desde 2026-09-30**: cada uma soma
-        // um deslocamento de cor em CIELab, de croma `0,4 × saturação` e
-        // matiz `matiz + 28°`, pesado pela faixa — e a luminosidade L* fica.
-        // Os dois números saíram de um DNG revelado no Lightroom (o
-        // `_DSC0010-2` do Estúdio Canela): com eles, a cor das sombras, do
-        // meio-tom e das altas luzes da prévia que o Lightroom gravou bate em
-        // ~2 unidades de a*/b*. Até ali cada roda misturava a cor pura do
-        // matiz HSV, e o mesmo número do Lightroom dava outra cor — o amarelo
-        // 59 virava verde nas altas luzes e o vermelho 14 virava roxo.
-        let lab = para_lab(cor);
-        var desvio = roda_do_lightroom(params.split_shadow_hue, params.split_shadow_sat) * peso_baixa
-            + roda_do_lightroom(params.split_midtone_hue, params.split_midtone_sat) * peso_meio
-            + roda_do_lightroom(params.split_highlight_hue, params.split_highlight_sat) * peso_alta
-            + roda_do_lightroom(params.split_global_hue, params.split_global_sat);
-        // O preto puro e o branco puro ficam como estão: não há cor que caiba
-        // em L* 0 ou 100, e a conta voltaria com o canal estourado.
-        desvio *= smoothstep(0.0, 8.0, lab.x) * (1.0 - smoothstep(92.0, 100.0, lab.x));
-        cor = de_lab(vec3<f32>(lab.x, lab.y + desvio.x, lab.z + desvio.y));
-        r = cor.r;
-        g = cor.g;
-        b = cor.b;
+    let tem_viragem = params.split_shadow_sat != 0.0 || params.split_highlight_sat != 0.0 || params.split_midtone_sat != 0.0 || params.split_global_sat != 0.0 || params.split_shadow_lum != 0.0 || params.split_midtone_lum != 0.0 || params.split_highlight_lum != 0.0 || params.split_global_lum != 0.0;
+    if (tem_viragem && params.processo < 0.5) {
+        let virada = viragem(vec3<f32>(r, g, b));
+        r = virada.r;
+        g = virada.g;
+        b = virada.b;
     }
 
     // Lens vignetting — last, and on purpose.
@@ -1925,6 +1938,14 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         g = cor.g;
         b = cor.b;
         }
+    }
+
+    // A viragem do processo 1 — depois das duas vinhetas (ver `viragem`).
+    if (tem_viragem && params.processo >= 0.5) {
+        let virada = viragem(vec3<f32>(r, g, b));
+        r = virada.r;
+        g = virada.g;
+        b = virada.b;
     }
 
     // Grão de filme — por último, e depois até da vinheta.

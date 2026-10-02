@@ -3267,6 +3267,32 @@ mod testes {
         }
     }
 
+    /// No processo 1 a viragem vem depois da vinheta pós-corte: a borda que a
+    /// vinheta branca clareia continua sépia, como no Lightroom (régua
+    /// `vinheta-viragem`) — com a viragem antes, a borda ia ao branco neutro.
+    #[test]
+    fn no_processo_1_a_vinheta_branca_fica_dentro_da_viragem() {
+        let mut motor = motor_pronto();
+        let ajustes = Ajustes {
+            bw_ativo: 1.0,
+            split_highlight_hue: 45.0,
+            split_highlight_sat: 40.0,
+            pcv_amount: 80.0,
+            pcv_midpoint: 0.0,
+            processo: 1.0,
+            ..Default::default()
+        };
+        let s = revelar_e_colher(&mut motor, cinza(16, 150), ajustes);
+        // O canto (0, 0): clareado pela vinheta e ainda quente.
+        let (r, b) = (s[0] as i32, s[2] as i32);
+        assert!(r > 150, "a vinheta não clareou o canto: {:?}", &s[..3]);
+        assert!(
+            r - b >= 8,
+            "o canto clareado perdeu a viragem: {:?}",
+            &s[..3]
+        );
+    }
+
     /// A amostra em cinzas: as mesmas manchas, sem cor nenhuma.
     fn amostra_sem_cor() -> Arc<Vec<u8>> {
         Arc::new(
