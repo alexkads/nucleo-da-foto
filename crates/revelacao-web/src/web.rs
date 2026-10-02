@@ -290,6 +290,26 @@ pub fn decodificar_imagem(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
     Ok(saida)
 }
 
+/// O espaço de cor que o arquivo declara: 0 sRGB, 1 Adobe RGB, 2 Display P3.
+///
+/// 🔑 **O par do `createImageBitmap`** (2/out/2026): o navegador decodifica,
+/// com `colorSpaceConversion: "none"`, e não lê nem o perfil ICC nem o `R03`
+/// do EXIF que as Nikon do estúdio gravam no modo Adobe RGB. Este lê só o
+/// cabeçalho, e [`converter_para_srgb`] faz nos pixels a conta que o
+/// `decodificar_imagem` (e o app) já fazem — a mesma foto nos dois lados.
+#[wasm_bindgen]
+pub fn espaco_de_cor_declarado(bytes: &[u8]) -> u8 {
+    foto_codec::espaco_de_cor::declarado_no_arquivo(bytes).codigo()
+}
+
+/// Converte RGBA (4 bytes por pixel) do espaço `espaco` (o código de
+/// [`espaco_de_cor_declarado`]) para sRGB, no lugar. Em sRGB não toca em nada.
+#[wasm_bindgen]
+pub fn converter_para_srgb(rgba: &mut [u8], espaco: u8) {
+    use foto_codec::espaco_de_cor::{rgba_para_srgb, EspacoDeCor};
+    rgba_para_srgb(rgba, EspacoDeCor::do_codigo(espaco));
+}
+
 /// Codifica RGBA no formato pedido — o "baixar em vários formatos".
 ///
 /// 🔑 **O JPEG sai do mesmo codificador de sempre** (`revelacao_core::jpeg`),

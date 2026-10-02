@@ -115,6 +115,30 @@ mod testes {
         assert!((cru[0] as i32 - 200).abs() <= 3, "o image puro deu {cru:?}");
     }
 
+    /// O caminho do site: o navegador decodifica sem converter, e o espaço
+    /// lido do cabeçalho mais a conversão do RGBA dão o mesmo pixel do app.
+    #[test]
+    fn o_espaco_do_cabecalho_e_a_conversao_do_rgba_dao_a_foto_do_app() {
+        use crate::espaco_de_cor::{declarado_no_arquivo, rgba_para_srgb};
+        let tiff = crate::espaco_de_cor::testes::exif_com_indice(b"R03");
+        let jpeg = jpeg_com_exif(16, 16, [200, 120, 60], &tiff);
+        let espaco = declarado_no_arquivo(&jpeg);
+        assert_eq!(espaco, EspacoDeCor::AdobeRgb);
+        assert_eq!(EspacoDeCor::do_codigo(espaco.codigo()), espaco);
+
+        let mut rgba = image::load_from_memory(&jpeg)
+            .unwrap()
+            .to_rgba8()
+            .into_raw();
+        rgba_para_srgb(&mut rgba, espaco);
+        let do_app = decodificar_de_pe(&jpeg).unwrap().to_rgba8().into_raw();
+        assert_eq!(rgba, do_app);
+
+        let sem = jpeg_com_orientacao(1);
+        assert_eq!(declarado_no_arquivo(&sem), EspacoDeCor::Srgb);
+        assert_eq!(declarado_no_arquivo(b"nem imagem"), EspacoDeCor::Srgb);
+    }
+
     #[test]
     fn a_foto_em_pe_sai_de_pe() {
         let foto = decodificar_de_pe(&jpeg_com_orientacao(6)).expect("abre");

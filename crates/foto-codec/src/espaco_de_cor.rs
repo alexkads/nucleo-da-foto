@@ -34,7 +34,9 @@
 //! 3×3 em luz linear, e põe a curva do sRGB. O que sai da gama do sRGB é
 //! cortado, como o Lightroom faz ao exportar em sRGB.
 
-use image::DynamicImage;
+use std::io::Cursor;
+
+use image::{DynamicImage, ImageDecoder, ImageReader};
 
 /// O espaço de cor de uma foto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,14 +165,48 @@ fn linear_para_srgb(v: f32) -> f32 {
 /// o passo no escuro (onde a curva é mais íngreme) fica abaixo de 0,05 nível.
 const PASSOS: usize = 1 << 16;
 
-/// A foto em sRGB. Em sRGB, devolve como veio, sem tocar num pixel.
-///
-/// Em 8 bits por canal: 16 bits (um PNG raro) descem a 8 antes — o motor de
-/// revelação recebe 8 de todo jeito. O alfa passa intacto.
-pub fn para_srgb(foto: DynamicImage, de: EspacoDeCor) -> DynamicImage {
-    if de == EspacoDeCor::Srgb {
-        return foto;
+impl EspacoDeCor {
+    /// O código que atravessa a fronteira do wasm: 0 sRGB, 1 Adobe RGB, 2
+    /// Display P3. Código desconhecido é sRGB — não converter é o seguro.
+    pub fn codigo(self) -> u8 {
+        match self {
+            Self::Srgb => 0,
+            Self::AdobeRgb => 1,
+            Self::DisplayP3 => 2,
+        }
     }
+
+    pub fn do_codigo(codigo: u8) -> Self {
+        match codigo {
+            1 => Self::AdobeRgb,
+            2 => Self::DisplayP3,
+            _ => Self::Srgb,
+        }
+    }
+}
+
+/// O espaço que os bytes de um arquivo declaram, lido do cabeçalho — sem
+/// decodificar os pixels.
+///
+/// 🔑 **É o que o site precisa ao lado do `createImageBitmap`**: o navegador
+/// decodifica (5 a 10× mais rápido que o wasm), mas com `colorSpaceConversion:
+/// "none"` não aplica perfil nenhum, e o `R03` do EXIF ele nunca leu. Com o
+/// espaço daqui e [`rgba_para_srgb`], a foto do site sai a mesma do app.
+/// Arquivo que não abre é sRGB.
+pub fn declarado_no_arquivo(bytes: &[u8]) -> EspacoDeCor {
+    let Ok(leitor) = ImageReader::new(Cursor::new(bytes)).with_guessed_format() else {
+        return EspacoDeCor::Srgb;
+    };
+    let Ok(mut decodificador) = leitor.into_decoder() else {
+        return EspacoDeCor::Srgb;
+    };
+    let icc = decodificador.icc_profile().ok().flatten();
+    let exif = decodificador.exif_metadata().ok().flatten();
+    EspacoDeCor::declarado(icc.as_deref(), exif.as_deref())
+}
+
+/// A conversão de um pixel (os três primeiros bytes) para sRGB.
+fn conversor(de: EspacoDeCor) -> impl Fn(&mut [u8]) {
     let linear: Vec<f32> = (0..=255u8).map(|v| de.linear(v)).collect();
     let volta: Vec<u8> = (0..PASSOS)
         .map(|i| {
@@ -179,7 +215,7 @@ pub fn para_srgb(foto: DynamicImage, de: EspacoDeCor) -> DynamicImage {
         })
         .collect();
     let m = de.para_srgb();
-    let converter = |p: &mut [u8]| {
+    move |p: &mut [u8]| {
         let c = [
             linear[p[0] as usize],
             linear[p[1] as usize],
@@ -189,7 +225,31 @@ pub fn para_srgb(foto: DynamicImage, de: EspacoDeCor) -> DynamicImage {
             let v = linha[0] * c[0] + linha[1] * c[1] + linha[2] * c[2];
             *saida = volta[(v.clamp(0.0, 1.0) * (PASSOS - 1) as f32).round() as usize];
         }
-    };
+    }
+}
+
+/// RGBA (4 bytes por pixel) para sRGB, no lugar — a mesma conta de
+/// [`para_srgb`]. Em sRGB não toca em nada; o alfa passa intacto.
+pub fn rgba_para_srgb(rgba: &mut [u8], de: EspacoDeCor) {
+    if de == EspacoDeCor::Srgb {
+        return;
+    }
+    let converter = conversor(de);
+    rgba.as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .for_each(|p| converter(p));
+}
+
+/// A foto em sRGB. Em sRGB, devolve como veio, sem tocar num pixel.
+///
+/// Em 8 bits por canal: 16 bits (um PNG raro) descem a 8 antes — o motor de
+/// revelação recebe 8 de todo jeito. O alfa passa intacto.
+pub fn para_srgb(foto: DynamicImage, de: EspacoDeCor) -> DynamicImage {
+    if de == EspacoDeCor::Srgb {
+        return foto;
+    }
+    let converter = conversor(de);
     match foto {
         DynamicImage::ImageRgb8(mut rgb) => {
             rgb.as_chunks_mut::<3>()
