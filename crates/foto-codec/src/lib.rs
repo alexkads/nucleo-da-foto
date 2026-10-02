@@ -17,6 +17,7 @@
 //! O `revelacao_core::jpeg` continua existindo e apontando para cá: quem já
 //! chamava, chama igual.
 
+pub mod espaco_de_cor;
 pub mod orientacao;
 
 use image::codecs::jpeg::{JpegEncoder, PixelDensity};

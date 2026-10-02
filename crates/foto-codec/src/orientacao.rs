@@ -27,6 +27,8 @@ use std::path::Path;
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageReader, ImageResult};
 
+use crate::espaco_de_cor::{self, EspacoDeCor};
+
 /// Decodifica bytes de imagem já com a orientação aplicada.
 pub fn decodificar_de_pe(bytes: &[u8]) -> ImageResult<DynamicImage> {
     de_pe(ImageReader::new(Cursor::new(bytes)).with_guessed_format()?)
@@ -37,12 +39,17 @@ pub fn abrir_de_pe(caminho: impl AsRef<Path>) -> ImageResult<DynamicImage> {
     de_pe(ImageReader::open(caminho)?.with_guessed_format()?)
 }
 
+/// De pé **e em sRGB**: a outra etiqueta que o `image` deixa de lado é o
+/// espaço de cor (`espaco_de_cor`) — a câmera do estúdio grava Adobe RGB.
 fn de_pe<R: BufRead + Seek>(leitor: ImageReader<R>) -> ImageResult<DynamicImage> {
     let mut decodificador = leitor.into_decoder()?;
     let orientacao = decodificador
         .orientation()
         .unwrap_or(Orientation::NoTransforms);
-    let mut foto = DynamicImage::from_decoder(decodificador)?;
+    let icc = decodificador.icc_profile().ok().flatten();
+    let exif = decodificador.exif_metadata().ok().flatten();
+    let espaco = EspacoDeCor::declarado(icc.as_deref(), exif.as_deref());
+    let mut foto = espaco_de_cor::para_srgb(DynamicImage::from_decoder(decodificador)?, espaco);
     foto.apply_orientation(orientacao);
     Ok(foto)
 }
@@ -54,12 +61,6 @@ mod testes {
     /// Um JPEG 4×2 (deitado) com `Orientation = 6` (girar 90° no horário) no
     /// EXIF — o que a câmera grava quando a foto foi feita em pé.
     fn jpeg_com_orientacao(valor: u16) -> Vec<u8> {
-        let imagem =
-            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(4, 2, image::Rgb([90, 90, 90])));
-        let mut jpeg = Vec::new();
-        imagem
-            .write_to(&mut Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
-            .expect("codificar");
         // APP1 com um TIFF mínimo: II*, IFD0 com uma entrada (0x0112).
         let mut tiff = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0];
         tiff.extend_from_slice(&0x0112u16.to_le_bytes());
@@ -68,13 +69,50 @@ mod testes {
         tiff.extend_from_slice(&valor.to_le_bytes());
         tiff.extend_from_slice(&[0, 0]);
         tiff.extend_from_slice(&0u32.to_le_bytes()); // sem próximo IFD
+        jpeg_com_exif(4, 2, [90, 90, 90], &tiff)
+    }
+
+    /// Um JPEG liso `largura × altura` da cor dada, com `tiff` no APP1.
+    fn jpeg_com_exif(largura: u32, altura: u32, cor: [u8; 3], tiff: &[u8]) -> Vec<u8> {
+        let imagem = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            largura,
+            altura,
+            image::Rgb(cor),
+        ));
+        let mut jpeg = Vec::new();
+        imagem
+            .write_to(&mut Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .expect("codificar");
         let mut app1 = b"Exif\0\0".to_vec();
-        app1.extend_from_slice(&tiff);
+        app1.extend_from_slice(tiff);
         let mut saida = vec![0xFF, 0xD8, 0xFF, 0xE1];
         saida.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
         saida.extend_from_slice(&app1);
         saida.extend_from_slice(&jpeg[2..]);
         saida
+    }
+
+    /// A foto de uma câmera no modo Adobe RGB (`R03` no EXIF, sem ICC) abre
+    /// convertida para sRGB — o laranja fica mais vermelho, como no Lightroom.
+    /// O `image` puro, que é o que ignorava a etiqueta, a deixa como está.
+    #[test]
+    fn a_foto_em_adobe_rgb_abre_em_srgb() {
+        let tiff = crate::espaco_de_cor::testes::exif_com_indice(b"R03");
+        let jpeg = jpeg_com_exif(16, 16, [200, 120, 60], &tiff);
+        let p = decodificar_de_pe(&jpeg)
+            .expect("abre")
+            .to_rgb8()
+            .get_pixel(8, 8)
+            .0;
+        for (valor, esperado) in p.iter().zip([224, 121, 53]) {
+            assert!((*valor as i32 - esperado).abs() <= 3, "saiu {p:?}");
+        }
+        let cru = image::load_from_memory(&jpeg)
+            .unwrap()
+            .to_rgb8()
+            .get_pixel(8, 8)
+            .0;
+        assert!((cru[0] as i32 - 200).abs() <= 3, "o image puro deu {cru:?}");
     }
 
     #[test]
