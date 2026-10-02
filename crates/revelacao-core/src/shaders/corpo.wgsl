@@ -407,22 +407,17 @@ fn com_luminancia(cor: vec3<f32>, l: f32, n: f32) -> vec3<f32> {
     return mix(cor + vec3<f32>(delta), cor * escala, mistura);
 }
 
-/// A Divisão de tons e o Color Grading (as rodas e a luminância de cada faixa).
-///
-/// 🔑 **No processo 1 ela vem depois das vinhetas** (régua `vinheta-viragem`,
-/// 2/out/2026): numa foto P&B com viragem sépia, a borda que a vinheta branca
-/// do Lightroom clareia continua sépia — a vinheta é uma camada dentro do
-/// efeito, e não por cima dele, como no darktable. Com a viragem antes, a
-/// vinheta levava a borda ao branco neutro (−11 a −16 de "quente" nos
-/// realces). No processo 0 a ordem é a de antes, e foto revelada não muda.
+/// A Divisão de tons e o Color Grading (as rodas e a luminância de cada faixa),
+/// na ordem do processo 0: tudo antes das vinhetas, pesado pela luz de entrada.
 fn viragem(entrada: vec3<f32>) -> vec3<f32> {
-    var cor = clamp(
-        entrada,
-        vec3<f32>(0.0, 0.0, 0.0),
-        vec3<f32>(255.0, 255.0, 255.0),
-    );
+    let cor = clamp(entrada, vec3<f32>(0.0), vec3<f32>(255.0));
     let l = ((cor.r + cor.g + cor.b) / 3.0) / 255.0;
+    return cor_da_viragem(luminancia_da_viragem(cor, l), l);
+}
 
+/// O peso de cada faixa da viragem num nível de luz `l` (0–1): sombras,
+/// tons médios e realces.
+fn faixas_da_viragem(l: f32) -> vec3<f32> {
     // O balanço desloca o ponto em que uma ponta cede para a outra:
     // positivo dá mais foto às altas luzes, negativo às sombras.
     let balanco = clamp(params.split_balance * 0.01, -1.0, 1.0);
@@ -441,22 +436,49 @@ fn viragem(entrada: vec3<f32>) -> vec3<f32> {
     // O meio é o que as duas pontas não reivindicam — um sino em torno do
     // centro, que vale 1 onde as duas empatam e 0 nas extremidades.
     let peso_meio = 1.0 - abs(peso_alta - peso_baixa);
+    return vec3<f32>(peso_baixa, peso_meio, peso_alta);
+}
 
-    // A Luminância de cada faixa (2026-09-30): clareia na direção do
-    // branco e escurece na do preto, proporcionalmente, e nunca estoura.
-    let dl = (params.split_shadow_lum * peso_baixa * peso_baixa
-        + params.split_midtone_lum * peso_meio * peso_meio
-        + params.split_highlight_lum * peso_alta * peso_alta
+/// A Luminância de cada faixa (2026-09-30): clareia na direção do branco e
+/// escurece na do preto, proporcionalmente, e nunca estoura.
+///
+/// 🔑 **No processo 1 ela fica antes das vinhetas; só a cor vai para depois**
+/// (2/out/2026). A régua `vinheta-viragem` provou que a cor das sombras e dos
+/// realces fica dentro da vinheta — e nada sobre a Luminância. Com ela junto,
+/// depois da vinheta, a borda que a vinheta +100 clareia escurecia de novo
+/// com a Luminância negativa dos realces, e o RF Bem Velhão foi de ΔE 29 a 59
+/// (rodada `tudo-5`); na `tudo-4a`, com ela antes, eram 29.
+fn luminancia_da_viragem(entrada: vec3<f32>, l: f32) -> vec3<f32> {
+    let faixas = faixas_da_viragem(l);
+    let dl = (params.split_shadow_lum * faixas.x * faixas.x
+        + params.split_midtone_lum * faixas.y * faixas.y
+        + params.split_highlight_lum * faixas.z * faixas.z
         + params.split_global_lum) * 0.01;
-    if (dl != 0.0) {
-        var n = l;
-        if (dl > 0.0) {
-            n = l + min(dl, 1.0) * (1.0 - l);
-        } else {
-            n = l * (1.0 + max(dl, -1.0));
-        }
-        cor = clamp(com_luminancia(cor, l, n), vec3<f32>(0.0), vec3<f32>(255.0));
+    if (dl == 0.0) {
+        return entrada;
     }
+    var n = l;
+    if (dl > 0.0) {
+        n = l + min(dl, 1.0) * (1.0 - l);
+    } else {
+        n = l * (1.0 + max(dl, -1.0));
+    }
+    return clamp(com_luminancia(entrada, l, n), vec3<f32>(0.0), vec3<f32>(255.0));
+}
+
+/// A cor das rodas, pesada pelas faixas do nível `l` (0–1).
+///
+/// 🔑 **No processo 1 ela vem depois das vinhetas** (régua `vinheta-viragem`,
+/// 2/out/2026): numa foto P&B com viragem sépia, a borda que a vinheta branca
+/// do Lightroom clareia continua sépia — a vinheta é uma camada dentro do
+/// efeito, e não por cima dele, como no darktable. Com a viragem antes, a
+/// vinheta levava a borda ao branco neutro (−11 a −16 de "quente" nos
+/// realces). No processo 0 a ordem é a de antes, e foto revelada não muda.
+fn cor_da_viragem(cor: vec3<f32>, l: f32) -> vec3<f32> {
+    let faixas = faixas_da_viragem(l);
+    let peso_baixa = faixas.x;
+    let peso_meio = faixas.y;
+    let peso_alta = faixas.z;
 
     // 🔑 **As rodas são as do Lightroom desde 2026-09-30**: cada uma soma
     // um deslocamento de cor em CIELab, de croma `0,4 × saturação` e
@@ -486,8 +508,7 @@ fn viragem(entrada: vec3<f32>) -> vec3<f32> {
     // O preto puro e o branco puro ficam como estão: não há cor que caiba
     // em L* 0 ou 100, e a conta voltaria com o canal estourado.
     desvio *= smoothstep(0.0, 8.0, lab.x) * (1.0 - smoothstep(92.0, 100.0, lab.x));
-    cor = de_lab(vec3<f32>(lab.x, lab.y + desvio.x, lab.z + desvio.y));
-    return cor;
+    return de_lab(vec3<f32>(lab.x, lab.y + desvio.x, lab.z + desvio.y));
 }
 
 /// O Δa*, Δb* que a Divisão de tons do Lightroom põe num nível de entrada
@@ -1742,12 +1763,22 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
     // do matiz`, soma de dois termos não-negativos com um deles positivo
     // sempre que `f > 0`: não cruza o zero, não inverte, e o fator fica
     // limitado. Quem prende é `a_tonalizacao_nao_mancha_o_que_veio_fora_da_faixa`.
-    let tem_viragem = params.split_shadow_sat != 0.0 || params.split_highlight_sat != 0.0 || params.split_midtone_sat != 0.0 || params.split_global_sat != 0.0 || params.split_shadow_lum != 0.0 || params.split_midtone_lum != 0.0 || params.split_highlight_lum != 0.0 || params.split_global_lum != 0.0;
-    if (tem_viragem && params.processo < 0.5) {
+    let tem_cor_na_viragem = params.split_shadow_sat != 0.0 || params.split_highlight_sat != 0.0 || params.split_midtone_sat != 0.0 || params.split_global_sat != 0.0;
+    let tem_luz_na_viragem = params.split_shadow_lum != 0.0 || params.split_midtone_lum != 0.0 || params.split_highlight_lum != 0.0 || params.split_global_lum != 0.0;
+    if ((tem_cor_na_viragem || tem_luz_na_viragem) && params.processo < 0.5) {
         let virada = viragem(vec3<f32>(r, g, b));
         r = virada.r;
         g = virada.g;
         b = virada.b;
+    }
+    // No processo 1 a Luminância fica aqui, antes das vinhetas, e a cor vai
+    // para depois delas (ver `luminancia_da_viragem`).
+    if (tem_luz_na_viragem && params.processo >= 0.5) {
+        let cor = clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(255.0));
+        let clareada = luminancia_da_viragem(cor, (cor.r + cor.g + cor.b) / 765.0);
+        r = clareada.r;
+        g = clareada.g;
+        b = clareada.b;
     }
 
     // Lens vignetting — last, and on purpose.
@@ -1898,9 +1929,11 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
     }
 
-    // A viragem do processo 1 — depois das duas vinhetas (ver `viragem`).
-    if (tem_viragem && params.processo >= 0.5) {
-        let virada = viragem(vec3<f32>(r, g, b));
+    // A cor da viragem do processo 1 — depois das duas vinhetas (ver
+    // `cor_da_viragem`).
+    if (tem_cor_na_viragem && params.processo >= 0.5) {
+        let cor = clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(255.0));
+        let virada = cor_da_viragem(cor, (cor.r + cor.g + cor.b) / 765.0);
         r = virada.r;
         g = virada.g;
         b = virada.b;

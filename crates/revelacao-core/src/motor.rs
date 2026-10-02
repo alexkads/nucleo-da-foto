@@ -2740,6 +2740,33 @@ mod testes {
         );
     }
 
+    /// No processo 1 só a cor da viragem vai para depois das vinhetas: a
+    /// Luminância fica antes. Com ela depois, a borda que a vinheta +100
+    /// clareia escurecia de novo com a Luminância negativa dos realces — o RF
+    /// Bem Velhão (vinheta +100, realces −38) foi de ΔE 29 a 59 na `tudo-5`.
+    #[test]
+    fn no_processo_1_a_luminancia_da_viragem_nao_apaga_a_vinheta_branca() {
+        let mut motor = motor_pronto();
+        let so_vinheta = Ajustes {
+            pcv_amount: 100.0,
+            pcv_midpoint: 0.0,
+            processo: 1.0,
+            ..Default::default()
+        };
+        let com_luminancia = Ajustes {
+            split_highlight_lum: -38.0,
+            split_midtone_lum: -50.0,
+            ..so_vinheta
+        };
+        let canto = revelar_e_colher(&mut motor, cinza(16, 150), so_vinheta)[0] as i32;
+        let s = revelar_e_colher(&mut motor, cinza(16, 150), com_luminancia);
+        assert!(
+            s[0] as i32 >= canto - 12,
+            "a Luminância apagou o canto que a vinheta clareou: {} contra {canto}",
+            s[0]
+        );
+    }
+
     /// A amostra em cinzas: as mesmas manchas, sem cor nenhuma.
     fn amostra_sem_cor() -> Arc<Vec<u8>> {
         Arc::new(
