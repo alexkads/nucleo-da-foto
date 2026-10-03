@@ -1,4 +1,4 @@
-//! Os 133 ajustes, no layout que o WGSL espera.
+//! Os 144 ajustes, no layout que o WGSL espera.
 
 use serde::{Deserialize, Serialize};
 
@@ -248,6 +248,30 @@ pub struct Ajustes {
     // continua igual até alguém a atualizar. Quem liga o 1 é a foto nova e o
     // preset do Lightroom.
     pub processo: f32,
+    // ------------------------------------------ A vinheta do darktable
+    // 🎞️ O módulo `vignette` do darktable (`src/iop/vignette.c`,
+    // `dt_iop_vignette_params_t`), de volta em 2/out/2026 como controle
+    // próprio — a do `RecordarFotos P&B`. As duas do Lightroom não a imitam:
+    // aqui o brilho positivo **soma** luz linear, e a forma é a superelipse de
+    // expoente `2/forma`. Os campos são os do módulo, com as faixas e os
+    // padrões dele: o liga/desliga (o botão do módulo), início e raio do
+    // decaimento 0..200 % (80 e 50), brilho e saturação −1..1 (−0,5), centro
+    // −1..1, proporção automática 0/1, largura/altura 0..2 (1), forma 0..5 (1)
+    // e matização 0 desligada, 1 saída de 8 bits, 2 de 16. O `unbound` não
+    // entra: é sempre ligado (o 0–255 do fim do shader prende). Prefixo
+    // `darktable_`, e não `dt_`: os `dt_*` são a receita antiga, que
+    // `migrar_do_darktable` traduz e apaga.
+    pub darktable_vignette_ativo: f32,
+    pub darktable_vignette_scale: f32,
+    pub darktable_vignette_falloff_scale: f32,
+    pub darktable_vignette_brightness: f32,
+    pub darktable_vignette_saturation: f32,
+    pub darktable_vignette_center_x: f32,
+    pub darktable_vignette_center_y: f32,
+    pub darktable_vignette_autoratio: f32,
+    pub darktable_vignette_whratio: f32,
+    pub darktable_vignette_shape: f32,
+    pub darktable_vignette_dithering: f32,
 }
 
 /// A cor que a roda da Gradação de cores do Lightroom mostra no matiz `graus`,
@@ -292,7 +316,8 @@ pub fn cor_da_roda_do_lightroom(graus: f32) -> [f32; 3] {
 /// and highlights e monochrome, a 171; os controles do Lightroom que faltavam
 /// — Textura, Remover névoa, a vinheta pós-corte e o resto do Detalhe —, a 193
 /// em 2026-09-30; a versão de processo, a 194 em 2026-10-01; sem o estágio
-/// darktable, a 133 em 2026-10-02).
+/// darktable, a 133 em 2026-10-02; a vinheta do darktable, de volta como
+/// controle próprio, a 144 no mesmo dia).
 /// A Tonalização (5) e o
 /// Grão (2) entraram primeiro; depois a Calibração de câmera (7), os eixos que
 /// faltavam do Color Grading (5) e o mixer de preto e branco (9). **Todos no
@@ -304,7 +329,7 @@ pub fn cor_da_roda_do_lightroom(graus: f32) -> [f32; 3] {
 /// `dt_*`, quando o dono decidiu um motor só. Tudo depois deles andou 61 posições
 /// — o shader, o wasm e o `nomes.json` do site mudaram juntos, e o banco não
 /// sentiu, porque guarda por nome.
-pub const QUANTIDADE: usize = 133;
+pub const QUANTIDADE: usize = 144;
 
 /// O tamanho do buffer de `uniform`, arredondado para múltiplo de 16 bytes.
 ///
@@ -412,6 +437,14 @@ impl Default for Ajustes {
         neutro.pcv_midpoint = 50.0;
         neutro.pcv_feather = 50.0;
         neutro.grain_roughness = 50.0;
+        // Os padrões do `vignette.c`, com o módulo desligado: quem o liga
+        // começa onde o darktable começa.
+        neutro.darktable_vignette_scale = 80.0;
+        neutro.darktable_vignette_falloff_scale = 50.0;
+        neutro.darktable_vignette_brightness = -0.5;
+        neutro.darktable_vignette_saturation = -0.5;
+        neutro.darktable_vignette_whratio = 1.0;
+        neutro.darktable_vignette_shape = 1.0;
         neutro
     }
 }
@@ -427,7 +460,7 @@ impl Ajustes {
         0.0, 31.875, 63.75, 95.625, 127.5, 159.375, 191.25, 223.125, 255.0,
     ];
 
-    /// Os 133 nomes, na ordem do `uniform`.
+    /// Os 144 nomes, na ordem do `uniform`.
     ///
     /// 🔑 É a ordem que o vetor posicional ([`Ajustes::como_vetor`]) segue, a
     /// que o `struct Params` do WGSL declara, e a que o site recebe em
@@ -566,6 +599,17 @@ impl Ajustes {
         "pcv_highlights",
         "grain_roughness",
         "processo",
+        "darktable_vignette_ativo",
+        "darktable_vignette_scale",
+        "darktable_vignette_falloff_scale",
+        "darktable_vignette_brightness",
+        "darktable_vignette_saturation",
+        "darktable_vignette_center_x",
+        "darktable_vignette_center_y",
+        "darktable_vignette_autoratio",
+        "darktable_vignette_whratio",
+        "darktable_vignette_shape",
+        "darktable_vignette_dithering",
     ];
 
     /// Os 46 valores, por posição — o que a GPU recebe, como `f32`.
@@ -609,14 +653,22 @@ impl Ajustes {
             || (self.processo >= 0.5 && (self.highlights != 0.0 || self.shadows != 0.0))
     }
 
-    /// Alguma das duas vinhetas está ligada — a de lente ou a pós-corte?
+    /// Alguma das três vinhetas está ligada — a de lente, a pós-corte ou a do
+    /// darktable?
     ///
     /// 🔑 **São os únicos ajustes que dependem do enquadramento** (ver
     /// `Motor::definir_corte`): sem nenhuma delas, mudar o corte não muda pixel
     /// revelado nenhum. Quem reprocessaria a cada arrasto de alça pergunta aqui
     /// antes.
     pub fn vinheta_ligada(&self) -> bool {
-        self.lens_vignette_amount != 0.0 || self.pcv_amount != 0.0
+        self.lens_vignette_amount != 0.0
+            || self.pcv_amount != 0.0
+            || self.vinheta_do_darktable_ligada()
+    }
+
+    /// A vinheta do darktable está ligada — o botão do módulo.
+    pub fn vinheta_do_darktable_ligada(&self) -> bool {
+        self.darktable_vignette_ativo >= 0.5
     }
 }
 
@@ -649,7 +701,7 @@ mod testes {
         assert_eq!(neutro.saturation, 0.0);
     }
 
-    /// O layout que vai para a GPU tem os 133 campos, de quatro bytes cada.
+    /// O layout que vai para a GPU tem os 144 campos, de quatro bytes cada.
     ///
     /// Campo a mais desloca **todos** os seguintes na leitura do shader, e o
     /// sintoma é a saturação virando nitidez.
@@ -657,12 +709,12 @@ mod testes {
     /// ⚠️ **O número do `uniform` é escrito à mão de propósito.** Derivá-lo aqui
     /// (`size_of().next_multiple_of(16)`) faria o teste concordar com qualquer
     /// mudança, inclusive com a errada — e é justamente o alinhamento de 16
-    /// bytes do WebGL2 que já derrubou este shader uma vez. 133 × 4 = 532, e o
-    /// próximo múltiplo de 16 é 544.
+    /// bytes do WebGL2 que já derrubou este shader uma vez. 144 × 4 = 576, já
+    /// múltiplo de 16.
     #[test]
     fn o_layout_tem_os_campos_de_quatro_bytes() {
         assert_eq!(std::mem::size_of::<Ajustes>(), QUANTIDADE * 4);
-        assert_eq!(TAMANHO_DO_UNIFORM, 544);
+        assert_eq!(TAMANHO_DO_UNIFORM, 576);
     }
 
     /// Os nomes do `struct Params` do WGSL, na ordem em que ele os declara.
@@ -761,7 +813,13 @@ mod testes {
         assert_eq!(neutro[posicao("curva_m8")], 255.0);
         assert_eq!(neutro[posicao("curva_b4")], 127.5);
         assert_eq!(neutro[posicao("curva_r0")], 0.0);
-        assert_eq!(neutro.iter().filter(|v| **v != 0.0).count(), 3 + 32 + 10);
+        // Os seis padrões da vinheta do darktable (início e raio do
+        // decaimento, brilho, saturação, proporção e forma) entraram em
+        // 2/out/2026, com o módulo desligado.
+        assert_eq!(neutro[posicao("darktable_vignette_scale")], 80.0);
+        assert_eq!(neutro[posicao("darktable_vignette_brightness")], -0.5);
+        assert_eq!(neutro[posicao("darktable_vignette_ativo")], 0.0);
+        assert_eq!(neutro.iter().filter(|v| **v != 0.0).count(), 3 + 32 + 16);
 
         let com_matiz = Ajustes {
             hsl_green_hue: 33.0,

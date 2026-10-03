@@ -37,6 +37,7 @@ mod retoque;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod testes_das_mascaras;
 pub mod transformacao;
+pub mod vinheta_darktable;
 
 pub use ajustes::{Ajustes, QUANTIDADE};
 pub use cronometro::TemposDaGpu;

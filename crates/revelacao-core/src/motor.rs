@@ -2795,19 +2795,23 @@ mod testes {
     /// indefinido do jeito dela. É por isso que o defeito aparece numa máquina
     /// e não na outra.
     ///
-    /// ⚠️ **Quatro ajustes variam com a posição por construção** e ficam de
-    /// fora: a distorção e a vinheta da lente, a vinheta pós-corte e o grão.
+    /// ⚠️ **Cinco ajustes variam com a posição por construção** e ficam de
+    /// fora: a distorção e a vinheta da lente, a vinheta pós-corte, a do
+    /// darktable e o grão.
     /// Eles são espaciais — manchar o quadro é o trabalho deles.
     #[test]
     fn nenhum_efeito_mancha_um_preto_chapado() {
         let mut motor = motor_pronto();
         let preto = cinza(16, 0);
 
-        // Os índices dos quatro que desenham no quadro, e não na cor.
+        // Os índices dos cinco que desenham no quadro, e não na cor.
         let nomes = Ajustes::NOMES;
         let espacial = |i: usize| {
             let nome = nomes[i];
-            nome.starts_with("lens_") || nome.starts_with("grain_") || nome.starts_with("pcv_")
+            nome.starts_with("lens_")
+                || nome.starts_with("grain_")
+                || nome.starts_with("pcv_")
+                || nome.starts_with("darktable_vignette_")
         };
 
         let neutro = Ajustes::default().como_vetor();
@@ -2915,12 +2919,13 @@ mod testes {
         )
     }
 
-    /// As duas vinhetas, cada uma sozinha: a de lente e a pós-corte (a que os
-    /// presets do Lightroom trazem), com uma queda que não satura no meio da
-    /// borda. O terceiro campo diz se a borda esquerda e a de cima caem juntas —
-    /// a elipse da pós-corte segue a proporção do quadro; a de lente mede
-    /// distância em pixels e não tem isso.
-    fn as_duas_vinhetas() -> [(&'static str, Ajustes, bool); 2] {
+    /// As três vinhetas, cada uma sozinha: a de lente, a pós-corte (a que os
+    /// presets do Lightroom trazem) e a do darktable, com uma queda que não
+    /// satura no meio da borda. O terceiro campo diz se a borda esquerda e a de
+    /// cima caem juntas — a elipse da pós-corte e a da proporção automática do
+    /// darktable seguem o quadro; a de lente mede distância em pixels e não tem
+    /// isso.
+    fn as_tres_vinhetas() -> [(&'static str, Ajustes, bool); 3] {
         [
             (
                 "vinheta de lente",
@@ -2943,7 +2948,210 @@ mod testes {
                 },
                 true,
             ),
+            (
+                "vinheta do darktable",
+                Ajustes {
+                    darktable_vignette_ativo: 1.0,
+                    darktable_vignette_brightness: -0.8,
+                    darktable_vignette_saturation: 0.0,
+                    darktable_vignette_scale: 30.0,
+                    darktable_vignette_falloff_scale: 100.0,
+                    darktable_vignette_autoratio: 1.0,
+                    ..Default::default()
+                },
+                true,
+            ),
         ]
+    }
+
+    /// Uma foto `largura × altura` com cor e luz variando — para a saturação da
+    /// vinheta do darktable ter onde agir.
+    fn degrade_colorido(largura: u32, altura: u32) -> Arc<Vec<u8>> {
+        Arc::new(
+            (0..altura)
+                .flat_map(|y| {
+                    (0..largura).flat_map(move |x| {
+                        [
+                            (40 + x * 180 / largura) as u8,
+                            (60 + y * 150 / altura) as u8,
+                            (200 - (x + y) * 120 / (largura + altura)) as u8,
+                            255,
+                        ]
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// A vinheta do `RecordarFotos P&B.dtstyle`: início do decaimento 87,82,
+    /// raio 45,51, brilho 0,99999, saturação 0,147, proporção automática e
+    /// forma 0,48.
+    fn vinheta_do_estilo_pb() -> Ajustes {
+        Ajustes {
+            darktable_vignette_ativo: 1.0,
+            darktable_vignette_brightness: 0.99999,
+            darktable_vignette_saturation: 0.147,
+            darktable_vignette_scale: 87.82,
+            darktable_vignette_falloff_scale: 45.51,
+            darktable_vignette_autoratio: 1.0,
+            darktable_vignette_shape: 0.48,
+            ..Default::default()
+        }
+    }
+
+    /// 🎞️ **A vinheta do darktable na GPU é a do gabarito** — a conta medida
+    /// contra o `darktable-cli` (`vinheta_darktable.rs`). Nos números do estilo
+    /// P&B (a borda branca), escurecendo com proporção manual e centro fora do
+    /// meio, e com um recorte 3:4 (o quadro do arquivo que sai).
+    #[test]
+    fn a_vinheta_do_darktable_e_a_do_gabarito() {
+        let mut motor = motor_pronto();
+        let (l, a) = (120u32, 80u32);
+        let foto = degrade_colorido(l, a);
+        let escura = Ajustes {
+            darktable_vignette_ativo: 1.0,
+            darktable_vignette_brightness: -0.6,
+            darktable_vignette_saturation: -0.4,
+            darktable_vignette_scale: 40.0,
+            darktable_vignette_falloff_scale: 130.0,
+            darktable_vignette_center_x: 0.3,
+            darktable_vignette_center_y: -0.2,
+            darktable_vignette_whratio: 1.4,
+            darktable_vignette_shape: 2.5,
+            // A matização de 8 bits: o cosseno e o sorteio do `tea.h`.
+            darktable_vignette_dithering: 1.0,
+            ..Default::default()
+        };
+        let cortes = [
+            ("sem corte", Corte::inteiro()),
+            (
+                "3:4",
+                Corte::novo(0.25, 0.0, 0.5, 1.0, 0, 0.0, false, false),
+            ),
+        ];
+        for (rotulo, ajustes) in [("estilo P&B", vinheta_do_estilo_pb()), ("escura", escura)] {
+            for (caso, corte) in &cortes {
+                motor.definir_corte(corte);
+                let revelada = motor
+                    .revelar(&foto, l, a, &ajustes)
+                    .expect("o motor não devolveu imagem")
+                    .into_rgba8();
+                let mut gabarito: Vec<[f32; 3]> = foto
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32])
+                    .collect();
+                crate::vinheta_darktable::aplicar(
+                    &mut gabarito,
+                    l as usize,
+                    a as usize,
+                    &ajustes,
+                    &corte.quadro(l, a),
+                );
+                let mut pior = (0.0f32, (0, 0));
+                for (i, (p, g)) in revelada.pixels().zip(&gabarito).enumerate() {
+                    for (c, esperado) in g.iter().enumerate() {
+                        let d = (p.0[c] as f32 - esperado.clamp(0.0, 255.0).round()).abs();
+                        if d > pior.0 {
+                            pior = (d, (i as u32 % l, i as u32 / l));
+                        }
+                    }
+                }
+                assert!(
+                    pior.0 <= 1.0,
+                    "{rotulo}, {caso}: em {:?} a GPU difere {} níveis do gabarito",
+                    pior.1,
+                    pior.0
+                );
+            }
+        }
+        motor.definir_corte(&Corte::inteiro());
+    }
+
+    /// Com o módulo desligado a vinheta do darktable não age, por mais que
+    /// brilho, escala, centro e forma tenham mudado.
+    #[test]
+    fn a_vinheta_do_darktable_no_zero_nao_muda_nada() {
+        let mut motor = motor_pronto();
+        let foto = degrade_colorido(40, 30);
+        let neutra = motor
+            .revelar(&foto, 40, 30, &Ajustes::default())
+            .expect("o motor não devolveu imagem")
+            .into_rgba8();
+        let mexida = Ajustes {
+            darktable_vignette_brightness: 1.0,
+            darktable_vignette_scale: 10.0,
+            darktable_vignette_falloff_scale: 5.0,
+            darktable_vignette_center_x: 0.5,
+            darktable_vignette_shape: 3.0,
+            ..Default::default()
+        };
+        assert!(!mexida.vinheta_do_darktable_ligada());
+        let saida = motor
+            .revelar(&foto, 40, 30, &mexida)
+            .expect("o motor não devolveu imagem")
+            .into_rgba8();
+        assert!(
+            saida.as_raw() == neutra.as_raw(),
+            "a vinheta desligada mexeu na foto"
+        );
+    }
+
+    /// 🎞️ **A borda branca do P&B fica creme**: a vinheta do darktable vem antes
+    /// da cor da viragem, como o `vignette` antes do `colorbalancergb` — a borda
+    /// que ela clareia recebe o tom por cima, e o centro não muda.
+    #[test]
+    fn a_borda_branca_do_darktable_recebe_a_viragem() {
+        let mut motor = motor_pronto();
+        let (l, a) = (120u32, 80u32);
+        let foto = cinza_retangular(l, a, 110);
+        let tom = Ajustes {
+            bw_ativo: 1.0,
+            processo: 1.0,
+            split_highlight_hue: 52.5,
+            split_highlight_sat: 100.0,
+            split_balance: -57.81,
+            split_midtone_hue: 40.0,
+            split_midtone_sat: 20.75,
+            ..Default::default()
+        };
+        let com_vinheta = Ajustes {
+            darktable_vignette_ativo: 1.0,
+            darktable_vignette_brightness: 0.99999,
+            darktable_vignette_saturation: 0.147,
+            darktable_vignette_scale: 87.82,
+            darktable_vignette_falloff_scale: 45.51,
+            darktable_vignette_autoratio: 1.0,
+            darktable_vignette_shape: 0.48,
+            ..tom
+        };
+        motor.definir_corte(&Corte::inteiro());
+        let sem = motor
+            .revelar(&foto, l, a, &tom)
+            .expect("revelou")
+            .into_rgba8();
+        let com = motor
+            .revelar(&foto, l, a, &com_vinheta)
+            .expect("revelou")
+            .into_rgba8();
+        let meio = (l / 2, a / 2);
+        assert_eq!(
+            sem.get_pixel(meio.0, meio.1),
+            com.get_pixel(meio.0, meio.1),
+            "o centro mudou"
+        );
+        // A meia altura da borda esquerda: clareada, e ainda quente.
+        let borda = com.get_pixel(0, a / 2).0;
+        let antes = sem.get_pixel(0, a / 2).0;
+        assert!(
+            borda[1] as i32 > antes[1] as i32 + 30,
+            "a vinheta não clareou a borda: {antes:?} → {borda:?}"
+        );
+        assert!(
+            borda[0] as i32 - borda[2] as i32 >= 8,
+            "a borda clareada perdeu o creme: {borda:?}"
+        );
     }
 
     /// O caminho da tela e do arquivo: revela a foto inteira com o corte no
@@ -3054,7 +3262,7 @@ mod testes {
         // 3:4 no centro: 60 × 80, de x = 30 a 89.
         let corte = Corte::novo(0.25, 0.0, 0.5, 1.0, 0, 0.0, false, false);
 
-        for (rotulo, ajustes, bordas_juntas) in as_duas_vinhetas() {
+        for (rotulo, ajustes, bordas_juntas) in as_tres_vinhetas() {
             let saida = revelar_e_recortar(&mut motor, &foto, tamanho, &ajustes, &corte);
             assert_eq!(saida.dimensions(), (60, 80));
             confere_a_vinheta_do_recorte(&saida, rotulo, bordas_juntas);
@@ -3080,7 +3288,7 @@ mod testes {
         // 60 × 40, de (60, 20) a (119, 59).
         let corte = Corte::novo(0.5, 0.25, 0.5, 0.5, 0, 0.0, false, false);
 
-        for (rotulo, ajustes, bordas_juntas) in as_duas_vinhetas() {
+        for (rotulo, ajustes, bordas_juntas) in as_tres_vinhetas() {
             let saida = revelar_e_recortar(&mut motor, &foto, tamanho, &ajustes, &corte);
             assert_eq!(saida.dimensions(), (60, 40));
             confere_a_vinheta_do_recorte(&saida, rotulo, bordas_juntas);
@@ -3127,7 +3335,7 @@ mod testes {
             ),
         ];
         for (caso, corte, folga) in casos {
-            for (rotulo, ajustes, _) in as_duas_vinhetas() {
+            for (rotulo, ajustes, _) in as_tres_vinhetas() {
                 let saida = revelar_e_recortar(&mut motor, &foto, tamanho, &ajustes, &corte);
                 let gabarito = recortar_e_revelar(&mut motor, &foto, tamanho, &ajustes, &corte);
                 let (pior, onde) = pior_diferenca(&saida, &gabarito);
@@ -3152,7 +3360,7 @@ mod testes {
         let (l, a) = (120u32, 80u32);
         let foto = cinza_retangular(l, a, 160);
 
-        for (rotulo, ajustes, _) in as_duas_vinhetas() {
+        for (rotulo, ajustes, _) in as_tres_vinhetas() {
             // Um motor que nunca ouviu falar de corte.
             let nunca = virgem
                 .revelar(&foto, l, a, &ajustes)
@@ -3177,7 +3385,7 @@ mod testes {
         }
 
         let lente = virgem
-            .revelar(&foto, l, a, &as_duas_vinhetas()[0].1)
+            .revelar(&foto, l, a, &as_tres_vinhetas()[0].1)
             .expect("o motor não devolveu imagem")
             .into_rgba8();
         let canto = lente.get_pixel(0, 0).0[0];

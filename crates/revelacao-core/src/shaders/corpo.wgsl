@@ -178,16 +178,28 @@ struct Params {
     grain_roughness: f32,
     // 0: a conta de antes; 1: as tabelas medidas no Lightroom (`lightroom.rs`).
     processo: f32,
-    // 🔑 Enchimento, e não campo: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
+    // A vinheta do darktable (`vinheta_do_darktable`), os campos do
+    // `dt_iop_vignette_params_t`: liga/desliga, início e raio do decaimento
+    // em %, brilho e saturação −1..1, centro −1..1, proporção automática 0/1,
+    // largura/altura 0..2, forma 0..5 e matização 0/1/2.
+    darktable_vignette_ativo: f32,
+    darktable_vignette_scale: f32,
+    darktable_vignette_falloff_scale: f32,
+    darktable_vignette_brightness: f32,
+    darktable_vignette_saturation: f32,
+    darktable_vignette_center_x: f32,
+    darktable_vignette_center_y: f32,
+    darktable_vignette_autoratio: f32,
+    darktable_vignette_whratio: f32,
+    darktable_vignette_shape: f32,
+    darktable_vignette_dithering: f32,
+    // 🔑 Sem enchimento desde 2/out/2026: o WebGL2 (`DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`
     // ausente) exige que o tipo do uniform tenha tamanho múltiplo de 16, e 171
-    // `f32` davam 684, os 194 davam 776, e os 133 de hoje (sem o estágio darktable, 2/out/2026)
-    // dão 532. O Rust manda 532 bytes num buffer de 544 (`TAMANHO_DO_UNIFORM`); estes nunca são
-    // lidos. Ficam DEPOIS dos 133 para não
-    // deslocar nenhuma posição — e o teste que compara os nomes com o `Ajustes`
-    // ignora o que começa com `_`.
-    _enchimento_a: f32,
-    _enchimento_b: f32,
-    _enchimento_c: f32,
+    // `f32` davam 684, os 194 davam 776, os 133 (sem o estágio darktable)
+    // davam 532 e pediam três campos `_enchimento`. Os 144 de hoje (com a
+    // vinheta do darktable de volta) dão 576, múltiplo de 16. Se o número
+    // mudar, o enchimento volta DEPOIS do último campo, com nome começando
+    // por `_` — o teste que compara os nomes com o `Ajustes` o ignora.
 }
 
 @group(0) @binding(0) var input_texture: texture_2d<f32>;
@@ -604,6 +616,121 @@ fn no_quadro(coord: vec2<u32>) -> vec2<f32> {
 /// O tamanho do arquivo que sai, em pixels.
 fn tamanho_do_quadro() -> vec2<f32> {
     return vec2<f32>(quadro_de_saida.linha_x.w, quadro_de_saida.linha_y.w);
+}
+
+/// O `encrypt_tea` do darktable (`src/common/tea.h`, 8 voltas): o sorteio da
+/// matização. Lá o estado anda pixel a pixel numa linha; aqui cada pixel
+/// começa do próprio `(x, y)` — a GPU não tem ordem —, e o gabarito
+/// (`vinheta_darktable.rs`) faz igual.
+fn dt_tea(x: u32, y: u32) -> u32 {
+    var v0 = x;
+    var v1 = y;
+    var soma = 0u;
+    for (var i = 0; i < 8; i++) {
+        soma += 0x9e3779b9u;
+        v0 += ((v1 << 4u) + 0xa341316cu) ^ (v1 + soma) ^ ((v1 >> 5u) + 0xc8013ea4u);
+        v1 += ((v0 << 4u) + 0xad90777du) ^ (v0 + soma) ^ ((v0 >> 5u) + 0x7e95761eu);
+    }
+    return v0;
+}
+
+/// O `tpdf` do darktable: o sorteio em −1..1, triangular.
+fn dt_tpdf(sorteio: u32) -> f32 {
+    let f = f32(sorteio) / 4294967295.0;
+    if (f < 0.5) {
+        return sqrt(2.0 * f) - 1.0;
+    }
+    return 1.0 - sqrt(2.0 * (1.0 - f));
+}
+
+/// 🎞️ **A vinheta do darktable** — o `process` de `src/iop/vignette.c`, sempre
+/// *unbound*. O gabarito é `vinheta_darktable.rs`, a conta que foi medida
+/// contra o `darktable-cli` (máximo de 1 nível).
+///
+/// 🔑 **Brilho positivo SOMA luz linear, negativo multiplica**. É a borda
+/// branca do `RecordarFotos P&B`, que as duas vinhetas do Lightroom não fazem.
+/// A forma é a superelipse de expoente `2/forma` em torno do centro, com o
+/// início do decaimento onde o efeito começa e o raio até onde ele chega
+/// inteiro, tudo em fração do meio-quadro. Com a matização ligada, o peso
+/// da faixa de transição vira o cosseno do darktable e ganha o ruído de
+/// 1/256 (8 bits) ou 1/65536 (16 bits).
+///
+/// Medida no quadro do arquivo que sai (`no_quadro`): no darktable o `vignette`
+/// vem depois do `crop`. A conta é no sRGB linear, de onde o pixel volta em
+/// 0–255.
+fn vinheta_do_darktable(cor255: vec3<f32>, coord: vec2<u32>) -> vec3<f32> {
+    let tamanho = tamanho_do_quadro();
+    let w = max(tamanho.x, 1.0);
+    let h = max(tamanho.y, 1.0);
+    let centro = vec2<f32>(
+        w * 0.5 + params.darktable_vignette_center_x * w / 2.0,
+        h * 0.5 + params.darktable_vignette_center_y * h / 2.0,
+    );
+    var xscale = 2.0 / w;
+    var yscale = 2.0 / h;
+    if (params.darktable_vignette_autoratio < 0.5) {
+        let base = 2.0 / max(w, h);
+        let proporcao = clamp(params.darktable_vignette_whratio, 0.001, 1.999);
+        if (proporcao <= 1.0) {
+            xscale = base / proporcao;
+            yscale = base;
+        } else {
+            xscale = base;
+            yscale = base / (2.0 - proporcao);
+        }
+    }
+    let dscale = params.darktable_vignette_scale / 100.0;
+    // O decaimento mínimo do darktable, contra o serrilhado.
+    let min_falloff = 100.0 / min(w, h);
+    let fscale = max(params.darktable_vignette_falloff_scale, min_falloff) / 100.0;
+    let forma = max(params.darktable_vignette_shape, 0.001);
+    let exp1 = 2.0 / forma;
+    let exp2 = forma / 2.0;
+    let aqui = no_quadro(coord);
+    // ⚠️ O WGSL não define `pow(0, y)`: na linha e na coluna do centro `pv`
+    // seria zero. O piso de 1e-12 não muda nível nenhum.
+    let pv = max(
+        vec2<f32>(
+            abs(aqui.x * xscale - centro.x * xscale),
+            abs(aqui.y * yscale - centro.y * yscale),
+        ),
+        vec2<f32>(1e-12),
+    );
+    let cplen = pow(pow(pv.x, exp1) + pow(pv.y, exp1), exp2);
+    var peso = 0.0;
+    var ruido = 0.0;
+    if (cplen >= dscale) {
+        peso = (cplen - dscale) / fscale;
+        let matizacao = i32(round(params.darktable_vignette_dithering));
+        if (peso >= 1.0) {
+            peso = 1.0;
+        } else if (peso <= 0.0) {
+            peso = 0.0;
+        } else if (matizacao == 1 || matizacao == 2) {
+            peso = 0.5 - cos(3.14159265 * peso) / 2.0;
+            let degrau = select(1.0 / 65536.0, 1.0 / 256.0, matizacao == 1);
+            ruido = degrau * dt_tpdf(dt_tea(coord.x, coord.y));
+        }
+    }
+    if (peso <= 0.0) {
+        return cor255;
+    }
+    let entrada = clamp(cor255, vec3<f32>(0.0), vec3<f32>(255.0));
+    var col = vec3<f32>(
+        srgb_para_linear(entrada.r),
+        srgb_para_linear(entrada.g),
+        srgb_para_linear(entrada.b),
+    );
+    let brilho = params.darktable_vignette_brightness;
+    if (brilho < 0.0) {
+        col = col * (1.0 + peso * brilho) + vec3<f32>(ruido);
+    } else {
+        col = col + vec3<f32>(peso * brilho + ruido);
+    }
+    let mv = (col.r + col.g + col.b) / 3.0;
+    col = col - (vec3<f32>(mv) - col) * (peso * params.darktable_vignette_saturation);
+    col = max(col, vec3<f32>(0.0));
+    return vec3<f32>(linear_para_srgb(col.r), linear_para_srgb(col.g), linear_para_srgb(col.b));
 }
 
 /// A cor pura de um matiz em graus, em 0.0–1.0 — saturação cheia, meio-tom.
@@ -1930,7 +2057,17 @@ fn revelar_pixel(coord: vec2<u32>) -> vec4<f32> {
         }
     }
 
-    // A cor da viragem do processo 1 — depois das duas vinhetas (ver
+    // A vinheta do darktable — depois das duas do Lightroom e antes da cor da
+    // viragem, como no darktable (`vignette` antes do `colorbalancergb`): a
+    // borda que ela clareia recebe o creme por cima.
+    if (params.darktable_vignette_ativo >= 0.5) {
+        let vinhetada = vinheta_do_darktable(vec3<f32>(r, g, b), coord);
+        r = vinhetada.r;
+        g = vinhetada.g;
+        b = vinhetada.b;
+    }
+
+    // A cor da viragem do processo 1 — depois das vinhetas (ver
     // `cor_da_viragem`).
     if (tem_cor_na_viragem && params.processo >= 0.5) {
         let cor = clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(255.0));
