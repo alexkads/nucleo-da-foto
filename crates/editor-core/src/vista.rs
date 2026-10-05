@@ -103,7 +103,6 @@ impl Vista {
         }
         let f = self.fator;
         let (ox, oy) = (self.regiao.x, self.regiao.y);
-        let (fim_x, fim_y) = (self.regiao.direita(), self.regiao.baixo());
         // Os pixels da vista que tocam o retângulo, e a região da foto que eles
         // cobrem inteira (alinhada ao fator).
         let (vx0, vy0) = ((ret.x - ox) / f, (ret.y - oy) / f);
@@ -111,23 +110,76 @@ impl Vista {
             (ret.direita() - ox).div_ceil(f).min(self.imagem.width()),
             (ret.baixo() - oy).div_ceil(f).min(self.imagem.height()),
         );
-        let regiao = Retangulo::novo(ox + vx0 * f, oy + vy0 * f, (vx1 - vx0) * f, (vy1 - vy0) * f)
+        // 🔑 **Em faixas de linhas, uma por thread** quando a região é grande:
+        // a transformação livre refaz milhões de pixels a cada movimento do
+        // ponteiro (medido: 35–52 ms numa thread, para 3–5 MP). Cada faixa
+        // compõe e reduz o pedaço dela; as linhas da vista não se cruzam.
+        let colunas = (vx1 - vx0) as usize;
+        let pixels = colunas as u64 * (vy1 - vy0) as u64 * (f * f) as u64;
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()) as u32;
+        let por_faixa = if pixels < 1 << 20 || threads <= 1 {
+            vy1 - vy0
+        } else {
+            (vy1 - vy0).div_ceil(threads).max(8)
+        };
+        let faixas: Vec<(u32, u32)> = (vy0..vy1)
+            .step_by(por_faixa as usize)
+            .map(|a| (a, (a + por_faixa).min(vy1)))
+            .collect();
+        let feitas: Vec<Vec<u8>> = if faixas.len() == 1 {
+            vec![self.faixa(base, doc, faixas[0], vx0, vx1)]
+        } else {
+            let esta = &*self;
+            std::thread::scope(|escopo| {
+                let tarefas: Vec<_> = faixas
+                    .iter()
+                    .map(|&faixa| escopo.spawn(move || esta.faixa(base, doc, faixa, vx0, vx1)))
+                    .collect();
+                tarefas
+                    .into_iter()
+                    .map(|t| t.join().unwrap_or_default())
+                    .collect()
+            })
+        };
+        let largura_da_vista = self.imagem.width() as usize;
+        let imagem: &mut [u8] = &mut self.imagem;
+        for ((a, b), linhas) in faixas.iter().zip(feitas) {
+            for (k, vy) in (*a..*b).enumerate() {
+                let destino = (vy as usize * largura_da_vista + vx0 as usize) * 3;
+                let fonte = &linhas[k * colunas * 3..(k + 1) * colunas * 3];
+                imagem[destino..destino + colunas * 3].copy_from_slice(fonte);
+            }
+        }
+        self.marcar_sujos(vx0, vy0, vx1, vy1);
+    }
+
+    /// As linhas `[a, b)` da vista, colunas `[vx0, vx1)`, em RGB: a foto
+    /// composta naquele pedaço, reduzida pela média de cada caixa `fator ×
+    /// fator` (no fator 1, copiada).
+    fn faixa(
+        &self,
+        base: &RgbImage,
+        doc: &Documento,
+        (a, b): (u32, u32),
+        vx0: u32,
+        vx1: u32,
+    ) -> Vec<u8> {
+        let f = self.fator;
+        let (ox, oy) = (self.regiao.x, self.regiao.y);
+        let (fim_x, fim_y) = (self.regiao.direita(), self.regiao.baixo());
+        let regiao = Retangulo::novo(ox + vx0 * f, oy + a * f, (vx1 - vx0) * f, (b - a) * f)
             .limitado(fim_x, fim_y);
         let composta = composicao::compor_recorte(base, doc, &regiao);
+        let colunas = (vx1 - vx0) as usize;
+        let mut saida = Vec::with_capacity(colunas * (b - a) as usize * 3);
         if f == 1 {
-            // A lupa em resolução cheia: cópia, sem média.
-            for vy in vy0..vy1 {
-                let linha = (vy - vy0) as usize * regiao.largura as usize * 3;
-                let n = (vx1 - vx0) as usize * 3;
-                let destino = (vy as usize * self.imagem.width() as usize + vx0 as usize) * 3;
-                let fonte = &composta.as_raw()[linha..linha + n];
-                let imagem: &mut [u8] = &mut self.imagem;
-                imagem[destino..destino + n].copy_from_slice(fonte);
+            for k in 0..(b - a) as usize {
+                let linha = k * regiao.largura as usize * 3;
+                saida.extend_from_slice(&composta.as_raw()[linha..linha + colunas * 3]);
             }
-            self.marcar_sujos(vx0, vy0, vx1, vy1);
-            return;
+            return saida;
         }
-        for vy in vy0..vy1 {
+        for vy in a..b {
             for vx in vx0..vx1 {
                 let mut soma = [0u32; 3];
                 let mut n = 0u32;
@@ -141,18 +193,14 @@ impl Vista {
                     }
                 }
                 let n = n.max(1);
-                self.imagem.put_pixel(
-                    vx,
-                    vy,
-                    image::Rgb([
-                        ((soma[0] + n / 2) / n) as u8,
-                        ((soma[1] + n / 2) / n) as u8,
-                        ((soma[2] + n / 2) / n) as u8,
-                    ]),
-                );
+                saida.extend_from_slice(&[
+                    ((soma[0] + n / 2) / n) as u8,
+                    ((soma[1] + n / 2) / n) as u8,
+                    ((soma[2] + n / 2) / n) as u8,
+                ]);
             }
         }
-        self.marcar_sujos(vx0, vy0, vx1, vy1);
+        saida
     }
 
     fn marcar_sujos(&mut self, vx0: u32, vy0: u32, vx1: u32, vy1: u32) {

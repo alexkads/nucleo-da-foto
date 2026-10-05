@@ -197,6 +197,12 @@ impl Transformacao {
 }
 
 /// O conteúdo transformado numa camada transparente do tamanho da foto.
+///
+/// 🔑 **Rápido o bastante para o arrasto** (medido no app real: 125–165 ms por
+/// evento numa peça de 3,5 MP na primeira versão). A inversa é afim, então
+/// vira três coeficientes e uma soma por pixel; cada linha só percorre o
+/// trecho que cai dentro da caixa; e cada faixa de tiles (256 linhas) roda numa
+/// thread — elas escrevem em tiles diferentes.
 pub fn desenhar(
     conteudo: &Conteudo,
     t: &Transformacao,
@@ -217,25 +223,91 @@ pub fn desenhar(
     let y0 = (y0.floor() - 1.0).max(0.0) as u32;
     let x1 = ((x1.ceil() + 1.0).max(0.0) as u32).min(largura);
     let y1 = ((y1.ceil() + 1.0).max(0.0) as u32).min(altura);
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let (u, v) = t.inversa(&caixa, x as f32 + 0.5, y as f32 + 0.5);
-            let p = conteudo.amostra(u - caixa.x as f32, v - caixa.y as f32);
-            if p[3] == 0 {
+    if x1 <= x0 || y1 <= y0 {
+        return saida;
+    }
+    // A inversa em coordenadas da caixa: (u, v) = c + a·x + b·y.
+    let em = |x: f32, y: f32| {
+        let (u, v) = t.inversa(&caixa, x, y);
+        (u - caixa.x as f32, v - caixa.y as f32)
+    };
+    let c = em(0.0, 0.0);
+    let a = (em(1.0, 0.0).0 - c.0, em(1.0, 0.0).1 - c.1);
+    let b = (em(0.0, 1.0).0 - c.0, em(0.0, 1.0).1 - c.1);
+    let (lc, ac) = (caixa.largura as f32, caixa.altura as f32);
+
+    let faixa = |l0: u32| -> Vec<(crate::tiles::Posicao, Vec<u8>)> {
+        let mut tiles: std::collections::BTreeMap<crate::tiles::Posicao, Vec<u8>> =
+            std::collections::BTreeMap::new();
+        let (ya, yb) = (y0.max(l0 * LADO_DO_TILE), y1.min((l0 + 1) * LADO_DO_TILE));
+        for y in ya..yb {
+            let yc = y as f32 + 0.5;
+            let (pu, pv) = (c.0 + b.0 * yc, c.1 + b.1 * yc);
+            // O trecho de x em que (u, v) cai na caixa, com um pixel de folga.
+            let (mut xa, mut xb) = (x0 as f32, x1 as f32);
+            for (p, d, limite) in [(pu, a.0, lc), (pv, a.1, ac)] {
+                if d.abs() < 1e-9 {
+                    if p < -1.0 || p > limite + 1.0 {
+                        xb = xa - 1.0;
+                    }
+                } else {
+                    let (e, f) = ((-1.0 - p) / d - 0.5, (limite + 1.0 - p) / d - 0.5);
+                    xa = xa.max(e.min(f).floor());
+                    xb = xb.min(e.max(f).ceil() + 1.0);
+                }
+            }
+            if xb <= xa {
                 continue;
             }
-            let posicao = (x / LADO_DO_TILE, y / LADO_DO_TILE);
-            let i = indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
-            saida.tile_mut(posicao)[i..i + 4].copy_from_slice(&p);
+            for x in (xa.max(x0 as f32) as u32)..(xb.min(x1 as f32) as u32) {
+                let xc = x as f32 + 0.5;
+                let p = conteudo.amostra(pu + a.0 * xc, pv + a.1 * xc);
+                if p[3] == 0 {
+                    continue;
+                }
+                let tile = tiles
+                    .entry((x / LADO_DO_TILE, y / LADO_DO_TILE))
+                    .or_insert_with(|| vec![0; crate::tiles::BYTES_DO_TILE]);
+                let i = indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
+                tile[i..i + 4].copy_from_slice(&p);
+            }
         }
+        tiles.into_iter().collect()
+    };
+    let faixas: Vec<u32> = (y0 / LADO_DO_TILE..=(y1 - 1) / LADO_DO_TILE).collect();
+    let resultados: Vec<Vec<_>> = if faixas.len() == 1 {
+        vec![faixa(faixas[0])]
+    } else {
+        std::thread::scope(|escopo| {
+            let tarefas: Vec<_> = faixas
+                .iter()
+                .map(|&l| {
+                    let faixa = &faixa;
+                    escopo.spawn(move || faixa(l))
+                })
+                .collect();
+            tarefas
+                .into_iter()
+                .map(|t| t.join().unwrap_or_default())
+                .collect()
+        })
+    };
+    for (posicao, tile) in resultados.into_iter().flatten() {
+        saida.definir(posicao, Some(std::sync::Arc::new(tile)));
     }
     saida
 }
 
-/// `cima` sobre `fundo` (Normal), só onde `cima` tem tile.
+/// `cima` sobre `fundo` (Normal), só onde `cima` tem tile. Onde o fundo não
+/// tem nada, o tile de cima entra como está (é o caso de toda transformação
+/// sem seleção).
 pub fn sobre(fundo: &CamadaDePixels, cima: &CamadaDePixels) -> CamadaDePixels {
     let mut saida = fundo.clone();
     for (posicao, tile) in cima.existentes() {
+        if fundo.tile(*posicao).is_none() {
+            saida.definir(*posicao, Some(tile.clone()));
+            continue;
+        }
         let destino = saida.tile_mut(*posicao);
         for k in (0..tile.len()).step_by(4) {
             if tile[k + 3] == 0 {
@@ -334,6 +406,44 @@ mod testes {
         let d = desenhar(&conteudo, &t, 600, 400);
         assert_eq!(d.pixel(230, 92)[3], 255, "30 px acima do centro (230, 120)");
         assert_eq!(d.pixel(205, 120)[3], 0, "onde a largura estava");
+    }
+
+    #[test]
+    fn o_desenho_rapido_e_o_mesmo_da_inversa_pixel_a_pixel() {
+        let c = camada_com_quadrado();
+        let conteudo = Conteudo::da_camada(&c, None).unwrap();
+        let t = Transformacao {
+            dx: 33.0,
+            dy: 140.0,
+            escala_x: 3.3,
+            escala_y: 2.1,
+            angulo: 0.9,
+        };
+        let rapido = desenhar(&conteudo, &t, 600, 400);
+        let caixa = conteudo.caixa;
+        let mut diferentes = 0;
+        for y in 0..400 {
+            for x in 0..600 {
+                let (u, v) = t.inversa(&caixa, x as f32 + 0.5, y as f32 + 0.5);
+                let lento = conteudo.amostra(u - caixa.x as f32, v - caixa.y as f32);
+                let r = rapido.pixel(x, y);
+                // Com alfa quase zero a cor não aparece: só o alfa conta.
+                let invisivel = r[3] <= 2 && lento[3] <= 2;
+                let canais = if invisivel { 3..4 } else { 0..4 };
+                if canais
+                    .clone()
+                    // Na borda inclinada e ampliada, a soma incremental e o
+                    // seno/cosseno diferem no arredondamento: até 2 no alfa.
+                    .any(|i| (r[i] as i32 - lento[i] as i32).abs() > 2)
+                {
+                    diferentes += 1;
+                }
+            }
+        }
+        assert_eq!(diferentes, 0);
+        let linhas: std::collections::BTreeSet<u32> =
+            rapido.existentes().map(|(p, _)| p.1).collect();
+        assert!(linhas.len() > 1, "ocupou mais de uma faixa (threads)");
     }
 
     #[test]
