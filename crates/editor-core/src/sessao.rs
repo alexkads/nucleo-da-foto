@@ -67,6 +67,9 @@ pub struct Sessao {
     /// Sobe a cada mudança de pixel ou de seleção — quem desenha miniaturas e
     /// bordas sabe quando refazer.
     versao: u64,
+    /// Sobe só quando a seleção muda — a borda dela não se refaz a cada
+    /// pincelada.
+    versao_da_selecao: u64,
 }
 
 impl Sessao {
@@ -90,6 +93,7 @@ impl Sessao {
             opacidade_antes: None,
             selecao: None,
             versao: 0,
+            versao_da_selecao: 0,
         }
     }
 
@@ -310,6 +314,10 @@ impl Sessao {
 
     // ------------------------------------------------------------- seleção
 
+    pub fn versao_da_selecao(&self) -> u64 {
+        self.versao_da_selecao
+    }
+
     pub fn selecao(&self) -> Option<&Selecao> {
         self.selecao.as_deref()
     }
@@ -336,6 +344,7 @@ impl Sessao {
         };
         self.selecao = resultado.filter(|s| !s.nada()).map(Arc::new);
         self.versao += 1;
+        self.versao_da_selecao += 1;
     }
 
     /// ⌘A.
@@ -346,6 +355,7 @@ impl Sessao {
             self.doc.altura(),
         )));
         self.versao += 1;
+        self.versao_da_selecao += 1;
     }
 
     /// ⌘D.
@@ -353,6 +363,7 @@ impl Sessao {
         self.fechar_o_que_esta_aberto();
         if self.selecao.take().is_some() {
             self.versao += 1;
+            self.versao_da_selecao += 1;
         }
     }
 
@@ -365,6 +376,7 @@ impl Sessao {
                 self.selecao = None;
             }
             self.versao += 1;
+            self.versao_da_selecao += 1;
         }
     }
 
