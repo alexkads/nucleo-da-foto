@@ -25,6 +25,7 @@ pub mod retangulo;
 pub mod selecao;
 pub mod sessao;
 pub mod tiles;
+pub mod transformar;
 pub mod vista;
 
 pub use contrato::VersaoEditada;
@@ -36,3 +37,4 @@ pub use retangulo::Retangulo;
 pub use selecao::{Forma, Operacao, Selecao};
 pub use sessao::Sessao;
 pub use tiles::{CamadaDePixels, LADO_DO_TILE};
+pub use transformar::Transformacao;

@@ -223,6 +223,35 @@ impl Selecao {
         })
     }
 
+    /// A seleção andada `(dx, dy)` pixels (o Mover leva a seleção junto). O
+    /// que sai da foto se perde.
+    pub fn deslocada(&self, dx: i64, dy: i64) -> Selecao {
+        if self.padrao != 0 {
+            // Tudo (ou invertida): o que entra pela borda continua selecionado
+            // — andar não muda quase nada, e a seleção fica.
+            return self.clone();
+        }
+        let mut nova = Selecao::vazia(self.largura, self.altura);
+        let l = self.limites();
+        let destino = Retangulo::novo(
+            (l.x as i64 + dx).max(0) as u32,
+            (l.y as i64 + dy).max(0) as u32,
+            l.largura,
+            l.altura,
+        )
+        .limitado(self.largura, self.altura);
+        nova.pintar(&destino, |x, y| {
+            let (ox, oy) = (x as i64 - dx, y as i64 - dy);
+            if ox < 0 || oy < 0 {
+                0
+            } else {
+                self.valor(ox as u32, oy as u32)
+            }
+        });
+        nova.enxugar();
+        nova
+    }
+
     /// ⇧⌘I.
     pub fn inverter(&mut self) {
         self.padrao = 255 - self.padrao;
@@ -421,6 +450,20 @@ mod testes {
             (s.valor(20, 20), s.valor(70, 20), s.valor(599, 0)),
             (255, 0, 255)
         );
+    }
+
+    #[test]
+    fn a_selecao_anda() {
+        let s = Selecao::da_forma(
+            600,
+            400,
+            &Forma::Retangulo(Retangulo::novo(100, 50, 20, 20)),
+        );
+        let d = s.deslocada(300, 10);
+        assert_eq!((d.valor(400, 60), d.valor(100, 50)), (255, 0));
+        let fora = s.deslocada(-110, 0);
+        assert_eq!(fora.valor(0, 60), 255);
+        assert_eq!(fora.valor(10, 60), 0);
     }
 
     #[test]

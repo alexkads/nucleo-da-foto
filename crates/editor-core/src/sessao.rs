@@ -23,6 +23,8 @@ use crate::pincel::Mudanca;
 use crate::pincel::{Pincel, Traco};
 use crate::retangulo::Retangulo;
 use crate::selecao::{Forma, Operacao, Selecao};
+use crate::tiles::CamadaDePixels;
+use crate::transformar::{self, Conteudo, Transformacao};
 use crate::vista::Vista;
 
 /// Um pedido de lupa: o que a vista do pedaço precisa para ser montada fora
@@ -77,6 +79,23 @@ pub struct Sessao {
     distancia_do_carimbo: Option<(f32, f32)>,
     /// A camada antes de o arrasto do Mover começar.
     movendo: Option<(usize, crate::tiles::CamadaDePixels)>,
+    /// O conteúdo solto da camada (⌘T, ou o Mover com seleção).
+    flutuante: Option<Flutuante>,
+}
+
+/// O conteúdo de uma camada tirado dela para ser transformado.
+struct Flutuante {
+    camada: usize,
+    /// A camada como era — para o desfazer e para cancelar.
+    original: CamadaDePixels,
+    /// O que fica na camada sem o conteúdo.
+    fundo: CamadaDePixels,
+    conteudo: Conteudo,
+    /// A seleção de quando começou (o Mover a leva junto).
+    selecao: Option<Arc<Selecao>>,
+    t: Transformacao,
+    /// Onde a camada mudou até agora (para a vista).
+    area: Retangulo,
 }
 
 impl Sessao {
@@ -104,6 +123,7 @@ impl Sessao {
             origem: None,
             distancia_do_carimbo: None,
             movendo: None,
+            flutuante: None,
         }
     }
 
@@ -212,6 +232,7 @@ impl Sessao {
         self.soltar();
         self.confirmar_opacidade();
         self.terminar_de_mover();
+        self.aplicar_transformacao();
     }
 
     pub fn escolher_camada(&mut self, indice: usize) {
@@ -363,12 +384,16 @@ impl Sessao {
     // ------------------------------------------------------------ mover
 
     /// O arrasto do Mover começou: a camada escolhida de agora é a referência.
-    /// Escondida não anda (como o pincel).
+    /// Escondida não anda (como o pincel). Com seleção, anda só o que está
+    /// selecionado — e a seleção vai junto.
     pub fn comecar_a_mover(&mut self) -> bool {
         self.fechar_o_que_esta_aberto();
         let ativa = self.ativa();
         if !self.doc.camadas[ativa].visivel {
             return false;
+        }
+        if self.selecao.is_some() {
+            return self.comecar_a_transformar();
         }
         self.movendo = Some((ativa, self.doc.camadas[ativa].pixels.clone()));
         true
@@ -376,6 +401,10 @@ impl Sessao {
 
     /// A camada deslocada `(dx, dy)` do começo, na hora.
     pub fn mover_por(&mut self, dx: i64, dy: i64) {
+        if self.flutuante.is_some() {
+            self.definir_transformacao(Transformacao::deslocamento(dx as f32, dy as f32));
+            return;
+        }
         let Some((camada, original)) = self.movendo.as_ref() else {
             return;
         };
@@ -389,6 +418,9 @@ impl Sessao {
 
     /// O arrasto acabou: o deslocamento vira um passo do desfazer.
     pub fn terminar_de_mover(&mut self) -> bool {
+        if self.flutuante.is_some() {
+            return self.aplicar_transformacao();
+        }
         let Some((camada, original)) = self.movendo.take() else {
             return false;
         };
@@ -404,6 +436,156 @@ impl Sessao {
 
     pub fn movendo(&self) -> bool {
         self.movendo.is_some()
+    }
+
+    // ------------------------------------------------- transformação livre
+
+    /// ⌘T: solta o conteúdo da camada escolhida (ou só o selecionado). Falso
+    /// com a camada escondida ou vazia.
+    pub fn comecar_a_transformar(&mut self) -> bool {
+        self.soltar();
+        self.confirmar_opacidade();
+        if self.flutuante.is_some() {
+            return true;
+        }
+        let camada = self.ativa();
+        if !self.doc.camadas[camada].visivel {
+            return false;
+        }
+        let original = self.doc.camadas[camada].pixels.clone();
+        let selecao = self.selecao.clone();
+        let Some(conteudo) = Conteudo::da_camada(&original, selecao.as_deref()) else {
+            return false;
+        };
+        let mut fundo = original.clone();
+        match selecao.as_deref() {
+            Some(s) => {
+                operacoes::apagar(&mut fundo, s);
+            }
+            None => fundo = CamadaDePixels::nova(original.largura(), original.altura()),
+        }
+        let area = conteudo.caixa;
+        self.flutuante = Some(Flutuante {
+            camada,
+            original,
+            fundo,
+            conteudo,
+            selecao,
+            t: Transformacao::default(),
+            area,
+        });
+        true
+    }
+
+    /// A caixa do conteúdo e a transformação de agora — o que a tela desenha.
+    pub fn transformacao(&self) -> Option<(Retangulo, Transformacao)> {
+        self.flutuante.as_ref().map(|f| (f.conteudo.caixa, f.t))
+    }
+
+    /// A camada passa a mostrar o conteúdo transformado por `t`.
+    pub fn definir_transformacao(&mut self, t: Transformacao) {
+        let Some(f) = self.flutuante.as_mut() else {
+            return;
+        };
+        if f.t == t {
+            return;
+        }
+        f.t = t;
+        let (largura, altura) = (f.original.largura(), f.original.altura());
+        let desenhado = transformar::desenhar(&f.conteudo, &t, largura, altura);
+        let nova = transformar::sobre(&f.fundo, &desenhado);
+        let area_nova = desenhado
+            .existentes()
+            .fold(Retangulo::default(), |a, (p, _)| {
+                a.uniao(&crate::tiles::retangulo_do_tile(*p, largura, altura))
+            });
+        let sujo = f.area.uniao(&area_nova);
+        f.area = area_nova.uniao(&f.conteudo.caixa);
+        let camada = f.camada;
+        self.doc.camadas[camada].pixels = nova;
+        self.refazer_a_vista(&sujo);
+    }
+
+    /// Enter: a transformação vira um passo do desfazer. A seleção anda junto
+    /// num deslocamento; com escala ou giro, sai (o recorte já não é o mesmo).
+    pub fn aplicar_transformacao(&mut self) -> bool {
+        let Some(f) = self.flutuante.take() else {
+            return false;
+        };
+        if f.selecao.is_some() {
+            self.selecao = if f.t.so_desloca() {
+                f.selecao
+                    .as_deref()
+                    .map(|s| Arc::new(s.deslocada(f.t.dx.round() as i64, f.t.dy.round() as i64)))
+            } else {
+                None
+            };
+            self.versao += 1;
+            self.versao_da_selecao += 1;
+        }
+        match operacoes::diferenca(&f.original, &self.doc.camadas[f.camada].pixels) {
+            Some(m) => {
+                self.hist.registrar(Comando::Traco {
+                    camada: f.camada,
+                    mudanca: m,
+                });
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Esc: a camada volta a ser o que era.
+    pub fn cancelar_transformacao(&mut self) {
+        let Some(f) = self.flutuante.take() else {
+            return;
+        };
+        self.doc.camadas[f.camada].pixels = f.original;
+        self.refazer_a_vista(&f.area);
+    }
+
+    pub fn transformando(&self) -> bool {
+        self.flutuante.is_some()
+    }
+
+    /// ⌘J com seleção: uma camada nova só com o selecionado, logo acima. Sem
+    /// seleção, duplica a camada inteira. ⇧⌘J (`recortar`) tira o pedaço da
+    /// de origem — num segundo passo do desfazer.
+    pub fn camada_via_copia(&mut self, recortar: bool) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let Some(selecao) = self.selecao.clone() else {
+            if recortar {
+                return false;
+            }
+            self.duplicar_camada();
+            return true;
+        };
+        let origem = self.ativa();
+        let original = self.doc.camadas[origem].pixels.clone();
+        let Some(conteudo) = Conteudo::da_camada(&original, Some(&selecao)) else {
+            return false;
+        };
+        let pixels = transformar::desenhar(
+            &conteudo,
+            &Transformacao::default(),
+            original.largura(),
+            original.altura(),
+        );
+        let mut camada = Camada::nova(
+            &self.doc.proximo_nome(),
+            original.largura(),
+            original.altura(),
+        );
+        camada.pixels = pixels;
+        if recortar {
+            let mudanca = operacoes::apagar(&mut self.doc.camadas[origem].pixels, &selecao);
+            self.registrar_mudanca(origem, mudanca);
+        }
+        self.executar(Comando::CriarCamada {
+            indice: origem + 1,
+            camada: Box::new(camada),
+        });
+        true
     }
 
     // ------------------------------------------------------------- seleção
@@ -711,6 +893,7 @@ impl Sessao {
             || self.traco.is_some()
             || self.opacidade_antes.is_some()
             || self.movendo.is_some()
+            || self.flutuante.is_some()
     }
 
     /// Fecha o que estiver em curso e devolve **uma cópia** do documento e do
@@ -1035,6 +1218,78 @@ mod testes {
         assert_eq!(s.historico().passos().len(), 2);
         s.desfazer();
         assert_eq!(s.compor().get_pixel(100, 100).0, [255, 0, 0]);
+    }
+
+    #[test]
+    fn transformar_aplica_cancela_e_e_um_passo_so() {
+        let mut s = sessao();
+        s.pincel.cor = [255, 0, 0];
+        s.pincel.dureza = 1.0;
+        s.pincel.raio = 20.0;
+        s.apertar(200.0, 200.0);
+        s.soltar();
+        assert!(s.comecar_a_transformar());
+        s.definir_transformacao(Transformacao {
+            escala_x: 2.0,
+            escala_y: 2.0,
+            ..Default::default()
+        });
+        assert_eq!(s.compor().get_pixel(200, 236).0, [255, 0, 0], "ampliado");
+        s.cancelar_transformacao();
+        assert_eq!(s.compor().get_pixel(200, 236).0, [200, 236, 50], "voltou");
+        assert_eq!(s.historico().passos().len(), 1);
+
+        s.comecar_a_transformar();
+        s.definir_transformacao(Transformacao::deslocamento(100.0, 0.0));
+        assert!(s.aplicar_transformacao());
+        assert_eq!(s.historico().passos().len(), 2);
+        assert_eq!(s.compor().get_pixel(300, 200).0, [255, 0, 0]);
+        s.desfazer();
+        assert_eq!(s.compor().get_pixel(200, 200).0, [255, 0, 0]);
+    }
+
+    #[test]
+    fn mover_com_selecao_leva_so_o_pedaco_e_a_selecao() {
+        let mut s = sessao();
+        s.pincel.cor = [0, 255, 0];
+        s.preencher_selecao();
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(100, 100, 50, 50)),
+            Operacao::Nova,
+        );
+        assert!(s.comecar_a_mover());
+        s.mover_por(200, 0);
+        assert!(s.terminar_de_mover());
+        let c = &s.documento().camadas[0].pixels;
+        assert_eq!(c.pixel(120, 120)[3], 0, "o buraco");
+        assert_eq!(c.pixel(320, 120), [0, 255, 0, 255], "o pedaço");
+        assert_eq!(c.pixel(500, 500), [0, 255, 0, 255], "o resto ficou");
+        let sel = s.selecao().unwrap();
+        assert_eq!((sel.valor(320, 120), sel.valor(120, 120)), (255, 0));
+    }
+
+    #[test]
+    fn camada_via_copia_e_via_recorte() {
+        let mut s = sessao();
+        s.pincel.cor = [0, 0, 255];
+        s.preencher_selecao();
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(0, 0, 100, 100)),
+            Operacao::Nova,
+        );
+        assert!(s.camada_via_copia(false));
+        assert_eq!(s.documento().camadas.len(), 2);
+        assert_eq!(s.ativa(), 1);
+        let nova = &s.documento().camadas[1].pixels;
+        assert_eq!((nova.pixel(50, 50)[3], nova.pixel(150, 50)[3]), (255, 0));
+        s.escolher_camada(0);
+        assert!(s.camada_via_copia(true));
+        assert_eq!(
+            s.documento().camadas[0].pixels.pixel(50, 50)[3],
+            0,
+            "recortado"
+        );
+        assert_eq!(s.documento().camadas.len(), 3);
     }
 
     #[test]
