@@ -12,6 +12,7 @@
 //! que o motor de revelação recebe, e pintar noutro espaço seria uma conversão a
 //! mais entre o editor e a Revelação.
 
+pub mod carimbo;
 pub mod composicao;
 pub mod contrato;
 pub mod documento;

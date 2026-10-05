@@ -141,6 +141,72 @@ pub fn mesclar_na_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<
     })
 }
 
+/// A camada deslocada `(dx, dy)` pixels — o que a ferramenta Mover (V) mostra
+/// durante o arrasto. O que sai da foto se perde, como numa camada do tamanho
+/// da tela.
+///
+/// 🔑 **Linha por linha, e não pixel por pixel**: cada linha de um tile vai,
+/// inteira, para no máximo dois tiles de destino. Uma camada cheia de 24 MP
+/// são ~96 MB de cópia — dá para refazer a cada movimento do ponteiro.
+pub fn deslocada(camada: &CamadaDePixels, dx: i64, dy: i64) -> CamadaDePixels {
+    let (largura, altura) = (camada.largura() as i64, camada.altura() as i64);
+    let mut saida = CamadaDePixels::nova(camada.largura(), camada.altura());
+    let lado = LADO_DO_TILE as i64;
+    for (posicao, tile) in camada.existentes() {
+        let (tx, ty) = (posicao.0 as i64 * lado, posicao.1 as i64 * lado);
+        for ly in 0..lado {
+            let y = ty + ly + dy;
+            if y < 0 || y >= altura || ty + ly >= altura {
+                continue;
+            }
+            // O trecho da linha que cai dentro da foto.
+            let x0 = (tx + dx).max(0);
+            let x1 = (tx + lado + dx).min(largura).min(largura + dx);
+            let mut x = x0;
+            while x < x1 {
+                let destino = ((x / lado) as u32, (y / lado) as u32);
+                let fim = ((x / lado + 1) * lado).min(x1);
+                let n = (fim - x) as usize * 4;
+                let de = indice((x - dx - tx) as u32, ly as u32);
+                let para = indice((x % lado) as u32, (y % lado) as u32);
+                saida.tile_mut(destino)[para..para + n].copy_from_slice(&tile[de..de + n]);
+                x = fim;
+            }
+        }
+    }
+    let posicoes: Vec<Posicao> = saida.existentes().map(|(p, _)| *p).collect();
+    for p in posicoes {
+        saida.enxugar(p);
+    }
+    saida
+}
+
+/// O passo do desfazer entre duas versões de uma camada: os tiles que mudaram.
+pub fn diferenca(antes: &CamadaDePixels, depois: &CamadaDePixels) -> Option<Mudanca> {
+    let posicoes: std::collections::BTreeSet<Posicao> = antes
+        .existentes()
+        .chain(depois.existentes())
+        .map(|(p, _)| *p)
+        .collect();
+    let mut m = Mudanca {
+        antes: Vec::new(),
+        depois: Vec::new(),
+    };
+    for p in posicoes {
+        let (a, d) = (antes.tile(p).cloned(), depois.tile(p).cloned());
+        let igual = match (&a, &d) {
+            (None, None) => true,
+            (Some(x), Some(y)) => Arc::ptr_eq(x, y) || x == y,
+            _ => false,
+        };
+        if !igual {
+            m.antes.push((p, a));
+            m.depois.push((p, d));
+        }
+    }
+    (!m.antes.is_empty()).then_some(m)
+}
+
 /// A miniatura da camada para o painel, em RGBA de `largura × altura`, pelo
 /// pixel mais próximo (são umas mil leituras). O transparente fica
 /// transparente: quem desenha põe o xadrez por baixo.
@@ -229,6 +295,28 @@ mod testes {
         for (a, b) in separadas.as_raw().iter().zip(mescladas.as_raw()) {
             assert!((*a as i32 - *b as i32).abs() <= 1, "{a} × {b}");
         }
+    }
+
+    #[test]
+    fn deslocar_leva_cada_pixel_e_perde_o_que_sai() {
+        let mut c = CamadaDePixels::nova(600, 400);
+        c.tile_mut((0, 0))[indice(10, 20)..indice(10, 20) + 4].copy_from_slice(&[1, 2, 3, 255]);
+        c.tile_mut((1, 1))[indice(250, 0)..indice(250, 0) + 4].copy_from_slice(&[4, 5, 6, 255]);
+        let d = deslocada(&c, 300, -10);
+        assert_eq!(d.pixel(310, 10), [1, 2, 3, 255]);
+        assert_eq!(d.pixel(10, 20)[3], 0);
+        // (506, 256) + (300, −10) = (806, 246): fora da foto de 600.
+        assert_eq!(d.quantos(), 1);
+        let volta = deslocada(&d, -300, 10);
+        assert_eq!(volta.pixel(10, 20), [1, 2, 3, 255]);
+        let m = diferenca(&c, &d).unwrap();
+        assert!(m.antes.len() >= 2);
+        assert!(diferenca(&c, &c.clone()).is_none());
+        // Um deslocamento que cruza a emenda de dois tiles.
+        let e = deslocada(&c, 250, 0);
+        assert_eq!(e.pixel(260, 20), [1, 2, 3, 255]);
+        let f = deslocada(&c, 0, 0);
+        assert_eq!(f, c);
     }
 
     #[test]

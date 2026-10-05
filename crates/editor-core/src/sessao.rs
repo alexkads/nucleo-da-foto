@@ -70,6 +70,13 @@ pub struct Sessao {
     /// Sobe só quando a seleção muda — a borda dela não se refaz a cada
     /// pincelada.
     versao_da_selecao: u64,
+    /// A origem do carimbo (⌥+clique), em pixels da foto.
+    origem: Option<(f32, f32)>,
+    /// Alinhado (o padrão do Photoshop): o primeiro traço depois de escolher a
+    /// origem fixa a distância, e os seguintes copiam à mesma distância.
+    distancia_do_carimbo: Option<(f32, f32)>,
+    /// A camada antes de o arrasto do Mover começar.
+    movendo: Option<(usize, crate::tiles::CamadaDePixels)>,
 }
 
 impl Sessao {
@@ -94,6 +101,9 @@ impl Sessao {
             selecao: None,
             versao: 0,
             versao_da_selecao: 0,
+            origem: None,
+            distancia_do_carimbo: None,
+            movendo: None,
         }
     }
 
@@ -201,6 +211,7 @@ impl Sessao {
     fn fechar_o_que_esta_aberto(&mut self) {
         self.soltar();
         self.confirmar_opacidade();
+        self.terminar_de_mover();
     }
 
     pub fn escolher_camada(&mut self, indice: usize) {
@@ -310,6 +321,89 @@ impl Sessao {
                 depois: modo,
             });
         }
+    }
+
+    // ---------------------------------------------------- carimbo e cor
+
+    /// ⌥+clique com o carimbo: daqui ele copia. O próximo traço fixa a
+    /// distância (alinhado).
+    pub fn definir_origem(&mut self, x: f32, y: f32) {
+        self.origem = Some((x, y));
+        self.distancia_do_carimbo = None;
+    }
+
+    pub fn origem(&self) -> Option<(f32, f32)> {
+        self.origem
+    }
+
+    /// De onde o carimbo copia quando o ponteiro está em `(x, y)` — a mira que
+    /// a tela desenha. Antes do primeiro traço, é a própria origem.
+    pub fn mira_do_carimbo(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        match (self.origem, self.distancia_do_carimbo) {
+            (_, Some(d)) => Some((x + d.0, y + d.1)),
+            (Some(o), None) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// O conta-gotas: a cor da foto como ela aparece em `(x, y)`.
+    pub fn cor_em(&self, x: f32, y: f32) -> Option<[u8; 3]> {
+        let (l, a) = (self.doc.largura() as f32, self.doc.altura() as f32);
+        if x < 0.0 || y < 0.0 || x >= l || y >= a {
+            return None;
+        }
+        let ret = Retangulo::novo(x as u32, y as u32, 1, 1);
+        Some(
+            composicao::compor_recorte(&self.base, &self.doc, &ret)
+                .get_pixel(0, 0)
+                .0,
+        )
+    }
+
+    // ------------------------------------------------------------ mover
+
+    /// O arrasto do Mover começou: a camada escolhida de agora é a referência.
+    /// Escondida não anda (como o pincel).
+    pub fn comecar_a_mover(&mut self) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let ativa = self.ativa();
+        if !self.doc.camadas[ativa].visivel {
+            return false;
+        }
+        self.movendo = Some((ativa, self.doc.camadas[ativa].pixels.clone()));
+        true
+    }
+
+    /// A camada deslocada `(dx, dy)` do começo, na hora.
+    pub fn mover_por(&mut self, dx: i64, dy: i64) {
+        let Some((camada, original)) = self.movendo.as_ref() else {
+            return;
+        };
+        let camada = *camada;
+        let nova = operacoes::deslocada(original, dx, dy);
+        let antes = self.doc.camadas[camada].area();
+        self.doc.camadas[camada].pixels = nova;
+        let sujo = antes.uniao(&self.doc.camadas[camada].area());
+        self.refazer_a_vista(&sujo);
+    }
+
+    /// O arrasto acabou: o deslocamento vira um passo do desfazer.
+    pub fn terminar_de_mover(&mut self) -> bool {
+        let Some((camada, original)) = self.movendo.take() else {
+            return false;
+        };
+        let mudanca = operacoes::diferenca(&original, &self.doc.camadas[camada].pixels);
+        match mudanca {
+            Some(m) => {
+                self.hist.registrar(Comando::Traco { camada, mudanca: m });
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn movendo(&self) -> bool {
+        self.movendo.is_some()
     }
 
     // ------------------------------------------------------------- seleção
@@ -463,6 +557,20 @@ impl Sessao {
             return false;
         }
         let mut traco = Traco::novo(self.pincel).dentro_de(self.selecao.clone());
+        if self.pincel.ferramenta == crate::pincel::Ferramenta::Carimbo {
+            let Some(origem) = self.origem else {
+                return false;
+            };
+            let distancia = *self
+                .distancia_do_carimbo
+                .get_or_insert((origem.0 - x, origem.1 - y));
+            traco = traco.copiando_de(crate::carimbo::Fonte::nova(
+                self.base.clone(),
+                &self.doc,
+                ativa,
+                distancia,
+            ));
+        }
         let sujo = traco.ate(&mut self.doc.camadas[ativa].pixels, x, y);
         self.traco = Some(traco);
         self.refazer_a_vista(&sujo);
@@ -599,7 +707,10 @@ impl Sessao {
     /// Há alterações que não foram salvas (inclui um traço ou um arrasto de
     /// slider em curso).
     pub fn alterado(&self) -> bool {
-        self.hist.alterado() || self.traco.is_some() || self.opacidade_antes.is_some()
+        self.hist.alterado()
+            || self.traco.is_some()
+            || self.opacidade_antes.is_some()
+            || self.movendo.is_some()
     }
 
     /// Fecha o que estiver em curso e devolve **uma cópia** do documento e do
@@ -879,6 +990,51 @@ mod testes {
         assert_eq!(s.ativa(), 1);
         s.escolher_camada(0);
         assert!(s.mesclar_para_baixo().is_err(), "a de baixo de todas");
+    }
+
+    #[test]
+    fn o_carimbo_alinhado_copia_a_mesma_distancia() {
+        let mut s = sessao();
+        s.nova_camada();
+        s.pincel.ferramenta = Ferramenta::Carimbo;
+        s.pincel.dureza = 1.0;
+        s.pincel.raio = 10.0;
+        assert!(!s.apertar(300.0, 300.0), "sem origem não copia");
+        s.definir_origem(100.0, 100.0);
+        assert_eq!(s.mira_do_carimbo(300.0, 300.0), Some((100.0, 100.0)));
+        assert!(s.apertar(300.0, 300.0));
+        s.soltar();
+        assert_eq!(s.compor().get_pixel(300, 300).0, [100, 100, 50]);
+        // O segundo traço, em outro lugar, copia à mesma distância.
+        assert_eq!(s.mira_do_carimbo(500.0, 400.0), Some((300.0, 200.0)));
+        s.apertar(500.0, 400.0);
+        s.soltar();
+        assert_eq!(s.compor().get_pixel(500, 400).0, [44, 200, 50]);
+        assert!(
+            s.documento().camadas[0].pixels.vazia(),
+            "a base e a de baixo intactas"
+        );
+        assert_eq!(s.cor_em(500.0, 400.0), Some([44, 200, 50]));
+        assert_eq!(s.cor_em(-1.0, 0.0), None);
+    }
+
+    #[test]
+    fn mover_desloca_ao_vivo_e_e_um_passo_so() {
+        let mut s = sessao();
+        s.pincel.cor = [255, 0, 0];
+        s.pincel.dureza = 1.0;
+        s.apertar(100.0, 100.0);
+        s.soltar();
+        assert!(s.comecar_a_mover());
+        for d in [10, 50, 120] {
+            s.mover_por(d, d / 2);
+        }
+        assert_eq!(s.compor().get_pixel(220, 160).0, [255, 0, 0]);
+        assert_eq!(s.compor().get_pixel(100, 100).0, [100, 100, 50]);
+        assert!(s.terminar_de_mover());
+        assert_eq!(s.historico().passos().len(), 2);
+        s.desfazer();
+        assert_eq!(s.compor().get_pixel(100, 100).0, [255, 0, 0]);
     }
 
     #[test]

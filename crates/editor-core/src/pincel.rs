@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 
 use std::sync::Arc;
 
+use crate::carimbo::Fonte;
 use crate::retangulo::Retangulo;
 use crate::selecao::Selecao;
 use crate::tiles::{indice, CamadaDePixels, Posicao, Tile, LADO_DO_TILE};
@@ -32,6 +33,8 @@ use crate::tiles::{indice, CamadaDePixels, Posicao, Tile, LADO_DO_TILE};
 pub enum Ferramenta {
     Pincel,
     Borracha,
+    /// Copia da [`Fonte`] em vez de pintar uma cor — o carimbo (S).
+    Carimbo,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,6 +148,8 @@ pub struct Traco {
     /// Com seleção, a cobertura de cada pixel é multiplicada pela máscara: o
     /// pincel e a borracha não passam da borda dela.
     selecao: Option<Arc<Selecao>>,
+    /// De onde o carimbo copia (`Ferramenta::Carimbo`).
+    fonte: Option<Fonte>,
 }
 
 impl Traco {
@@ -157,7 +162,14 @@ impl Traco {
             ultimo: None,
             resto: 0.0,
             selecao: None,
+            fonte: None,
         }
+    }
+
+    /// O carimbo copia daqui.
+    pub fn copiando_de(mut self, fonte: Fonte) -> Self {
+        self.fonte = Some(fonte);
+        self
     }
 
     /// O traço fica dentro da seleção.
@@ -247,7 +259,14 @@ impl Traco {
                         Some(t) => [t[i], t[i + 1], t[i + 2], t[i + 3]],
                         None => [0; 4],
                     };
-                    let novo = aplicar(&self.pincel, de_antes, c);
+                    let novo = match (self.pincel.ferramenta, self.fonte.as_mut()) {
+                        (Ferramenta::Carimbo, Some(fonte)) => match fonte.cor(px, py) {
+                            Some(cor) => aplicar(&Pincel { cor, ..self.pincel }, de_antes, c),
+                            // A origem caiu fora da foto: este pixel fica.
+                            None => continue,
+                        },
+                        _ => aplicar(&self.pincel, de_antes, c),
+                    };
                     tile[i..i + 4].copy_from_slice(&novo);
                 }
             }
@@ -286,7 +305,8 @@ pub fn aplicar(pincel: &Pincel, antes: [u8; 4], cobertura: u8) -> [u8; 4] {
             let alfa = alfa_antes * (1.0 - a);
             [antes[0], antes[1], antes[2], quantizar(alfa)]
         }
-        Ferramenta::Pincel => {
+        // O carimbo pinta como o pincel, com a cor que a fonte deu ao pixel.
+        Ferramenta::Pincel | Ferramenta::Carimbo => {
             let alfa = a + alfa_antes * (1.0 - a);
             if alfa <= 0.0 {
                 return [0; 4];
@@ -441,5 +461,32 @@ mod testes {
                 assert!((tabela.em(d * d) as i32 - exata).abs() <= 3, "d = {d}");
             }
         }
+    }
+
+    #[test]
+    fn o_carimbo_copia_a_foto_deslocada() {
+        use crate::documento::{BaseRef, Documento};
+        let base = std::sync::Arc::new(image::RgbImage::from_fn(600, 400, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 200) as u8, 40])
+        }));
+        let doc = Documento::novo(BaseRef::da_imagem(&base));
+        let mut camada = CamadaDePixels::nova(600, 400);
+        let p = Pincel {
+            ferramenta: Ferramenta::Carimbo,
+            raio: 20.0,
+            dureza: 1.0,
+            opacidade: 1.0,
+            cor: [0, 0, 0],
+        };
+        let fonte = Fonte::nova(base.clone(), &doc, 0, (100.0, 50.0));
+        let mut traco = Traco::novo(p).copiando_de(fonte);
+        traco.ate(&mut camada, 300.0, 200.0);
+        traco.terminar(&mut camada);
+        assert_eq!(
+            camada.pixel(300, 200),
+            [144, 50, 40, 255],
+            "o pixel de (400, 250)"
+        );
+        assert_eq!(camada.pixel(330, 200)[3], 0, "fora do raio");
     }
 }
