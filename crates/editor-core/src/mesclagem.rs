@@ -242,6 +242,41 @@ pub fn mesclar(baixo: [u8; 3], cima: [u8; 4], opacidade: f32, modo: Modo) -> [u8
     ]
 }
 
+/// Um pixel da camada de cima sobre um pixel **de camada** (com alfa) — o
+/// "Mesclar para baixo". A conta geral do W3C para fundo com alfa:
+///
+/// ```text
+/// cima' = (1 − αb)·cima + αb·B(baixo, cima)
+/// αo    = αs + αb·(1 − αs)
+/// cor   = (αs·cima' + αb·(1 − αs)·baixo) / αo
+/// ```
+///
+/// Sobre fundo opaco (αb = 1) é a mesma conta de [`mesclar`]; sobre fundo
+/// transparente, o modo não tem com o que misturar e a camada entra como está.
+pub fn mesclar_em_camada(baixo: [u8; 4], cima: [u8; 4], opacidade: f32, modo: Modo) -> [u8; 4] {
+    let a_s = cima[3] as f32 / 255.0 * opacidade.clamp(0.0, 1.0);
+    if a_s <= 0.0 {
+        return baixo;
+    }
+    let a_b = baixo[3] as f32 / 255.0;
+    let n = |v: u8| v as f32 / 255.0;
+    let b = [n(baixo[0]), n(baixo[1]), n(baixo[2])];
+    let c = [n(cima[0]), n(cima[1]), n(cima[2])];
+    let misturada = modo.misturar(b, c);
+    let a_o = a_s + a_b * (1.0 - a_s);
+    let canal = |i: usize| -> u8 {
+        let c_linha = (1.0 - a_b) * c[i] + a_b * misturada[i].clamp(0.0, 1.0);
+        let v = (a_s * c_linha + a_b * (1.0 - a_s) * b[i]) / a_o;
+        (v * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    [
+        canal(0),
+        canal(1),
+        canal(2),
+        (a_o * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
 #[cfg(test)]
 mod testes {
     use super::*;
@@ -311,6 +346,26 @@ mod testes {
         // Saturação de uma camada cinza também tira a cor.
         let s = mesclar(B, [90, 90, 90, 255], 1.0, Modo::Saturacao);
         assert!(s[0] == s[1] && s[1] == s[2], "{s:?}");
+    }
+
+    #[test]
+    fn mesclar_em_camada_opaca_e_a_mesma_conta_da_composicao() {
+        for modo in Modo::TODOS {
+            let em_camada = mesclar_em_camada([B[0], B[1], B[2], 255], C, 0.7, modo);
+            let na_foto = mesclar(B, C, 0.7, modo);
+            assert_eq!(em_camada[3], 255);
+            for i in 0..3 {
+                assert!(
+                    (em_camada[i] as i32 - na_foto[i] as i32).abs() <= 1,
+                    "{modo:?}: {em_camada:?} × {na_foto:?}"
+                );
+            }
+        }
+        // Sobre transparente, entra a de cima como está, com a opacidade no alfa.
+        assert_eq!(
+            mesclar_em_camada([0; 4], C, 0.5, Modo::Multiplicacao),
+            [60, 180, 240, 128]
+        );
     }
 
     #[test]

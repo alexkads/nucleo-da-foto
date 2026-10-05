@@ -18,8 +18,11 @@ use crate::composicao;
 use crate::documento::{Camada, Documento};
 use crate::historico::{Comando, Historico};
 use crate::mesclagem::Modo;
+use crate::operacoes;
+use crate::pincel::Mudanca;
 use crate::pincel::{Pincel, Traco};
 use crate::retangulo::Retangulo;
+use crate::selecao::{Forma, Operacao, Selecao};
 use crate::vista::Vista;
 
 /// Um pedido de lupa: o que a vista do pedaço precisa para ser montada fora
@@ -59,6 +62,11 @@ pub struct Sessao {
     /// A camada e a opacidade dela quando o arrasto do slider começou — o
     /// passo do desfazer é o arrasto inteiro, e não cada valor do caminho.
     opacidade_antes: Option<(usize, f32)>,
+    /// O letreiro. `Arc`: o traço leva uma cópia barata.
+    selecao: Option<Arc<Selecao>>,
+    /// Sobe a cada mudança de pixel ou de seleção — quem desenha miniaturas e
+    /// bordas sabe quando refazer.
+    versao: u64,
 }
 
 impl Sessao {
@@ -80,6 +88,8 @@ impl Sessao {
             ativa,
             traco: None,
             opacidade_antes: None,
+            selecao: None,
+            versao: 0,
         }
     }
 
@@ -103,7 +113,13 @@ impl Sessao {
         &mut self.vista
     }
 
+    /// Sobe a cada mudança de pixel, de pilha ou de seleção.
+    pub fn versao(&self) -> u64 {
+        self.versao
+    }
+
     fn refazer_a_vista(&mut self, sujo: &Retangulo) {
+        self.versao += 1;
         if sujo.vazio() {
             return;
         }
@@ -292,6 +308,135 @@ impl Sessao {
         }
     }
 
+    // ------------------------------------------------------------- seleção
+
+    pub fn selecao(&self) -> Option<&Selecao> {
+        self.selecao.as_deref()
+    }
+
+    /// Uma forma desenhada entra na seleção. Nova sem nada selecionado no fim
+    /// (um clique) desmarca, como no Photoshop.
+    pub fn selecionar(&mut self, forma: &Forma, operacao: Operacao) {
+        self.fechar_o_que_esta_aberto();
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let nova = Selecao::da_forma(largura, altura, forma);
+        let resultado = match (operacao, self.selecao.as_deref()) {
+            (Operacao::Nova, _) | (_, None) => {
+                if operacao == Operacao::Subtrair {
+                    None
+                } else {
+                    Some(nova)
+                }
+            }
+            (_, Some(atual)) => {
+                let mut junta = atual.clone();
+                junta.combinar(&nova, operacao);
+                Some(junta)
+            }
+        };
+        self.selecao = resultado.filter(|s| !s.nada()).map(Arc::new);
+        self.versao += 1;
+    }
+
+    /// ⌘A.
+    pub fn selecionar_tudo(&mut self) {
+        self.fechar_o_que_esta_aberto();
+        self.selecao = Some(Arc::new(Selecao::tudo(
+            self.doc.largura(),
+            self.doc.altura(),
+        )));
+        self.versao += 1;
+    }
+
+    /// ⌘D.
+    pub fn desmarcar(&mut self) {
+        self.fechar_o_que_esta_aberto();
+        if self.selecao.take().is_some() {
+            self.versao += 1;
+        }
+    }
+
+    /// ⇧⌘I. Sem seleção não faz nada (no Photoshop também).
+    pub fn inverter_selecao(&mut self) {
+        self.fechar_o_que_esta_aberto();
+        if let Some(s) = self.selecao.as_mut() {
+            Arc::make_mut(s).inverter();
+            if s.nada() {
+                self.selecao = None;
+            }
+            self.versao += 1;
+        }
+    }
+
+    /// Um passo de pixels na camada escolhida, feito de uma vez.
+    fn registrar_mudanca(&mut self, camada: usize, mudanca: Option<Mudanca>) -> bool {
+        let Some(mudanca) = mudanca else {
+            return false;
+        };
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let sujo = mudanca
+            .depois
+            .iter()
+            .fold(Retangulo::default(), |a, (p, _)| {
+                a.uniao(&crate::tiles::retangulo_do_tile(*p, largura, altura))
+            });
+        self.hist.registrar(Comando::Traco { camada, mudanca });
+        self.refazer_a_vista(&sujo);
+        true
+    }
+
+    /// Delete: apaga a seleção na camada escolhida. Sem seleção não faz nada.
+    pub fn apagar_selecao(&mut self) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let Some(selecao) = self.selecao.clone() else {
+            return false;
+        };
+        let camada = self.ativa();
+        let mudanca = operacoes::apagar(&mut self.doc.camadas[camada].pixels, &selecao);
+        self.registrar_mudanca(camada, mudanca)
+    }
+
+    /// ⌥Delete: preenche a seleção (ou a camada inteira) com a cor do pincel.
+    pub fn preencher_selecao(&mut self) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let camada = self.ativa();
+        if !self.doc.camadas[camada].visivel {
+            return false;
+        }
+        let selecao = self.selecao.clone();
+        let mudanca = operacoes::preencher(
+            &mut self.doc.camadas[camada].pixels,
+            selecao.as_deref(),
+            self.pincel.cor,
+        );
+        self.registrar_mudanca(camada, mudanca)
+    }
+
+    /// ⌘E: a escolhida entra na de baixo, com o modo e a opacidade dela.
+    /// Recusa na de baixo de todas e com uma das duas escondida.
+    pub fn mesclar_para_baixo(&mut self) -> Result<(), &'static str> {
+        self.fechar_o_que_esta_aberto();
+        let indice = self.ativa();
+        if indice == 0 {
+            return Err("Não há camada embaixo desta para mesclar");
+        }
+        if !self.doc.camadas[indice].visivel || !self.doc.camadas[indice - 1].visivel {
+            return Err("Mostre as duas camadas antes de mesclar");
+        }
+        let de_cima = self.doc.camadas[indice].clone();
+        let mut abaixo = self.doc.camadas[indice - 1].pixels.clone();
+        let mudanca = operacoes::mesclar_na_de_baixo(&mut abaixo, &de_cima).unwrap_or(Mudanca {
+            antes: Vec::new(),
+            depois: Vec::new(),
+        });
+        self.executar(Comando::Mesclar {
+            indice,
+            de_cima: Box::new(de_cima),
+            mudanca,
+        });
+        Ok(())
+    }
+
     // --------------------------------------------------------------- traço
 
     /// O ponteiro desceu em `(x, y)`, em pixels da foto. Devolve `false` sem
@@ -305,7 +450,7 @@ impl Sessao {
         if !self.doc.camadas[ativa].visivel {
             return false;
         }
-        let mut traco = Traco::novo(self.pincel);
+        let mut traco = Traco::novo(self.pincel).dentro_de(self.selecao.clone());
         let sujo = traco.ate(&mut self.doc.camadas[ativa].pixels, x, y);
         self.traco = Some(traco);
         self.refazer_a_vista(&sujo);
@@ -474,6 +619,7 @@ mod testes {
     use super::*;
     use crate::documento::{BaseRef, NOME_DA_PRIMEIRA};
     use crate::pincel::Ferramenta;
+    use crate::selecao::{Forma, Operacao};
 
     fn sessao() -> Sessao {
         let base = Arc::new(RgbImage::from_fn(800, 600, |x, y| {
@@ -638,6 +784,89 @@ mod testes {
         );
         s.largar_lupa();
         assert!(s.lupa().is_none());
+    }
+
+    #[test]
+    fn o_pincel_nao_passa_da_selecao() {
+        let mut s = sessao();
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(100, 100, 100, 100)),
+            Operacao::Nova,
+        );
+        s.pincel.cor = [255, 0, 0];
+        s.pincel.dureza = 1.0;
+        s.apertar(50.0, 150.0);
+        s.arrastar(300.0, 150.0);
+        s.soltar();
+        let c = &s.documento().camadas[0].pixels;
+        assert_eq!(c.pixel(150, 150)[3], 255);
+        assert_eq!(c.pixel(90, 150)[3], 0, "à esquerda da seleção");
+        assert_eq!(c.pixel(210, 150)[3], 0, "à direita");
+
+        // Um clique sem área desmarca.
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(10, 10, 0, 0)),
+            Operacao::Nova,
+        );
+        assert!(s.selecao().is_none());
+    }
+
+    #[test]
+    fn apagar_e_preencher_a_selecao_entram_no_desfazer() {
+        let mut s = sessao();
+        s.pincel.cor = [0, 0, 255];
+        assert!(s.preencher_selecao(), "sem seleção, a camada toda");
+        assert_eq!(s.compor().get_pixel(700, 500).0, [0, 0, 255]);
+        s.selecionar(
+            &Forma::Elipse(Retangulo::novo(200, 200, 200, 200)),
+            Operacao::Nova,
+        );
+        s.inverter_selecao();
+        assert!(s.apagar_selecao());
+        assert_eq!(
+            s.compor().get_pixel(300, 300).0,
+            [0, 0, 255],
+            "o meio ficou"
+        );
+        assert_eq!(
+            s.compor().get_pixel(10, 10).0,
+            [10, 10, 50],
+            "fora foi apagado"
+        );
+        s.desfazer();
+        assert_eq!(s.compor().get_pixel(10, 10).0, [0, 0, 255]);
+        s.desmarcar();
+        assert!(!s.apagar_selecao(), "Delete sem seleção não faz nada");
+    }
+
+    #[test]
+    fn mesclar_para_baixo_e_desfazer() {
+        let mut s = sessao();
+        s.pincel.cor = [200, 200, 0];
+        s.apertar(100.0, 100.0);
+        s.soltar();
+        s.nova_camada();
+        s.pincel.cor = [0, 0, 0];
+        s.apertar(110.0, 100.0);
+        s.soltar();
+        s.mudar_modo(Modo::Multiplicacao);
+        let antes = s.compor();
+        let pilha = s.documento().clone();
+        assert!(s.mesclar_para_baixo().is_ok());
+        assert_eq!(s.documento().camadas.len(), 1);
+        assert_eq!(s.ativa(), 0);
+        for (a, b) in antes.as_raw().iter().zip(s.compor().as_raw()) {
+            assert!((*a as i32 - *b as i32).abs() <= 1);
+        }
+        assert_eq!(
+            s.historico().a_desfazer().unwrap().descricao(s.documento()),
+            "Mesclar Camada 1 para baixo"
+        );
+        s.desfazer();
+        assert_eq!(s.documento(), &pilha);
+        assert_eq!(s.ativa(), 1);
+        s.escolher_camada(0);
+        assert!(s.mesclar_para_baixo().is_err(), "a de baixo de todas");
     }
 
     #[test]

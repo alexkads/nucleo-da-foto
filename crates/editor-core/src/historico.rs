@@ -60,6 +60,13 @@ pub enum Comando {
         de: usize,
         para: usize,
     },
+    /// ⌘E: a camada `indice` sai, e a de baixo (`indice − 1`) recebe os
+    /// pixels dela (`mudanca`). Para trás, a de baixo volta e a de cima entra.
+    Mesclar {
+        indice: usize,
+        de_cima: Box<Camada>,
+        mudanca: Mudanca,
+    },
 }
 
 impl Comando {
@@ -91,6 +98,7 @@ impl Comando {
             Comando::Renomear { antes, depois, .. } => format!("Renomear {antes} para {depois}"),
             Comando::CriarCamada { camada, .. } => format!("Criar {}", camada.nome),
             Comando::ExcluirCamada { camada, .. } => format!("Excluir {}", camada.nome),
+            Comando::Mesclar { de_cima, .. } => format!("Mesclar {} para baixo", de_cima.nome),
             Comando::MoverCamada { de, para } => {
                 // O nome é o da camada que andou, esteja ela onde estiver agora.
                 let onde = if doc.camadas.get(*para).is_some() {
@@ -132,6 +140,13 @@ impl Comando {
                     *de
                 }
             }
+            Comando::Mesclar { indice, .. } => {
+                if para_frente {
+                    indice.saturating_sub(1)
+                } else {
+                    *indice
+                }
+            }
         };
         Some(i.min(ultima))
     }
@@ -144,6 +159,13 @@ impl Comando {
             }
             Comando::CriarCamada { camada, .. } | Comando::ExcluirCamada { camada, .. } => {
                 camada.pixels.bytes()
+            }
+            Comando::Mesclar {
+                de_cima, mudanca, ..
+            } => {
+                let conta = |v: &[(_, Option<_>)]| v.iter().filter(|(_, t)| t.is_some()).count();
+                de_cima.pixels.bytes()
+                    + (conta(&mudanca.antes) + conta(&mudanca.depois)) * BYTES_DO_TILE
             }
             _ => 0,
         }
@@ -226,6 +248,33 @@ impl Comando {
                 // 🔑 A ordem só muda a foto onde a camada que andou tem pixel —
                 // mas a que ficou por cima dela muda também onde se cruzam,
                 // que é dentro do mesmo retângulo.
+                sujo
+            }
+            Comando::Mesclar {
+                indice,
+                de_cima,
+                mudanca,
+            } => {
+                let (i, abaixo) = (*indice, indice.saturating_sub(1));
+                let mut sujo = de_cima.area();
+                if para_frente && i < doc.camadas.len() {
+                    doc.camadas.remove(i);
+                }
+                if let Some(c) = doc.camadas.get_mut(abaixo) {
+                    let lado = if para_frente {
+                        &mudanca.depois
+                    } else {
+                        &mudanca.antes
+                    };
+                    for (posicao, tile) in lado {
+                        c.pixels.definir(*posicao, tile.clone());
+                        sujo = sujo.uniao(&retangulo_do_tile(*posicao, largura, altura));
+                    }
+                }
+                if !para_frente {
+                    let i = i.min(doc.camadas.len());
+                    doc.camadas.insert(i, (**de_cima).clone());
+                }
                 sujo
             }
         }

@@ -38,11 +38,13 @@ use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 /// sabe ler, e não grava por cima.
 ///
 /// - **1** (0.1.28): uma camada; propriedades e traços no histórico.
+/// - **3** (etapa 3): o passo `mesclar` (⌘E). O número sobe para a 0.1.94,
+///   que não sabe desfazer uma mesclagem, recusar com o aviso em vez de falhar.
 /// - **2** (etapa 2): várias camadas, o `modo` de mesclagem de cada uma, e os
 ///   passos de criar, excluir, mover, renomear e mudar o modo. O 1 se lê como
 ///   está (o modo que falta é o Normal); o app de antes recusa o 2 com a
 ///   mensagem de "versão mais nova", em vez de compor as camadas errado.
-pub const FORMATO: u32 = 2;
+pub const FORMATO: u32 = 3;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -255,6 +257,12 @@ pub enum PassoSalvo {
     MoverCamada {
         de: usize,
         para: usize,
+    },
+    Mesclar {
+        indice: usize,
+        de_cima: CamadaSalva,
+        antes: Vec<TileSalvo>,
+        depois: Vec<TileSalvo>,
     },
 }
 
@@ -470,6 +478,30 @@ impl Projeto {
                     de: *de,
                     para: *para,
                 },
+                Comando::Mesclar {
+                    indice,
+                    de_cima,
+                    mudanca,
+                } => {
+                    let de_cima = salvar_camada(de_cima, &mut gravar_tile)?;
+                    let mut lado = |l: &[(Posicao, Option<Tile>)]| {
+                        l.iter()
+                            .map(|(p, t)| {
+                                Ok(TileSalvo {
+                                    c: p.0,
+                                    l: p.1,
+                                    hash: t.as_ref().map(&mut gravar_tile).transpose()?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, ErroDoProjeto>>()
+                    };
+                    PassoSalvo::Mesclar {
+                        indice: *indice,
+                        de_cima,
+                        antes: lado(&mudanca.antes)?,
+                        depois: lado(&mudanca.depois)?,
+                    }
+                }
             });
         }
 
@@ -703,6 +735,32 @@ impl Projeto {
                     de: *de,
                     para: *para,
                 },
+                PassoSalvo::Mesclar {
+                    indice,
+                    de_cima,
+                    antes,
+                    depois,
+                } => {
+                    let de_cima = Box::new(ler_camada(de_cima, &mut ler_tile)?);
+                    let mut lado = |v: &[TileSalvo]| {
+                        v.iter()
+                            .map(|t| {
+                                Ok((
+                                    (t.c, t.l),
+                                    t.hash.as_deref().map(&mut ler_tile).transpose()?,
+                                ))
+                            })
+                            .collect::<Result<Vec<_>, ErroDoProjeto>>()
+                    };
+                    Comando::Mesclar {
+                        indice: *indice,
+                        de_cima,
+                        mudanca: Mudanca {
+                            antes: lado(antes)?,
+                            depois: lado(depois)?,
+                        },
+                    }
+                }
             });
         }
         let posicao = manifesto.historico.posicao;
@@ -778,6 +836,16 @@ impl Projeto {
                 PassoSalvo::CriarCamada { camada, .. }
                 | PassoSalvo::ExcluirCamada { camada, .. } => {
                     citados.extend(camada.tiles.values().cloned());
+                }
+                // A de cima mora só no histórico, e a de baixo de antes também.
+                PassoSalvo::Mesclar {
+                    de_cima,
+                    antes,
+                    depois,
+                    ..
+                } => {
+                    citados.extend(de_cima.tiles.values().cloned());
+                    citados.extend(antes.iter().chain(depois).filter_map(|t| t.hash.clone()));
                 }
                 _ => {}
             }
@@ -944,7 +1012,7 @@ mod testes {
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.path().join("e1").join(MANIFESTO)).unwrap())
                 .unwrap();
-        assert_eq!(json["formato"], 2);
+        assert_eq!(json["formato"], FORMATO);
         assert_eq!(json["camadas"][0]["modo"], "tela");
         p.coletar(1).unwrap();
 
@@ -978,6 +1046,29 @@ mod testes {
             }
             .as_raw()
         );
+    }
+
+    #[test]
+    fn a_mesclagem_volta_da_gravacao_e_se_desfaz_depois_da_coleta() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = base();
+        let mut s = sessao_pintada(&base);
+        s.nova_camada();
+        s.pincel.cor = [255, 255, 255];
+        s.apertar(320.0, 240.0);
+        s.soltar();
+        s.mudar_modo(Modo::Sobrepor);
+        let pilha = s.documento().clone();
+        s.mesclar_para_baixo().unwrap();
+        let (doc, hist) = s.instantaneo();
+        let p = projeto(dir.path(), Arc::new(DiscoReal));
+        p.salvar("e1", &base, &doc, &hist, 1).unwrap();
+        p.coletar(1).unwrap();
+        let aberto = p.abrir(&base).unwrap().unwrap();
+        assert_eq!(aberto.documento, doc);
+        let mut s2 = Sessao::nova(base.clone(), aberto.documento, aberto.historico, 300);
+        assert!(s2.desfazer());
+        assert_eq!(s2.documento(), &pilha);
     }
 
     #[test]

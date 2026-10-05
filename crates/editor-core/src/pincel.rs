@@ -22,7 +22,10 @@
 
 use std::collections::BTreeMap;
 
+use std::sync::Arc;
+
 use crate::retangulo::Retangulo;
+use crate::selecao::Selecao;
 use crate::tiles::{indice, CamadaDePixels, Posicao, Tile, LADO_DO_TILE};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +142,9 @@ pub struct Traco {
     ultimo: Option<(f32, f32)>,
     /// Quanto do caminho sobrou desde o último carimbo.
     resto: f32,
+    /// Com seleção, a cobertura de cada pixel é multiplicada pela máscara: o
+    /// pincel e a borracha não passam da borda dela.
+    selecao: Option<Arc<Selecao>>,
 }
 
 impl Traco {
@@ -150,7 +156,14 @@ impl Traco {
             cobertura: BTreeMap::new(),
             ultimo: None,
             resto: 0.0,
+            selecao: None,
         }
+    }
+
+    /// O traço fica dentro da seleção.
+    pub fn dentro_de(mut self, selecao: Option<Arc<Selecao>>) -> Self {
+        self.selecao = selecao;
+        self
     }
 
     pub fn pincel(&self) -> &Pincel {
@@ -199,6 +212,11 @@ impl Traco {
                 .cobertura
                 .entry(posicao)
                 .or_insert_with(|| vec![0; (LADO_DO_TILE * LADO_DO_TILE) as usize]);
+            let mascara = self.selecao.as_ref().map(|s| s.do_tile(posicao));
+            if let Some(Err(0)) = mascara {
+                // O tile inteiro está fora da seleção.
+                continue;
+            }
             let tile = camada.tile_mut(posicao);
             let (tx0, ty0) = (posicao.0 * LADO_DO_TILE, posicao.1 * LADO_DO_TILE);
             let (px0, px1) = (x0.max(tx0), x1.min(tx0 + LADO_DO_TILE));
@@ -206,12 +224,20 @@ impl Traco {
             for py in py0..py1 {
                 for px in px0..px1 {
                     let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
-                    let c = self.tabela.em(dx * dx + dy * dy);
+                    let mut c = self.tabela.em(dx * dx + dy * dy);
                     if c == 0 {
                         continue;
                     }
                     let (lx, ly) = (px - tx0, py - ty0);
                     let k = (ly * LADO_DO_TILE + lx) as usize;
+                    match mascara {
+                        None | Some(Err(255)) => {}
+                        Some(Err(m)) => c = ((c as u32 * m as u32 + 127) / 255) as u8,
+                        Some(Ok(m)) => c = ((c as u32 * m[k] as u32 + 127) / 255) as u8,
+                    }
+                    if c == 0 {
+                        continue;
+                    }
                     if c <= cobertura[k] {
                         continue;
                     }
