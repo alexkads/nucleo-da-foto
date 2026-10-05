@@ -618,7 +618,6 @@ fn votar_pelo_melhor(n: &mut Nivel, alvos: &[(i32, i32)], nnf: &[(i32, i32)], cu
 /// `None` quando não há buraco dentro da foto, ou quando a região em volta não
 /// tem nenhum patch inteiro para oferecer — aí a GPU deixa o destino como está.
 pub fn preencher(rgba: &[u8], largura: u32, altura: u32, p: &Preenchimento) -> Option<Remendo> {
-    let (w, h) = (largura as i32, altura as i32);
     let lado = largura.max(altura) as f32;
     let raio = p.raio * lado;
     let caminho: Vec<[f32; 2]> = p
@@ -663,11 +662,6 @@ pub fn preencher(rgba: &[u8], largura: u32, altura: u32, p: &Preenchimento) -> O
             altura,
         )?,
     };
-    let tamanho_do_buraco = ((bx1 - bx0).max(by1 - by0)) as f32;
-    let margem = (tamanho_do_buraco * 0.75).max(2.0 * raio).max(24.0) as i32 + R;
-    let (rx0, ry0) = ((bx0 as i32 - margem).max(0), (by0 as i32 - margem).max(0));
-    let (rx1, ry1) = ((bx1 as i32 + margem).min(w), (by1 as i32 + margem).min(h));
-
     let no_buraco = |x: f32, y: f32| {
         if let Some(poly) = &poligono {
             return crate::locais::distancia_ao_laco(poly, [x, y]) > -meia_borda;
@@ -690,6 +684,53 @@ pub fn preencher(rgba: &[u8], largura: u32, altura: u32, p: &Preenchimento) -> O
             (d[0] * d[0] + d[1] * d[1]).sqrt() < raio + 0.5
         })
     };
+    preencher_na_regiao(
+        rgba,
+        largura,
+        altura,
+        (bx0, by0, bx1, by1),
+        raio,
+        &no_buraco,
+        semente(p),
+    )
+}
+
+/// A margem de trabalho em volta de um buraco — de onde saem os patches.
+pub fn margem_de_trabalho(caixa: (u32, u32, u32, u32), raio: f32) -> u32 {
+    let (bx0, by0, bx1, by1) = caixa;
+    let tamanho_do_buraco = ((bx1 - bx0).max(by1 - by0)) as f32;
+    (tamanho_do_buraco * 0.75).max(2.0 * raio).max(24.0) as u32 + R as u32
+}
+
+/// Preenche um buraco qualquer — o que `no_buraco(x, y)` diz, com o centro do
+/// pixel `(x, y)` em `(x + 0,5, y + 0,5)` — dentro da caixa `(x0, y0, x1,
+/// y1)`. É o que o editor em camadas usa para a seleção e o pincel de correção:
+/// a mesma síntese, o buraco vindo de fora.
+pub fn preencher_buraco(
+    rgba: &[u8],
+    largura: u32,
+    altura: u32,
+    caixa: (u32, u32, u32, u32),
+    no_buraco: &dyn Fn(f32, f32) -> bool,
+    semente: u64,
+) -> Option<Remendo> {
+    preencher_na_regiao(rgba, largura, altura, caixa, 0.0, no_buraco, semente | 1)
+}
+
+fn preencher_na_regiao(
+    rgba: &[u8],
+    largura: u32,
+    altura: u32,
+    caixa: (u32, u32, u32, u32),
+    raio: f32,
+    no_buraco: &dyn Fn(f32, f32) -> bool,
+    semente: u64,
+) -> Option<Remendo> {
+    let (w, h) = (largura as i32, altura as i32);
+    let (bx0, by0, bx1, by1) = caixa;
+    let margem = margem_de_trabalho(caixa, raio) as i32;
+    let (rx0, ry0) = ((bx0 as i32 - margem).max(0), (by0 as i32 - margem).max(0));
+    let (rx1, ry1) = ((bx1 as i32 + margem).min(w), (by1 as i32 + margem).min(h));
 
     let (nw, nh) = (rx1 - rx0, ry1 - ry0);
     let mut base = Nivel {
@@ -725,7 +766,7 @@ pub fn preencher(rgba: &[u8], largura: u32, altura: u32, p: &Preenchimento) -> O
         piramide.push(menor);
     }
 
-    let mut sorteio = Sorteio(semente(p));
+    let mut sorteio = Sorteio(semente);
     let mut anterior: Option<(i32, i32, Campo)> = None;
     for nivel in (0..piramide.len()).rev() {
         let n = &mut piramide[nivel];
@@ -921,5 +962,42 @@ mod testes {
     fn buraco_fora_da_foto_nao_da_remendo() {
         let img = listras(40, 40);
         assert!(preencher(&img, 40, 40, &buraco(vec![[3.0, 3.0]], 0.05)).is_none());
+    }
+
+    /// O buraco vindo de fora (o editor em camadas): um quadrado num fundo
+    /// listrado sai listrado, e o resultado não depende da máquina.
+    #[test]
+    fn preencher_um_buraco_qualquer() {
+        let (w, h) = (160u32, 120u32);
+        let mut img = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let k = ((y * w + x) * 4) as usize;
+                let v = if (x / 6) % 2 == 0 { 200 } else { 40 };
+                img[k..k + 4].copy_from_slice(&[v, v, v, 255]);
+                if (70..90).contains(&x) && (50..70).contains(&y) {
+                    img[k..k + 4].copy_from_slice(&[255, 0, 0, 255]);
+                }
+            }
+        }
+        let no = |x: f32, y: f32| (70.0..90.0).contains(&x) && (50.0..70.0).contains(&y);
+        let r = preencher_buraco(&img, w, h, (70, 50, 90, 70), &no, 7).expect("remendo");
+        assert_eq!((r.x0, r.y0, r.largura, r.altura), (70, 50, 20, 20));
+        let vermelhos = r
+            .rgba
+            .chunks(4)
+            .filter(|p| p[0] == 255 && p[1] == 0)
+            .count();
+        assert_eq!(vermelhos, 0, "nada do vermelho de antes");
+        let escuros = r.rgba.chunks(4).filter(|p| p[0] < 100).count();
+        assert!(
+            escuros > 50 && escuros < 350,
+            "listras: {escuros} escuros de 400"
+        );
+        assert_eq!(
+            preencher_buraco(&img, w, h, (70, 50, 90, 70), &no, 7),
+            Some(r),
+            "determinístico"
+        );
     }
 }
