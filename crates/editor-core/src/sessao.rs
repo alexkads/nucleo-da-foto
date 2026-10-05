@@ -381,6 +381,35 @@ impl Sessao {
         )
     }
 
+    // ------------------------------------------- preenchimento por conteúdo
+
+    /// A foto como ela aparece até a camada escolhida (inclusive), no recorte
+    /// `ret` — a fonte do preenchimento por conteúdo e do pincel de correção,
+    /// como a do carimbo.
+    pub fn foto_ate_a_ativa(&self, ret: &Retangulo) -> RgbImage {
+        let mut doc = self.doc.clone();
+        doc.camadas.truncate(self.ativa() + 1);
+        composicao::compor_recorte(&self.base, &doc, ret)
+    }
+
+    /// Cola o remendo na camada `camada` (a que estava escolhida quando ele
+    /// foi pedido) — um passo do desfazer. Falso quando não mudou nada, ou a
+    /// camada já não existe.
+    pub fn colar_remendo(
+        &mut self,
+        camada: usize,
+        ret: &Retangulo,
+        rgba: &[u8],
+        peso: &dyn Fn(u32, u32) -> u8,
+    ) -> bool {
+        self.fechar_o_que_esta_aberto();
+        if camada >= self.doc.camadas.len() {
+            return false;
+        }
+        let mudanca = operacoes::colar(&mut self.doc.camadas[camada].pixels, ret, rgba, peso);
+        self.registrar_mudanca(camada, mudanca)
+    }
+
     // ------------------------------------------------------------ mover
 
     /// O arrasto do Mover começou: a camada escolhida de agora é a referência.
@@ -1290,6 +1319,22 @@ mod testes {
             "recortado"
         );
         assert_eq!(s.documento().camadas.len(), 3);
+    }
+
+    #[test]
+    fn colar_um_remendo_e_um_passo_na_camada_pedida() {
+        let mut s = sessao();
+        s.nova_camada();
+        let ret = Retangulo::novo(100, 100, 10, 10);
+        let foto = s.foto_ate_a_ativa(&ret);
+        assert_eq!(foto.get_pixel(0, 0).0, [100, 100, 50]);
+        let rgba = vec![255u8; 10 * 10 * 4];
+        assert!(s.colar_remendo(1, &ret, &rgba, &|_, _| 255));
+        assert_eq!(s.compor().get_pixel(105, 105).0, [255, 255, 255]);
+        assert!(s.documento().camadas[0].pixels.vazia());
+        s.desfazer();
+        assert_eq!(s.compor().get_pixel(105, 105).0, [105, 105, 50]);
+        assert!(!s.colar_remendo(9, &ret, &rgba, &|_, _| 255));
     }
 
     #[test]

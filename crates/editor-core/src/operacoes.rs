@@ -207,6 +207,44 @@ pub fn diferenca(antes: &CamadaDePixels, depois: &CamadaDePixels) -> Option<Muda
     (!m.antes.is_empty()).then_some(m)
 }
 
+/// Cola um remendo RGB (o preenchimento por conteúdo) por cima da camada, no
+/// retângulo `ret`, com a força de cada pixel dada por `peso` (0 = não toca,
+/// 255 = substitui).
+pub fn colar(
+    camada: &mut CamadaDePixels,
+    ret: &Retangulo,
+    rgba: &[u8],
+    peso: &dyn Fn(u32, u32) -> u8,
+) -> Option<Mudanca> {
+    let (largura, altura) = (camada.largura(), camada.altura());
+    let posicoes = camada.tiles_do_retangulo(ret);
+    refazer_tiles(camada, posicoes, |posicao, velho| {
+        let pedaco = retangulo_do_tile(posicao, largura, altura);
+        let mut novo = velho.map_or_else(|| vec![0; BYTES_DO_TILE], |t| t.as_ref().clone());
+        let mut mexeu = false;
+        for y in pedaco.y.max(ret.y)..pedaco.baixo().min(ret.baixo()) {
+            for x in pedaco.x.max(ret.x)..pedaco.direita().min(ret.direita()) {
+                let p = peso(x, y);
+                if p == 0 {
+                    continue;
+                }
+                let k = (((y - ret.y) * ret.largura + (x - ret.x)) * 4) as usize;
+                let i = indice(x - pedaco.x, y - pedaco.y);
+                let antes = [novo[i], novo[i + 1], novo[i + 2], novo[i + 3]];
+                let cima = [rgba[k], rgba[k + 1], rgba[k + 2], p];
+                novo[i..i + 4].copy_from_slice(&mesclar_em_camada(
+                    antes,
+                    cima,
+                    1.0,
+                    crate::mesclagem::Modo::Normal,
+                ));
+                mexeu = true;
+            }
+        }
+        mexeu.then_some(novo)
+    })
+}
+
 /// A miniatura da camada para o painel, em RGBA de `largura × altura`, pelo
 /// pixel mais próximo (são umas mil leituras). O transparente fica
 /// transparente: quem desenha põe o xadrez por baixo.
@@ -317,6 +355,17 @@ mod testes {
         assert_eq!(e.pixel(260, 20), [1, 2, 3, 255]);
         let f = deslocada(&c, 0, 0);
         assert_eq!(f, c);
+    }
+
+    #[test]
+    fn colar_respeita_o_peso() {
+        let mut c = CamadaDePixels::nova(600, 400);
+        let ret = Retangulo::novo(250, 10, 20, 10);
+        let rgba = vec![9u8; 20 * 10 * 4];
+        let m = colar(&mut c, &ret, &rgba, &|x, _| if x < 260 { 255 } else { 0 }).unwrap();
+        assert_eq!(c.pixel(255, 15), [9, 9, 9, 255]);
+        assert_eq!(c.pixel(265, 15)[3], 0);
+        assert_eq!(m.antes.len(), 2, "dois tiles: o remendo cruza a emenda");
     }
 
     #[test]
