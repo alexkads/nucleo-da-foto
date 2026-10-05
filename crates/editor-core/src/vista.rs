@@ -159,6 +159,11 @@ impl Vista {
         if vx1 <= vx0 || vy1 <= vy0 {
             return;
         }
+        // Um pixel a mais de cada lado: o vizinho leva uma folga de um pixel
+        // deste ladrilho (`ladrilho_bgra_com_folga`), e ela também mudou.
+        let (vx0, vy0) = (vx0.saturating_sub(1), vy0.saturating_sub(1));
+        let vx1 = (vx1 + 1).min(self.imagem.width());
+        let vy1 = (vy1 + 1).min(self.imagem.height());
         for ly in (vy0 / LADO_DO_LADRILHO)..=((vy1 - 1) / LADO_DO_LADRILHO) {
             for lx in (vx0 / LADO_DO_LADRILHO)..=((vx1 - 1) / LADO_DO_LADRILHO) {
                 self.sujos.insert((lx, ly));
@@ -189,6 +194,31 @@ impl Vista {
             LADO_DO_LADRILHO,
         )
         .limitado(self.imagem.width(), self.imagem.height())
+    }
+
+    /// O ladrilho com **um pixel de folga de cada lado**, tirado dos vizinhos
+    /// (na borda da vista, o próprio pixel repetido): `(largura + 2, altura +
+    /// 2, bytes)`.
+    ///
+    /// 🔑 A tela desenha a textura inteira, recortada no retângulo exato do
+    /// ladrilho. Ampliada, o GPU lê meio texel além da borda; sem a folga,
+    /// esse meio texel vinha do vizinho **no atlas**, e uma linha clara ou
+    /// escura aparecia na emenda depois de cada ladrilho reenviado (visto no
+    /// app real em 05/out/2026).
+    pub fn ladrilho_bgra_com_folga(&self, ladrilho: (u32, u32)) -> (u32, u32, Vec<u8>) {
+        let ret = self.retangulo_do_ladrilho(ladrilho);
+        let (lv, av) = (self.imagem.width() as i64, self.imagem.height() as i64);
+        let (l, a) = (ret.largura + 2, ret.altura + 2);
+        let mut bytes = Vec::with_capacity((l * a * 4) as usize);
+        for y in -1..=ret.altura as i64 {
+            let yy = (ret.y as i64 + y).clamp(0, av - 1) as u32;
+            for x in -1..=ret.largura as i64 {
+                let xx = (ret.x as i64 + x).clamp(0, lv - 1) as u32;
+                let p = self.imagem.get_pixel(xx, yy).0;
+                bytes.extend_from_slice(&[p[2], p[1], p[0], 255]);
+            }
+        }
+        (l, a, bytes)
     }
 
     /// Os pixels de um ladrilho em **BGRA** — a ordem que o GPUI espera
@@ -283,6 +313,22 @@ mod testes {
         let meia = Vista::da_regiao(&base, &doc, &pedaco, 2);
         assert_eq!(meia.regiao(), Retangulo::novo(300, 154, 401, 301));
         assert_eq!(meia.imagem().width(), 201);
+    }
+
+    #[test]
+    fn a_folga_do_ladrilho_vem_do_vizinho() {
+        let base = RgbImage::from_fn(600, 300, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, (x / 256) as u8])
+        });
+        let doc = Documento::novo(BaseRef::da_imagem(&base));
+        let vista = Vista::nova(&base, &doc, 600);
+        let (l, a, b) = vista.ladrilho_bgra_com_folga((1, 0));
+        assert_eq!((l, a), (258, 258));
+        // O primeiro pixel da segunda linha é o x = 255 do ladrilho da esquerda.
+        let k = (l as usize) * 4;
+        assert_eq!(&b[k..k + 3], &[0, 0, 255]);
+        // A linha de cima repete a primeira (borda da vista).
+        assert_eq!(&b[4..7], &b[k + 4..k + 7]);
     }
 
     #[test]
