@@ -1,31 +1,64 @@
 //! Uma edição aberta: a base, o documento, o histórico, a vista e o traço em
 //! curso — tudo o que a janela precisa, sem a janela.
 //!
-//! 🔑 **Todo gesto passa por aqui e devolve o que sujou**; a vista é refeita no
-//! mesmo passo. A janela só pergunta quais ladrilhos subir para a GPU. É o que
-//! deixa a sessão inteira ser testada sem GPUI.
+//! 🔑 **Todo gesto passa por aqui e devolve o que sujou**; a vista (e a lupa,
+//! com a foto ampliada) é refeita no mesmo passo. A janela só pergunta quais
+//! ladrilhos subir para a GPU. É o que deixa a sessão inteira ser testada sem
+//! GPUI.
+//!
+//! 🔑 **A camada escolhida é da sessão, e não do documento**: é onde o pincel
+//! pinta e o que os controles da camada mexem, como a camada realçada do
+//! Photoshop. Desfazer volta a escolha para a camada que o passo mexeu.
 
 use std::sync::Arc;
 
 use image::RgbImage;
 
 use crate::composicao;
-use crate::documento::Documento;
+use crate::documento::{Camada, Documento};
 use crate::historico::{Comando, Historico};
+use crate::mesclagem::Modo;
 use crate::pincel::{Pincel, Traco};
 use crate::retangulo::Retangulo;
 use crate::vista::Vista;
+
+/// Um pedido de lupa: o que a vista do pedaço precisa para ser montada fora
+/// da thread da tela. Barato de tirar: a base e os tiles são `Arc`.
+pub struct PedidoDeLupa {
+    pub id: u64,
+    pub regiao: Retangulo,
+    pub fator: u32,
+    base: Arc<RgbImage>,
+    doc: Documento,
+}
+
+impl PedidoDeLupa {
+    /// A montagem — o trabalho pesado, para o executor de fundo.
+    pub fn montar(self) -> (u64, Vista) {
+        (
+            self.id,
+            Vista::da_regiao(&self.base, &self.doc, &self.regiao, self.fator),
+        )
+    }
+}
 
 pub struct Sessao {
     base: Arc<RgbImage>,
     doc: Documento,
     hist: Historico,
     vista: Vista,
+    /// A vista em resolução maior do pedaço visível, com a foto ampliada.
+    lupa: Option<Vista>,
+    /// O último pedido de lupa, e o que a foto mudou desde que ele saiu — a
+    /// lupa que chega é refeita ali antes de entrar.
+    lupa_pedida: Option<(u64, Retangulo)>,
+    pedidos: u64,
     pub pincel: Pincel,
+    ativa: usize,
     traco: Option<Traco>,
-    /// A opacidade da camada quando o arrasto do slider começou — o passo do
-    /// desfazer é o arrasto inteiro, e não cada valor do caminho.
-    opacidade_antes: Option<f32>,
+    /// A camada e a opacidade dela quando o arrasto do slider começou — o
+    /// passo do desfazer é o arrasto inteiro, e não cada valor do caminho.
+    opacidade_antes: Option<(usize, f32)>,
 }
 
 impl Sessao {
@@ -33,12 +66,18 @@ impl Sessao {
     pub fn nova(base: Arc<RgbImage>, doc: Documento, hist: Historico, lado_da_vista: u32) -> Self {
         debug_assert_eq!((base.width(), base.height()), (doc.largura(), doc.altura()));
         let vista = Vista::nova(&base, &doc, lado_da_vista);
+        // Abre na camada de cima, como o Photoshop abre um arquivo.
+        let ativa = doc.camadas.len().saturating_sub(1);
         Self {
             base,
             doc,
             hist,
             vista,
+            lupa: None,
+            lupa_pedida: None,
+            pedidos: 0,
             pincel: Pincel::default(),
+            ativa,
             traco: None,
             opacidade_antes: None,
         }
@@ -65,28 +104,221 @@ impl Sessao {
     }
 
     fn refazer_a_vista(&mut self, sujo: &Retangulo) {
+        if sujo.vazio() {
+            return;
+        }
         self.vista.refazer(&self.base, &self.doc, sujo);
+        if let Some(lupa) = self.lupa.as_mut() {
+            lupa.refazer(&self.base, &self.doc, sujo);
+        }
+        if let Some((_, desde)) = self.lupa_pedida.as_mut() {
+            *desde = desde.uniao(sujo);
+        }
+    }
+
+    // ---------------------------------------------------------------- lupa
+
+    pub fn lupa(&self) -> Option<&Vista> {
+        self.lupa.as_ref()
+    }
+
+    pub fn lupa_mut(&mut self) -> Option<&mut Vista> {
+        self.lupa.as_mut()
+    }
+
+    /// Já há uma lupa pedida que ainda não chegou?
+    pub fn lupa_a_caminho(&self) -> bool {
+        self.lupa_pedida.is_some()
+    }
+
+    /// Pede a lupa de `regiao` em `fator`. A montagem fica com quem chama.
+    pub fn pedir_lupa(&mut self, regiao: Retangulo, fator: u32) -> PedidoDeLupa {
+        self.pedidos += 1;
+        self.lupa_pedida = Some((self.pedidos, Retangulo::default()));
+        PedidoDeLupa {
+            id: self.pedidos,
+            regiao,
+            fator,
+            base: self.base.clone(),
+            doc: self.doc.clone(),
+        }
+    }
+
+    /// A lupa montada chegou. Só entra a do último pedido, refeita onde a foto
+    /// mudou enquanto ela era montada. Devolve se entrou.
+    pub fn receber_lupa(&mut self, id: u64, mut lupa: Vista) -> bool {
+        match self.lupa_pedida {
+            Some((pedido, desde)) if pedido == id => {
+                lupa.refazer(&self.base, &self.doc, &desde);
+                lupa.sujar_tudo();
+                self.lupa = Some(lupa);
+                self.lupa_pedida = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Sem lupa (a foto voltou a caber na vista inteira).
+    pub fn largar_lupa(&mut self) {
+        self.lupa = None;
+        self.lupa_pedida = None;
+    }
+
+    // ------------------------------------------------------------- camadas
+
+    /// A camada onde o pincel pinta.
+    pub fn ativa(&self) -> usize {
+        self.ativa.min(self.doc.camadas.len().saturating_sub(1))
+    }
+
+    pub fn camada_ativa(&self) -> &Camada {
+        &self.doc.camadas[self.ativa()]
+    }
+
+    /// Fecha o que estiver em curso — antes de qualquer gesto que não seja o
+    /// próprio traço ou o próprio slider.
+    fn fechar_o_que_esta_aberto(&mut self) {
+        self.soltar();
+        self.confirmar_opacidade();
+    }
+
+    pub fn escolher_camada(&mut self, indice: usize) {
+        if indice < self.doc.camadas.len() && indice != self.ativa() {
+            self.fechar_o_que_esta_aberto();
+            self.ativa = indice;
+        }
+    }
+
+    /// Aplica e registra um passo, e leva a escolha para onde ele mexeu.
+    fn executar(&mut self, comando: Comando) {
+        let sujo = comando.aplicar(&mut self.doc, true);
+        if let Some(i) = comando.camada_depois(true, self.doc.camadas.len()) {
+            self.ativa = i;
+        }
+        self.hist.registrar(comando);
+        self.refazer_a_vista(&sujo);
+    }
+
+    /// Uma camada transparente logo acima da escolhida, que passa a ser a
+    /// escolhida.
+    pub fn nova_camada(&mut self) {
+        self.fechar_o_que_esta_aberto();
+        let camada = Camada::nova(
+            &self.doc.proximo_nome(),
+            self.doc.largura(),
+            self.doc.altura(),
+        );
+        let indice = (self.ativa() + 1).min(self.doc.camadas.len());
+        self.executar(Comando::CriarCamada {
+            indice,
+            camada: Box::new(camada),
+        });
+    }
+
+    /// A escolhida, copiada logo acima dela. 🔑 A cópia divide os tiles (`Arc`)
+    /// até alguém pintar numa das duas.
+    pub fn duplicar_camada(&mut self) {
+        self.fechar_o_que_esta_aberto();
+        if self.doc.camadas.is_empty() {
+            return;
+        }
+        let mut copia = self.camada_ativa().clone();
+        copia.nome = format!("{} cópia", copia.nome);
+        let indice = self.ativa() + 1;
+        self.executar(Comando::CriarCamada {
+            indice,
+            camada: Box::new(copia),
+        });
+    }
+
+    /// Exclui a escolhida. A última não sai: sem camada não há onde pintar.
+    pub fn excluir_camada(&mut self) -> bool {
+        self.fechar_o_que_esta_aberto();
+        if self.doc.camadas.len() <= 1 {
+            return false;
+        }
+        let indice = self.ativa();
+        let camada = Box::new(self.doc.camadas[indice].clone());
+        self.executar(Comando::ExcluirCamada { indice, camada });
+        true
+    }
+
+    /// Sobe (`1`) ou desce (`-1`) a escolhida uma posição na pilha.
+    pub fn mover_camada(&mut self, direcao: i32) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let de = self.ativa();
+        let para = de as i64 + direcao.signum() as i64;
+        if direcao == 0 || para < 0 || para >= self.doc.camadas.len() as i64 {
+            return false;
+        }
+        self.executar(Comando::MoverCamada {
+            de,
+            para: para as usize,
+        });
+        true
+    }
+
+    /// Dá outro nome a uma camada. Nome vazio ou igual não vira passo.
+    pub fn renomear_camada(&mut self, indice: usize, nome: &str) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let nome = nome.trim();
+        let Some(camada) = self.doc.camadas.get(indice) else {
+            return false;
+        };
+        if nome.is_empty() || nome == camada.nome {
+            return false;
+        }
+        let antes = camada.nome.clone();
+        self.executar(Comando::Renomear {
+            camada: indice,
+            antes,
+            depois: nome.to_string(),
+        });
+        true
+    }
+
+    /// O modo de mesclagem da escolhida.
+    pub fn mudar_modo(&mut self, modo: Modo) {
+        self.fechar_o_que_esta_aberto();
+        let camada = self.ativa();
+        let antes = self.doc.camadas[camada].modo;
+        if antes != modo {
+            self.executar(Comando::Modo {
+                camada,
+                antes,
+                depois: modo,
+            });
+        }
     }
 
     // --------------------------------------------------------------- traço
 
-    /// O ponteiro desceu em `(x, y)`, em pixels da foto.
-    pub fn apertar(&mut self, x: f32, y: f32) {
+    /// O ponteiro desceu em `(x, y)`, em pixels da foto. Devolve `false` sem
+    /// pintar quando a camada escolhida está escondida — pintar no que não se
+    /// vê é o erro que o Photoshop também recusa.
+    pub fn apertar(&mut self, x: f32, y: f32) -> bool {
         // Um traço que ficou aberto (o ponteiro saiu da janela sem soltar) fecha
         // antes: ele é um passo próprio do desfazer.
-        self.soltar();
+        self.fechar_o_que_esta_aberto();
+        let ativa = self.ativa();
+        if !self.doc.camadas[ativa].visivel {
+            return false;
+        }
         let mut traco = Traco::novo(self.pincel);
-        let sujo = traco.ate(&mut self.doc.camadas[0].pixels, x, y);
+        let sujo = traco.ate(&mut self.doc.camadas[ativa].pixels, x, y);
         self.traco = Some(traco);
         self.refazer_a_vista(&sujo);
+        true
     }
 
     /// O ponteiro andou, apertado.
     pub fn arrastar(&mut self, x: f32, y: f32) {
+        let ativa = self.ativa();
         let Some(traco) = self.traco.as_mut() else {
             return;
         };
-        let sujo = traco.ate(&mut self.doc.camadas[0].pixels, x, y);
+        let sujo = traco.ate(&mut self.doc.camadas[ativa].pixels, x, y);
         self.refazer_a_vista(&sujo);
     }
 
@@ -96,9 +328,10 @@ impl Sessao {
         let Some(traco) = self.traco.take() else {
             return false;
         };
-        match traco.terminar(&mut self.doc.camadas[0].pixels) {
+        let camada = self.ativa();
+        match traco.terminar(&mut self.doc.camadas[camada].pixels) {
             Some(mudanca) => {
-                self.hist.registrar(Comando::Traco { camada: 0, mudanca });
+                self.hist.registrar(Comando::Traco { camada, mudanca });
                 true
             }
             None => false,
@@ -109,62 +342,79 @@ impl Sessao {
         self.traco.is_some()
     }
 
-    // -------------------------------------------------------- a camada
+    // ------------------------------------------- propriedades da camada
 
-    pub fn alternar_visibilidade(&mut self) {
-        self.soltar();
-        let camada = &mut self.doc.camadas[0];
+    /// Mostra ou esconde a camada `indice`.
+    pub fn alternar_visibilidade_de(&mut self, indice: usize) {
+        self.fechar_o_que_esta_aberto();
+        let Some(camada) = self.doc.camadas.get(indice) else {
+            return;
+        };
         let antes = camada.visivel;
-        camada.visivel = !antes;
-        self.hist.registrar(Comando::Visibilidade {
-            camada: 0,
+        let sujo = Comando::Visibilidade {
+            camada: indice,
             antes,
             depois: !antes,
-        });
-        self.refazer_tudo();
+        };
+        // Sem `executar`: mostrar ou esconder não muda qual está escolhida.
+        let area = sujo.aplicar(&mut self.doc, true);
+        self.hist.registrar(sujo);
+        self.refazer_a_vista(&area);
     }
 
-    /// O slider da opacidade andou: a camada muda na hora, o histórico só no
-    /// [`Self::confirmar_opacidade`].
+    /// Mostra ou esconde a escolhida.
+    pub fn alternar_visibilidade(&mut self) {
+        self.alternar_visibilidade_de(self.ativa());
+    }
+
+    /// O slider da opacidade andou: a camada escolhida muda na hora, o
+    /// histórico só no [`Self::confirmar_opacidade`].
     pub fn mover_opacidade(&mut self, valor: f32) {
         self.soltar();
         let valor = valor.clamp(0.0, 1.0);
-        let camada = &mut self.doc.camadas[0];
-        self.opacidade_antes.get_or_insert(camada.opacidade);
+        let indice = self.ativa();
+        if self.opacidade_antes.is_some_and(|(i, _)| i != indice) {
+            self.confirmar_opacidade();
+        }
+        let camada = &mut self.doc.camadas[indice];
+        self.opacidade_antes
+            .get_or_insert((indice, camada.opacidade));
         if camada.opacidade == valor {
             return;
         }
         camada.opacidade = valor;
-        self.refazer_tudo();
+        let area = camada.area();
+        self.refazer_a_vista(&area);
     }
 
     /// O arrasto do slider acabou.
     pub fn confirmar_opacidade(&mut self) {
-        let Some(antes) = self.opacidade_antes.take() else {
+        let Some((camada, antes)) = self.opacidade_antes.take() else {
             return;
         };
-        let depois = self.doc.camadas[0].opacidade;
+        let Some(depois) = self.doc.camadas.get(camada).map(|c| c.opacidade) else {
+            return;
+        };
         if antes != depois {
             self.hist.registrar(Comando::Opacidade {
-                camada: 0,
+                camada,
                 antes,
                 depois,
             });
         }
     }
 
-    fn refazer_tudo(&mut self) {
-        let tudo = Retangulo::inteiro(self.doc.largura(), self.doc.altura());
-        self.refazer_a_vista(&tudo);
-    }
-
     // ------------------------------------------------------ desfazer
 
     pub fn desfazer(&mut self) -> bool {
-        self.soltar();
-        self.confirmar_opacidade();
+        self.fechar_o_que_esta_aberto();
+        let passo = self.hist.a_desfazer().cloned();
         match self.hist.desfazer(&mut self.doc) {
             Some(sujo) => {
+                if let Some(i) = passo.and_then(|p| p.camada_depois(false, self.doc.camadas.len()))
+                {
+                    self.ativa = i;
+                }
                 self.refazer_a_vista(&sujo);
                 true
             }
@@ -173,10 +423,13 @@ impl Sessao {
     }
 
     pub fn refazer(&mut self) -> bool {
-        self.soltar();
-        self.confirmar_opacidade();
+        self.fechar_o_que_esta_aberto();
+        let passo = self.hist.a_refazer().cloned();
         match self.hist.refazer(&mut self.doc) {
             Some(sujo) => {
+                if let Some(i) = passo.and_then(|p| p.camada_depois(true, self.doc.camadas.len())) {
+                    self.ativa = i;
+                }
                 self.refazer_a_vista(&sujo);
                 true
             }
@@ -198,8 +451,7 @@ impl Sessao {
     /// 🔑 É o `build_pfe` do PaintFE: o instantâneo sai na thread da tela, e o
     /// trabalho pesado (compor, codificar, gravar) vai para fora dela.
     pub fn instantaneo(&mut self) -> (Documento, Historico) {
-        self.soltar();
-        self.confirmar_opacidade();
+        self.fechar_o_que_esta_aberto();
         (self.doc.clone(), self.hist.clone())
     }
 
@@ -220,7 +472,7 @@ impl Sessao {
 #[cfg(test)]
 mod testes {
     use super::*;
-    use crate::documento::BaseRef;
+    use crate::documento::{BaseRef, NOME_DA_PRIMEIRA};
     use crate::pincel::Ferramenta;
 
     fn sessao() -> Sessao {
@@ -283,6 +535,109 @@ mod testes {
         assert!(s.alterado());
         s.desfazer();
         assert!(!s.alterado(), "voltou ao que foi gravado");
+    }
+
+    #[test]
+    fn o_pincel_pinta_na_camada_escolhida() {
+        let mut s = sessao();
+        s.nova_camada();
+        assert_eq!(s.ativa(), 1);
+        assert_eq!(s.camada_ativa().nome, "Camada 1");
+        s.pincel.cor = [0, 255, 0];
+        assert!(s.apertar(100.0, 100.0));
+        s.soltar();
+        assert!(s.documento().camadas[0].pixels.vazia());
+        assert!(!s.documento().camadas[1].pixels.vazia());
+
+        s.escolher_camada(0);
+        s.alternar_visibilidade();
+        assert!(!s.apertar(300.0, 300.0), "camada escondida não pinta");
+        assert!(!s.tracando());
+
+        // Desfazer o traço leva a escolha de volta para a camada dele.
+        s.alternar_visibilidade();
+        s.desfazer(); // mostrar
+        s.desfazer(); // esconder
+        s.desfazer(); // traço
+        assert_eq!(s.ativa(), 1);
+        s.desfazer(); // criar
+        assert_eq!(s.documento().camadas.len(), 1);
+        assert_eq!(s.ativa(), 0);
+        assert!(!s.alterado());
+    }
+
+    #[test]
+    fn duplicar_excluir_mover_renomear_e_modo() {
+        let mut s = sessao();
+        s.pincel.cor = [10, 20, 30];
+        s.apertar(50.0, 50.0);
+        s.soltar();
+        s.duplicar_camada();
+        assert_eq!(s.documento().camadas.len(), 2);
+        assert_eq!(s.camada_ativa().nome, format!("{NOME_DA_PRIMEIRA} cópia"));
+        assert_eq!(
+            s.documento().camadas[0].pixels,
+            s.documento().camadas[1].pixels,
+            "a cópia traz os pixels"
+        );
+
+        s.mudar_modo(Modo::Multiplicacao);
+        assert_eq!(s.camada_ativa().modo, Modo::Multiplicacao);
+        assert!(s.renomear_camada(1, "  Sombra  "));
+        assert!(!s.renomear_camada(1, "Sombra"), "o mesmo nome não é passo");
+        assert!(!s.renomear_camada(1, "   "));
+        assert_eq!(s.camada_ativa().nome, "Sombra");
+
+        assert!(!s.mover_camada(1), "a de cima não sobe mais");
+        assert!(s.mover_camada(-1));
+        assert_eq!(s.ativa(), 0);
+        assert_eq!(s.documento().camadas[0].nome, "Sombra");
+
+        assert!(s.excluir_camada());
+        assert_eq!(s.documento().camadas.len(), 1);
+        assert!(!s.excluir_camada(), "a última fica");
+        s.desfazer();
+        assert_eq!(s.documento().camadas[0].nome, "Sombra");
+        assert_eq!(s.ativa(), 0);
+    }
+
+    #[test]
+    fn a_lupa_acompanha_o_pincel_e_o_que_mudou_enquanto_era_montada() {
+        let mut s = sessao();
+        let pedido = s.pedir_lupa(Retangulo::novo(0, 0, 400, 300), 1);
+        // Pinta enquanto a lupa é montada "em outra thread".
+        s.pincel.cor = [255, 255, 0];
+        s.pincel.dureza = 1.0;
+        s.apertar(100.0, 100.0);
+        s.soltar();
+        let (id, lupa) = pedido.montar();
+        assert_eq!(
+            lupa.imagem().get_pixel(100, 100).0,
+            [100, 100, 50],
+            "montada antes"
+        );
+        assert!(s.receber_lupa(id, lupa));
+        assert_eq!(
+            s.lupa().unwrap().imagem().get_pixel(100, 100).0,
+            [255, 255, 0]
+        );
+
+        // Um pedido velho não entra por cima do novo.
+        let velho = s.pedir_lupa(Retangulo::novo(0, 0, 100, 100), 1);
+        let novo = s.pedir_lupa(Retangulo::novo(0, 0, 200, 200), 1);
+        let (id_velho, lupa_velha) = velho.montar();
+        assert!(!s.receber_lupa(id_velho, lupa_velha));
+        let (id, lupa) = novo.montar();
+        assert!(s.receber_lupa(id, lupa));
+
+        s.apertar(150.0, 150.0);
+        s.soltar();
+        assert_eq!(
+            s.lupa().unwrap().imagem().get_pixel(150, 150).0,
+            [255, 255, 0]
+        );
+        s.largar_lupa();
+        assert!(s.lupa().is_none());
     }
 
     #[test]

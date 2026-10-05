@@ -1,8 +1,9 @@
-//! A composição: a base com as camadas por cima.
+//! A composição: a base com as camadas por cima, de baixo para cima, cada uma
+//! no seu modo de mesclagem (`mesclagem.rs`).
 //!
 //! ```text
 //! a   = alfa_do_pixel / 255 · opacidade_da_camada
-//! out = base + (cor − base) · a
+//! out = baixo + (B(baixo, cor) − baixo) · a        (Normal: B = cor)
 //! ```
 //!
 //! 🔑 **Com `a = 0` a conta devolve a base exata** — não "quase": é o C30, uma
@@ -13,25 +14,14 @@
 use image::RgbImage;
 
 use crate::documento::{Camada, Documento};
+use crate::mesclagem::{mesclar, Modo};
 use crate::retangulo::Retangulo;
 use crate::tiles::{indice, retangulo_do_tile, CamadaDePixels, LADO_DO_TILE};
 
-/// Um pixel da camada sobre um pixel de baixo.
+/// Um pixel da camada sobre um pixel de baixo, no modo Normal.
 #[inline]
 pub fn sobre(baixo: [u8; 3], cima: [u8; 4], opacidade: f32) -> [u8; 3] {
-    if cima[3] == 0 || opacidade <= 0.0 {
-        return baixo;
-    }
-    let a = cima[3] as f32 / 255.0 * opacidade.min(1.0);
-    let mistura = |b: u8, c: u8| -> u8 {
-        let b = b as f32;
-        (b + (c as f32 - b) * a).round().clamp(0.0, 255.0) as u8
-    };
-    [
-        mistura(baixo[0], cima[0]),
-        mistura(baixo[1], cima[1]),
-        mistura(baixo[2], cima[2]),
-    ]
+    mesclar(baixo, cima, opacidade, Modo::Normal)
 }
 
 /// A imagem editada em resolução cheia.
@@ -88,9 +78,13 @@ fn compor_deslocado(
     for posicao in referencia.tiles_do_retangulo(&ret) {
         let pedaco = retangulo_do_tile(posicao, largura, altura).limitado(largura, altura);
         let pedaco = interseccao(&pedaco, &ret);
-        let tiles: Vec<(&[u8], f32)> = camadas
+        let tiles: Vec<(&[u8], f32, Modo)> = camadas
             .iter()
-            .filter_map(|c| c.pixels.tile(posicao).map(|t| (t.as_slice(), c.opacidade)))
+            .filter_map(|c| {
+                c.pixels
+                    .tile(posicao)
+                    .map(|t| (t.as_slice(), c.opacidade, c.modo))
+            })
             .collect();
         for y in pedaco.y..pedaco.baixo() {
             let inicio = y as usize * largura_em_bytes + pedaco.x as usize * 3;
@@ -106,11 +100,12 @@ fn compor_deslocado(
                 let i = y as usize * largura_em_bytes + x as usize * 3;
                 let mut pixel = [fonte[i], fonte[i + 1], fonte[i + 2]];
                 let j = indice(x % LADO_DO_TILE, ty);
-                for (tile, opacidade) in &tiles {
-                    pixel = sobre(
+                for (tile, opacidade, modo) in &tiles {
+                    pixel = mesclar(
                         pixel,
                         [tile[j], tile[j + 1], tile[j + 2], tile[j + 3]],
                         *opacidade,
+                        *modo,
                     );
                 }
                 let d = d_inicio + (x - pedaco.x) as usize * 3;
@@ -172,6 +167,26 @@ mod testes {
         doc.camadas[0].visivel = true;
         doc.camadas[0].opacidade = 0.0;
         assert_eq!(compor(&base, &doc).as_raw(), base.as_raw());
+    }
+
+    #[test]
+    fn as_camadas_compoem_de_baixo_para_cima_cada_uma_no_seu_modo() {
+        let base = RgbImage::from_pixel(10, 10, image::Rgb([200, 100, 50]));
+        let mut doc = Documento::novo(BaseRef::da_imagem(&base));
+        doc.camadas[0].pixels.tile_mut((0, 0))[..4].copy_from_slice(&[0, 0, 255, 255]);
+        let mut de_cima = Camada::nova("Camada 1", 10, 10);
+        de_cima.pixels.tile_mut((0, 0))[..4].copy_from_slice(&[255, 255, 255, 255]);
+        de_cima.modo = Modo::Multiplicacao;
+        doc.camadas.push(de_cima);
+        // Branco em Multiplicação não muda o azul de baixo.
+        assert_eq!(compor(&base, &doc).get_pixel(0, 0).0, [0, 0, 255]);
+        // Em Normal, a de cima vence.
+        doc.camadas[1].modo = Modo::Normal;
+        assert_eq!(compor(&base, &doc).get_pixel(0, 0).0, [255, 255, 255]);
+        // Trocadas de lugar, o azul vence.
+        doc.camadas.swap(0, 1);
+        assert_eq!(compor(&base, &doc).get_pixel(0, 0).0, [0, 0, 255]);
+        assert_eq!(compor(&base, &doc).get_pixel(1, 0).0, [200, 100, 50]);
     }
 
     #[test]

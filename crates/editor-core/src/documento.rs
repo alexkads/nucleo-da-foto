@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::tiles::CamadaDePixels;
+use crate::mesclagem::Modo;
+use crate::retangulo::Retangulo;
+use crate::tiles::{retangulo_do_tile, CamadaDePixels};
 
 /// O perfil dos pixels da base e da imagem editada (C29): sRGB codificado, 8
 /// bits por canal. Um formato novo (16 bits) terá outro nome.
@@ -51,6 +53,7 @@ pub struct Camada {
     pub visivel: bool,
     /// `0..=1`.
     pub opacidade: f32,
+    pub modo: Modo,
     pub pixels: CamadaDePixels,
 }
 
@@ -61,8 +64,20 @@ impl Camada {
             nome: nome.into(),
             visivel: true,
             opacidade: 1.0,
+            modo: Modo::Normal,
             pixels: CamadaDePixels::nova(largura, altura),
         }
+    }
+
+    /// O retângulo que os tiles pintados cobrem — onde a camada pode mudar a
+    /// foto. Esconder, mexer na opacidade ou trocar de lugar só recompõe aqui.
+    pub fn area(&self) -> Retangulo {
+        let (largura, altura) = (self.pixels.largura(), self.pixels.altura());
+        self.pixels
+            .existentes()
+            .fold(Retangulo::default(), |area, (posicao, _)| {
+                area.uniao(&retangulo_do_tile(*posicao, largura, altura))
+            })
     }
 
     /// A camada não muda nenhum pixel da base (C30).
@@ -77,8 +92,7 @@ pub const NOME_DA_PRIMEIRA: &str = "Pintura";
 #[derive(Clone, Debug, PartialEq)]
 pub struct Documento {
     pub base: BaseRef,
-    /// De baixo para cima. 🔑 A etapa 1 tem uma camada; o `Vec` já é o formato
-    /// das próximas.
+    /// De baixo para cima — a de índice 0 fica logo acima da base.
     pub camadas: Vec<Camada>,
 }
 
@@ -98,6 +112,18 @@ impl Documento {
 
     pub fn altura(&self) -> u32 {
         self.base.altura
+    }
+
+    /// O nome de uma camada nova: "Camada N", com o N seguinte ao maior que já
+    /// existe — como no Photoshop, que não reaproveita o número de quem saiu.
+    pub fn proximo_nome(&self) -> String {
+        let maior = self
+            .camadas
+            .iter()
+            .filter_map(|c| c.nome.strip_prefix("Camada ")?.trim().parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("Camada {}", maior + 1)
     }
 
     /// Nenhuma camada muda a base (C30): a imagem editada seria a base byte a

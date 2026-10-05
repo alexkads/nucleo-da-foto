@@ -10,6 +10,11 @@
 //! A redução é por um fator inteiro, pela média da caixa `fator × fator` da
 //! **imagem composta** — o que a tela mostra é a imagem editada reduzida, e não
 //! uma aproximação dela.
+//!
+//! 🔍 **A lupa é uma vista de um pedaço.** Com a foto ampliada, a vista inteira
+//! (2048 px no maior lado) vira borrão; a janela pede então uma segunda vista,
+//! só da região visível, num fator menor (até 1, a resolução cheia). As contas
+//! são as mesmas: a vista inteira é a lupa da foto toda.
 
 use std::collections::BTreeSet;
 
@@ -24,6 +29,9 @@ pub const LADO_DO_LADRILHO: u32 = 256;
 
 pub struct Vista {
     fator: u32,
+    /// O pedaço da foto que a vista cobre, em pixels da foto, com a origem
+    /// múltipla do fator.
+    regiao: Retangulo,
     imagem: RgbImage,
     sujos: BTreeSet<(u32, u32)>,
 }
@@ -33,15 +41,39 @@ impl Vista {
     pub fn nova(base: &RgbImage, doc: &Documento, lado_maximo: u32) -> Self {
         let maior = base.width().max(base.height()).max(1);
         let fator = maior.div_ceil(lado_maximo.max(1)).max(1);
-        let largura = base.width().div_ceil(fator).max(1);
-        let altura = base.height().div_ceil(fator).max(1);
+        Self::da_regiao(
+            base,
+            doc,
+            &Retangulo::inteiro(base.width(), base.height()),
+            fator,
+        )
+    }
+
+    /// A vista de um pedaço da foto, num fator dado — a lupa. A região é
+    /// alargada até a origem cair num múltiplo do fator.
+    pub fn da_regiao(base: &RgbImage, doc: &Documento, regiao: &Retangulo, fator: u32) -> Self {
+        let fator = fator.max(1);
+        let (largura, altura) = (base.width(), base.height());
+        let r = regiao.limitado(largura, altura);
+        let (x0, y0) = (r.x / fator * fator, r.y / fator * fator);
+        let regiao =
+            Retangulo::novo(x0, y0, r.direita() - x0, r.baixo() - y0).limitado(largura, altura);
         let mut vista = Self {
             fator,
-            imagem: RgbImage::new(largura, altura),
+            regiao,
+            imagem: RgbImage::new(
+                regiao.largura.div_ceil(fator).max(1),
+                regiao.altura.div_ceil(fator).max(1),
+            ),
             sujos: BTreeSet::new(),
         };
-        vista.refazer(base, doc, &Retangulo::inteiro(base.width(), base.height()));
+        vista.refazer(base, doc, &regiao);
         vista
+    }
+
+    /// O pedaço da foto que a vista cobre.
+    pub fn regiao(&self) -> Retangulo {
+        self.regiao
     }
 
     /// Quantos pixels da foto cada pixel da vista cobre, por lado.
@@ -61,30 +93,46 @@ impl Vista {
         self.imagem.height().div_ceil(LADO_DO_LADRILHO)
     }
 
-    /// Refaz a vista onde a foto mudou em `ret` (pixels da foto).
+    /// Refaz a vista onde a foto mudou em `ret` (pixels da foto). O que cai
+    /// fora da região da vista não conta.
     pub fn refazer(&mut self, base: &RgbImage, doc: &Documento, ret: &Retangulo) {
         let (largura, altura) = (base.width(), base.height());
-        let ret = ret.limitado(largura, altura);
+        let ret = composicao::interseccao(&ret.limitado(largura, altura), &self.regiao);
         if ret.vazio() {
             return;
         }
         let f = self.fator;
+        let (ox, oy) = (self.regiao.x, self.regiao.y);
+        let (fim_x, fim_y) = (self.regiao.direita(), self.regiao.baixo());
         // Os pixels da vista que tocam o retângulo, e a região da foto que eles
         // cobrem inteira (alinhada ao fator).
-        let (vx0, vy0) = (ret.x / f, ret.y / f);
+        let (vx0, vy0) = ((ret.x - ox) / f, (ret.y - oy) / f);
         let (vx1, vy1) = (
-            ret.direita().div_ceil(f).min(self.imagem.width()),
-            ret.baixo().div_ceil(f).min(self.imagem.height()),
+            (ret.direita() - ox).div_ceil(f).min(self.imagem.width()),
+            (ret.baixo() - oy).div_ceil(f).min(self.imagem.height()),
         );
-        let regiao = Retangulo::novo(vx0 * f, vy0 * f, (vx1 - vx0) * f, (vy1 - vy0) * f)
-            .limitado(largura, altura);
+        let regiao = Retangulo::novo(ox + vx0 * f, oy + vy0 * f, (vx1 - vx0) * f, (vy1 - vy0) * f)
+            .limitado(fim_x, fim_y);
         let composta = composicao::compor_recorte(base, doc, &regiao);
+        if f == 1 {
+            // A lupa em resolução cheia: cópia, sem média.
+            for vy in vy0..vy1 {
+                let linha = (vy - vy0) as usize * regiao.largura as usize * 3;
+                let n = (vx1 - vx0) as usize * 3;
+                let destino = (vy as usize * self.imagem.width() as usize + vx0 as usize) * 3;
+                let fonte = &composta.as_raw()[linha..linha + n];
+                let imagem: &mut [u8] = &mut self.imagem;
+                imagem[destino..destino + n].copy_from_slice(fonte);
+            }
+            self.marcar_sujos(vx0, vy0, vx1, vy1);
+            return;
+        }
         for vy in vy0..vy1 {
             for vx in vx0..vx1 {
                 let mut soma = [0u32; 3];
                 let mut n = 0u32;
-                for y in (vy * f)..((vy + 1) * f).min(altura) {
-                    for x in (vx * f)..((vx + 1) * f).min(largura) {
+                for y in (oy + vy * f)..(oy + (vy + 1) * f).min(fim_y) {
+                    for x in (ox + vx * f)..(ox + (vx + 1) * f).min(fim_x) {
                         let p = composta.get_pixel(x - regiao.x, y - regiao.y).0;
                         soma[0] += p[0] as u32;
                         soma[1] += p[1] as u32;
@@ -103,6 +151,13 @@ impl Vista {
                     ]),
                 );
             }
+        }
+        self.marcar_sujos(vx0, vy0, vx1, vy1);
+    }
+
+    fn marcar_sujos(&mut self, vx0: u32, vy0: u32, vx1: u32, vy1: u32) {
+        if vx1 <= vx0 || vy1 <= vy0 {
+            return;
         }
         for ly in (vy0 / LADO_DO_LADRILHO)..=((vy1 - 1) / LADO_DO_LADRILHO) {
             for lx in (vx0 / LADO_DO_LADRILHO)..=((vx1 - 1) / LADO_DO_LADRILHO) {
@@ -190,6 +245,44 @@ mod testes {
         let do_zero = Vista::nova(&base, &doc, 400);
         assert_eq!(do_zero.imagem().as_raw(), vista.imagem().as_raw());
         assert_eq!(vista.imagem().get_pixel(300, 50).0, [255, 255, 255]);
+    }
+
+    #[test]
+    fn a_lupa_e_o_mesmo_pedaco_da_vista_em_resolucao_maior() {
+        let base = RgbImage::from_fn(1000, 700, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x * y) % 256) as u8])
+        });
+        let mut doc = Documento::novo(BaseRef::da_imagem(&base));
+        let pedaco = Retangulo::novo(301, 155, 400, 300);
+        let mut lupa = Vista::da_regiao(&base, &doc, &pedaco, 1);
+        assert_eq!(lupa.regiao(), pedaco);
+        assert_eq!(lupa.imagem().get_pixel(0, 0).0, base.get_pixel(301, 155).0);
+
+        // Um traço que passa pela lupa e por fora dela: a lupa refaz só o
+        // pedaço dela, e fica igual à lupa feita do zero.
+        lupa.levar_os_sujos();
+        let mut traco = Traco::novo(Pincel {
+            raio: 20.0,
+            dureza: 1.0,
+            cor: [255, 0, 255],
+            ..Pincel::default()
+        });
+        traco.ate(&mut doc.camadas[0].pixels, 250.0, 200.0);
+        let sujo = traco.ate(&mut doc.camadas[0].pixels, 360.0, 200.0);
+        traco.terminar(&mut doc.camadas[0].pixels);
+        lupa.refazer(&base, &doc, &sujo.uniao(&Retangulo::novo(230, 180, 40, 40)));
+        assert!(!lupa.levar_os_sujos().is_empty());
+        let do_zero = Vista::da_regiao(&base, &doc, &pedaco, 1);
+        assert_eq!(lupa.imagem().as_raw(), do_zero.imagem().as_raw());
+        assert_eq!(
+            lupa.imagem().get_pixel(340 - 301, 200 - 155).0,
+            [255, 0, 255]
+        );
+
+        // Com fator 2 a origem vai para o par de baixo.
+        let meia = Vista::da_regiao(&base, &doc, &pedaco, 2);
+        assert_eq!(meia.regiao(), Retangulo::novo(300, 154, 401, 301));
+        assert_eq!(meia.imagem().width(), 201);
     }
 
     #[test]

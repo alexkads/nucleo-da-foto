@@ -8,7 +8,8 @@
 //! gesto": desfazer até o que foi salvo volta a dizer "sem alterações", como em
 //! todo editor.
 
-use crate::documento::Documento;
+use crate::documento::{Camada, Documento};
+use crate::mesclagem::Modo;
 use crate::pincel::Mudanca;
 use crate::retangulo::Retangulo;
 use crate::tiles::{retangulo_do_tile, BYTES_DO_TILE};
@@ -31,6 +32,33 @@ pub enum Comando {
         camada: usize,
         antes: f32,
         depois: f32,
+    },
+    Modo {
+        camada: usize,
+        antes: Modo,
+        depois: Modo,
+    },
+    Renomear {
+        camada: usize,
+        antes: String,
+        depois: String,
+    },
+    /// Para a frente, a camada entra em `indice`; para trás, sai. Nova e
+    /// duplicada são o mesmo passo — o que muda é o que a camada traz.
+    CriarCamada {
+        indice: usize,
+        camada: Box<Camada>,
+    },
+    /// O contrário de [`Comando::CriarCamada`]: guarda a camada inteira, para
+    /// o desfazer devolvê-la com os pixels.
+    ExcluirCamada {
+        indice: usize,
+        camada: Box<Camada>,
+    },
+    /// A camada de `de` passa a ficar em `para` (índices de baixo para cima).
+    MoverCamada {
+        de: usize,
+        para: usize,
     },
 }
 
@@ -57,7 +85,55 @@ impl Comando {
                 nome(doc, *camada),
                 (depois * 100.0).round()
             ),
+            Comando::Modo { camada, depois, .. } => {
+                format!("{} em {}", nome(doc, *camada), depois.nome())
+            }
+            Comando::Renomear { antes, depois, .. } => format!("Renomear {antes} para {depois}"),
+            Comando::CriarCamada { camada, .. } => format!("Criar {}", camada.nome),
+            Comando::ExcluirCamada { camada, .. } => format!("Excluir {}", camada.nome),
+            Comando::MoverCamada { de, para } => {
+                // O nome é o da camada que andou, esteja ela onde estiver agora.
+                let onde = if doc.camadas.get(*para).is_some() {
+                    *para
+                } else {
+                    *de
+                };
+                format!(
+                    "Mover {} para {}",
+                    nome(doc, onde),
+                    if para > de { "cima" } else { "baixo" }
+                )
+            }
         }
+    }
+
+    /// A camada que fica escolhida depois de aplicar o passo — a que ele mexeu,
+    /// ou a vizinha da que saiu. `None` = o passo não muda a escolha.
+    pub fn camada_depois(&self, para_frente: bool, quantas: usize) -> Option<usize> {
+        let ultima = quantas.checked_sub(1)?;
+        let i = match self {
+            Comando::Traco { camada, .. }
+            | Comando::Visibilidade { camada, .. }
+            | Comando::Opacidade { camada, .. }
+            | Comando::Modo { camada, .. }
+            | Comando::Renomear { camada, .. } => *camada,
+            Comando::CriarCamada { indice, .. } | Comando::ExcluirCamada { indice, .. } => {
+                let saiu = matches!(self, Comando::ExcluirCamada { .. }) == para_frente;
+                if saiu {
+                    indice.saturating_sub(1)
+                } else {
+                    *indice
+                }
+            }
+            Comando::MoverCamada { de, para } => {
+                if para_frente {
+                    *para
+                } else {
+                    *de
+                }
+            }
+        };
+        Some(i.min(ultima))
     }
 
     fn bytes(&self) -> usize {
@@ -65,6 +141,9 @@ impl Comando {
             Comando::Traco { mudanca, .. } => {
                 let conta = |v: &[(_, Option<_>)]| v.iter().filter(|(_, t)| t.is_some()).count();
                 (conta(&mudanca.antes) + conta(&mudanca.depois)) * BYTES_DO_TILE
+            }
+            Comando::CriarCamada { camada, .. } | Comando::ExcluirCamada { camada, .. } => {
+                camada.pixels.bytes()
             }
             _ => 0,
         }
@@ -94,23 +173,83 @@ impl Comando {
                 camada,
                 antes,
                 depois,
-            } => {
-                if let Some(c) = doc.camadas.get_mut(*camada) {
-                    c.visivel = if para_frente { *depois } else { *antes };
-                }
-                Retangulo::inteiro(largura, altura)
-            }
+            } => mexer(doc, *camada, |c| {
+                c.visivel = if para_frente { *depois } else { *antes }
+            }),
             Comando::Opacidade {
+                camada,
+                antes,
+                depois,
+            } => mexer(doc, *camada, |c| {
+                c.opacidade = if para_frente { *depois } else { *antes }
+            }),
+            Comando::Modo {
+                camada,
+                antes,
+                depois,
+            } => mexer(doc, *camada, |c| {
+                c.modo = if para_frente { *depois } else { *antes }
+            }),
+            Comando::Renomear {
                 camada,
                 antes,
                 depois,
             } => {
                 if let Some(c) = doc.camadas.get_mut(*camada) {
-                    c.opacidade = if para_frente { *depois } else { *antes };
+                    c.nome = if para_frente { depois } else { antes }.clone();
                 }
-                Retangulo::inteiro(largura, altura)
+                // O nome não muda pixel nenhum.
+                Retangulo::default()
+            }
+            Comando::CriarCamada { indice, camada } | Comando::ExcluirCamada { indice, camada } => {
+                let entra = matches!(self, Comando::CriarCamada { .. }) == para_frente;
+                if entra {
+                    let i = (*indice).min(doc.camadas.len());
+                    doc.camadas.insert(i, (**camada).clone());
+                } else if *indice < doc.camadas.len() {
+                    doc.camadas.remove(*indice);
+                }
+                se_tem_efeito(camada)
+            }
+            Comando::MoverCamada { de, para } => {
+                let (de, para) = if para_frente {
+                    (*de, *para)
+                } else {
+                    (*para, *de)
+                };
+                if de >= doc.camadas.len() || para >= doc.camadas.len() {
+                    return Retangulo::default();
+                }
+                let camada = doc.camadas.remove(de);
+                let sujo = se_tem_efeito(&camada);
+                doc.camadas.insert(para, camada);
+                // 🔑 A ordem só muda a foto onde a camada que andou tem pixel —
+                // mas a que ficou por cima dela muda também onde se cruzam,
+                // que é dentro do mesmo retângulo.
+                sujo
             }
         }
+    }
+}
+
+/// Muda uma propriedade da camada e devolve onde a foto pode ter mudado: a
+/// área pintada dela, e não a foto inteira.
+fn mexer(doc: &mut Documento, camada: usize, mudar: impl FnOnce(&mut Camada)) -> Retangulo {
+    match doc.camadas.get_mut(camada) {
+        Some(c) => {
+            mudar(c);
+            c.area()
+        }
+        None => Retangulo::default(),
+    }
+}
+
+/// A área de uma camada que entra ou sai — vazia se ela não mudava a foto.
+fn se_tem_efeito(camada: &Camada) -> Retangulo {
+    if camada.visivel && camada.opacidade > 0.0 {
+        camada.area()
+    } else {
+        Retangulo::default()
     }
 }
 
@@ -278,7 +417,7 @@ impl Historico {
 #[cfg(test)]
 mod testes {
     use super::*;
-    use crate::documento::BaseRef;
+    use crate::documento::{BaseRef, NOME_DA_PRIMEIRA};
     use crate::pincel::{Ferramenta, Pincel, Traco};
 
     fn doc() -> Documento {
@@ -380,6 +519,90 @@ mod testes {
         assert!(doc.camadas[0].visivel);
         hist.desfazer(&mut doc);
         assert_eq!(doc.camadas[0].opacidade, 1.0);
+    }
+
+    #[test]
+    fn criar_excluir_e_mover_camadas_se_desfazem() {
+        let mut doc = doc();
+        let mut hist = Historico::novo();
+        let inicial = doc.clone();
+
+        let mut nova = Camada::nova(&doc.proximo_nome(), 600, 400);
+        nova.pixels.tile_mut((1, 0))[3] = 255;
+        assert_eq!(nova.nome, "Camada 1");
+        let comando = Comando::CriarCamada {
+            indice: 1,
+            camada: Box::new(nova),
+        };
+        let sujo = comando.aplicar(&mut doc, true);
+        assert_eq!(sujo, Retangulo::novo(256, 0, 256, 256), "só onde ela pinta");
+        assert_eq!(comando.camada_depois(true, doc.camadas.len()), Some(1));
+        hist.registrar(comando);
+        assert_eq!(doc.camadas.len(), 2);
+        assert_eq!(doc.proximo_nome(), "Camada 2");
+
+        let comando = Comando::MoverCamada { de: 1, para: 0 };
+        comando.aplicar(&mut doc, true);
+        assert_eq!(comando.descricao(&doc), "Mover Camada 1 para baixo");
+        hist.registrar(comando);
+        assert_eq!(doc.camadas[0].nome, "Camada 1");
+
+        let removida = doc.camadas[0].clone();
+        let comando = Comando::ExcluirCamada {
+            indice: 0,
+            camada: Box::new(removida),
+        };
+        comando.aplicar(&mut doc, true);
+        assert_eq!(comando.camada_depois(true, doc.camadas.len()), Some(0));
+        hist.registrar(comando);
+        assert_eq!(doc.camadas.len(), 1);
+
+        hist.desfazer(&mut doc);
+        assert_eq!(doc.camadas[0].nome, "Camada 1");
+        assert_eq!(
+            doc.camadas[0].pixels.pixel(256, 0)[3],
+            255,
+            "voltou com os pixels"
+        );
+        hist.desfazer(&mut doc);
+        assert_eq!(doc.camadas[1].nome, "Camada 1");
+        hist.desfazer(&mut doc);
+        assert_eq!(doc, inicial);
+        while hist.refazer(&mut doc).is_some() {}
+        assert_eq!(doc.camadas.len(), 1);
+        assert_eq!(doc.camadas[0].nome, NOME_DA_PRIMEIRA);
+    }
+
+    #[test]
+    fn modo_e_nome_se_desfazem() {
+        let mut doc = doc();
+        let mut hist = Historico::novo();
+        let passos = [
+            Comando::Modo {
+                camada: 0,
+                antes: Modo::Normal,
+                depois: Modo::Tela,
+            },
+            Comando::Renomear {
+                camada: 0,
+                antes: NOME_DA_PRIMEIRA.into(),
+                depois: "Fundo azul".into(),
+            },
+        ];
+        for passo in passos {
+            passo.aplicar(&mut doc, true);
+            hist.registrar(passo);
+        }
+        assert_eq!(doc.camadas[0].modo, Modo::Tela);
+        assert_eq!(doc.camadas[0].nome, "Fundo azul");
+        assert_eq!(
+            hist.a_desfazer().unwrap().descricao(&doc),
+            format!("Renomear {NOME_DA_PRIMEIRA} para Fundo azul")
+        );
+        hist.desfazer(&mut doc);
+        hist.desfazer(&mut doc);
+        assert_eq!(doc.camadas[0].modo, Modo::Normal);
+        assert_eq!(doc.camadas[0].nome, NOME_DA_PRIMEIRA);
     }
 
     #[test]

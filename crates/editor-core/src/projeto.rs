@@ -30,12 +30,19 @@ use crate::composicao;
 use crate::contrato::VersaoEditada;
 use crate::documento::{hex, BaseRef, Camada, Documento};
 use crate::historico::{Comando, Historico};
+use crate::mesclagem::Modo;
 use crate::pincel::Mudanca;
 use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 
 /// A versão do formato do projeto. Maior que esta é recusado — quem abre não
 /// sabe ler, e não grava por cima.
-pub const FORMATO: u32 = 1;
+///
+/// - **1** (0.1.28): uma camada; propriedades e traços no histórico.
+/// - **2** (etapa 2): várias camadas, o `modo` de mesclagem de cada uma, e os
+///   passos de criar, excluir, mover, renomear e mudar o modo. O 1 se lê como
+///   está (o modo que falta é o Normal); o app de antes recusa o 2 com a
+///   mensagem de "versão mais nova", em vez de compor as camadas errado.
+pub const FORMATO: u32 = 2;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -196,6 +203,9 @@ pub struct CamadaSalva {
     pub nome: String,
     pub visivel: bool,
     pub opacidade: f32,
+    /// Ausente no formato 1: Normal.
+    #[serde(default)]
+    pub modo: Modo,
     /// `"coluna,linha"` → hash do tile.
     pub tiles: BTreeMap<String, String>,
 }
@@ -224,6 +234,28 @@ pub enum PassoSalvo {
         antes: f32,
         depois: f32,
     },
+    Modo {
+        camada: usize,
+        antes: Modo,
+        depois: Modo,
+    },
+    Renomear {
+        camada: usize,
+        antes: String,
+        depois: String,
+    },
+    CriarCamada {
+        indice: usize,
+        camada: CamadaSalva,
+    },
+    ExcluirCamada {
+        indice: usize,
+        camada: CamadaSalva,
+    },
+    MoverCamada {
+        de: usize,
+        para: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -240,6 +272,24 @@ pub struct CompostaSalva {
     pub sha256: String,
     pub largura: u32,
     pub altura: u32,
+}
+
+/// Uma camada para o manifesto, gravando os tiles dela.
+fn salvar_camada(
+    camada: &Camada,
+    gravar_tile: &mut dyn FnMut(&Tile) -> Result<String, ErroDoProjeto>,
+) -> Result<CamadaSalva, ErroDoProjeto> {
+    let mut tiles = BTreeMap::new();
+    for (posicao, tile) in camada.pixels.existentes() {
+        tiles.insert(chave_do_tile(*posicao), gravar_tile(tile)?);
+    }
+    Ok(CamadaSalva {
+        nome: camada.nome.clone(),
+        visivel: camada.visivel,
+        opacidade: camada.opacidade,
+        modo: camada.modo,
+        tiles,
+    })
 }
 
 fn chave_do_tile(p: Posicao) -> String {
@@ -349,16 +399,7 @@ impl Projeto {
         };
         let mut camadas = Vec::with_capacity(doc.camadas.len());
         for camada in &doc.camadas {
-            let mut tiles = BTreeMap::new();
-            for (posicao, tile) in camada.pixels.existentes() {
-                tiles.insert(chave_do_tile(*posicao), gravar_tile(tile)?);
-            }
-            camadas.push(CamadaSalva {
-                nome: camada.nome.clone(),
-                visivel: camada.visivel,
-                opacidade: camada.opacidade,
-                tiles,
-            });
+            camadas.push(salvar_camada(camada, &mut gravar_tile)?);
         }
         let mut passos = Vec::with_capacity(hist.passos().len());
         for passo in hist.passos() {
@@ -398,6 +439,36 @@ impl Projeto {
                     camada: *camada,
                     antes: *antes,
                     depois: *depois,
+                },
+                Comando::Modo {
+                    camada,
+                    antes,
+                    depois,
+                } => PassoSalvo::Modo {
+                    camada: *camada,
+                    antes: *antes,
+                    depois: *depois,
+                },
+                Comando::Renomear {
+                    camada,
+                    antes,
+                    depois,
+                } => PassoSalvo::Renomear {
+                    camada: *camada,
+                    antes: antes.clone(),
+                    depois: depois.clone(),
+                },
+                Comando::CriarCamada { indice, camada } => PassoSalvo::CriarCamada {
+                    indice: *indice,
+                    camada: salvar_camada(camada, &mut gravar_tile)?,
+                },
+                Comando::ExcluirCamada { indice, camada } => PassoSalvo::ExcluirCamada {
+                    indice: *indice,
+                    camada: salvar_camada(camada, &mut gravar_tile)?,
+                },
+                Comando::MoverCamada { de, para } => PassoSalvo::MoverCamada {
+                    de: *de,
+                    para: *para,
                 },
             });
         }
@@ -537,20 +608,26 @@ impl Projeto {
         };
 
         let (largura, altura) = (manifesto.base.largura, manifesto.base.altura);
-        let mut camadas = Vec::with_capacity(manifesto.camadas.len());
-        for salva in &manifesto.camadas {
+        let ler_camada = |salva: &CamadaSalva,
+                          ler_tile: &mut dyn FnMut(&str) -> Result<Tile, ErroDoProjeto>|
+         -> Result<Camada, ErroDoProjeto> {
             let mut pixels = CamadaDePixels::nova(largura, altura);
             for (chave, hash) in &salva.tiles {
                 let posicao = posicao_da_chave(chave)
                     .ok_or_else(|| ErroDoProjeto::Formato(format!("tile {chave}")))?;
                 pixels.definir(posicao, Some(ler_tile(hash)?));
             }
-            camadas.push(Camada {
+            Ok(Camada {
                 nome: salva.nome.clone(),
                 visivel: salva.visivel,
                 opacidade: salva.opacidade,
+                modo: salva.modo,
                 pixels,
-            });
+            })
+        };
+        let mut camadas = Vec::with_capacity(manifesto.camadas.len());
+        for salva in &manifesto.camadas {
+            camadas.push(ler_camada(salva, &mut ler_tile)?);
         }
         let mut passos = Vec::with_capacity(manifesto.historico.passos.len());
         for passo in &manifesto.historico.passos {
@@ -595,6 +672,36 @@ impl Projeto {
                     camada: *camada,
                     antes: *antes,
                     depois: *depois,
+                },
+                PassoSalvo::Modo {
+                    camada,
+                    antes,
+                    depois,
+                } => Comando::Modo {
+                    camada: *camada,
+                    antes: *antes,
+                    depois: *depois,
+                },
+                PassoSalvo::Renomear {
+                    camada,
+                    antes,
+                    depois,
+                } => Comando::Renomear {
+                    camada: *camada,
+                    antes: antes.clone(),
+                    depois: depois.clone(),
+                },
+                PassoSalvo::CriarCamada { indice, camada } => Comando::CriarCamada {
+                    indice: *indice,
+                    camada: Box::new(ler_camada(camada, &mut ler_tile)?),
+                },
+                PassoSalvo::ExcluirCamada { indice, camada } => Comando::ExcluirCamada {
+                    indice: *indice,
+                    camada: Box::new(ler_camada(camada, &mut ler_tile)?),
+                },
+                PassoSalvo::MoverCamada { de, para } => Comando::MoverCamada {
+                    de: *de,
+                    para: *para,
                 },
             });
         }
@@ -662,8 +769,17 @@ impl Projeto {
             citados.extend(camada.tiles.values().cloned());
         }
         for passo in &manifesto.historico.passos {
-            if let PassoSalvo::Traco { antes, depois, .. } = passo {
-                citados.extend(antes.iter().chain(depois).filter_map(|t| t.hash.clone()));
+            match passo {
+                PassoSalvo::Traco { antes, depois, .. } => {
+                    citados.extend(antes.iter().chain(depois).filter_map(|t| t.hash.clone()));
+                }
+                // 🚨 A camada excluída mora só no histórico: o desfazer a
+                // devolve com estes tiles.
+                PassoSalvo::CriarCamada { camada, .. }
+                | PassoSalvo::ExcluirCamada { camada, .. } => {
+                    citados.extend(camada.tiles.values().cloned());
+                }
+                _ => {}
             }
         }
         let mut apagados = self.limpar_os_restos();
@@ -797,6 +913,92 @@ mod testes {
         assert!(s2.desfazer());
         assert!(!s2.desfazer());
         assert!(s2.documento().camadas[0].pixels.vazia());
+    }
+
+    #[test]
+    fn varias_camadas_modos_e_a_camada_excluida_voltam_da_gravacao() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = base();
+        let mut s = sessao_pintada(&base);
+        s.nova_camada();
+        s.pincel.cor = [255, 255, 255];
+        s.apertar(500.0, 300.0);
+        s.soltar();
+        s.mudar_modo(Modo::Tela);
+        s.renomear_camada(1, "Brilho");
+        s.duplicar_camada();
+        s.mover_camada(-1);
+        // A de baixo sai — os tiles dela só existem no histórico agora.
+        s.escolher_camada(0);
+        let tiles_da_excluida: Vec<Tile> = s.documento().camadas[0]
+            .pixels
+            .existentes()
+            .map(|(_, t)| t.clone())
+            .collect();
+        assert!(s.excluir_camada());
+        let (doc, hist) = s.instantaneo();
+        assert_eq!(doc.camadas.len(), 2);
+
+        let p = projeto(dir.path(), Arc::new(DiscoReal));
+        p.salvar("e1", &base, &doc, &hist, 1).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("e1").join(MANIFESTO)).unwrap())
+                .unwrap();
+        assert_eq!(json["formato"], 2);
+        assert_eq!(json["camadas"][0]["modo"], "tela");
+        p.coletar(1).unwrap();
+
+        let aberto = p.abrir(&base).unwrap().unwrap();
+        assert_eq!(aberto.documento, doc);
+        assert_eq!(aberto.historico.passos(), hist.passos());
+        let mut s2 = Sessao::nova(base.clone(), aberto.documento, aberto.historico, 300);
+        assert!(
+            s2.desfazer(),
+            "desfaz a exclusão depois de reabrir e coletar"
+        );
+        assert_eq!(s2.documento().camadas.len(), 3);
+        let devolvidos: Vec<Tile> = s2.documento().camadas[0]
+            .pixels
+            .existentes()
+            .map(|(_, t)| t.clone())
+            .collect();
+        assert_eq!(devolvidos, tiles_da_excluida);
+        assert_eq!(
+            s2.compor().as_raw(),
+            {
+                let mut s3 = sessao_pintada(&base);
+                s3.nova_camada();
+                s3.pincel.cor = [255, 255, 255];
+                s3.apertar(500.0, 300.0);
+                s3.soltar();
+                s3.mudar_modo(Modo::Tela);
+                s3.duplicar_camada();
+                s3.mover_camada(-1);
+                s3.compor()
+            }
+            .as_raw()
+        );
+    }
+
+    #[test]
+    fn o_projeto_do_formato_1_abre_com_o_modo_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = base();
+        let mut s = sessao_pintada(&base);
+        let (doc, hist) = s.instantaneo();
+        let p = projeto(dir.path(), Arc::new(DiscoReal));
+        p.salvar("e1", &base, &doc, &hist, 1).unwrap();
+        // O manifesto como a 0.1.28 o gravava: formato 1, sem `modo`.
+        let caminho = dir.path().join("e1").join(MANIFESTO);
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&caminho).unwrap()).unwrap();
+        json["formato"] = 1.into();
+        json["camadas"][0].as_object_mut().unwrap().remove("modo");
+        std::fs::write(&caminho, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        let aberto = p.abrir(&base).unwrap().unwrap();
+        assert_eq!(aberto.documento.camadas[0].modo, Modo::Normal);
+        assert_eq!(aberto.documento, doc);
     }
 
     #[test]
@@ -935,7 +1137,7 @@ mod testes {
         ));
         let manifesto = dir.path().join("e1").join(MANIFESTO);
         let texto = std::fs::read_to_string(&manifesto).unwrap().replacen(
-            "\"formato\": 1",
+            &format!("\"formato\": {FORMATO}"),
             "\"formato\": 9",
             1,
         );
