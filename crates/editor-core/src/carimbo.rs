@@ -29,7 +29,13 @@ pub struct Fonte {
     /// Da posição pintada à posição copiada, em pixels da foto.
     deslocamento: (i64, i64),
     tiles: BTreeMap<Posicao, RgbImage>,
+    /// Os mesmos tiles, desfocados — o desfoque e a nitidez leem daqui.
+    suaves: BTreeMap<Posicao, RgbImage>,
 }
+
+/// O raio do desfoque da fonte: um binômio de 7 toques (≈ gaussiano de σ 1,2).
+const RAIO_DO_DESFOQUE: u32 = 3;
+const BINOMIO: [u32; 7] = [1, 6, 15, 20, 15, 6, 1];
 
 impl Fonte {
     /// A foto composta da base até a camada `ate` (inclusive), deslocada de
@@ -47,7 +53,55 @@ impl Fonte {
             doc,
             deslocamento: (deslocamento.0.round() as i64, deslocamento.1.round() as i64),
             tiles: BTreeMap::new(),
+            suaves: BTreeMap::new(),
         }
+    }
+
+    /// A foto desfocada em `(x, y)` (sem deslocamento: o desfoque e a nitidez
+    /// trabalham no lugar). `None` fora da foto.
+    pub fn desfocada(&mut self, x: u32, y: u32) -> Option<[u8; 3]> {
+        let (largura, altura) = (self.base.width(), self.base.height());
+        if x >= largura || y >= altura {
+            return None;
+        }
+        let posicao = (x / LADO_DO_TILE, y / LADO_DO_TILE);
+        let tile = self.suaves.entry(posicao).or_insert_with(|| {
+            // O tile com uma margem do raio, composto e desfocado em duas
+            // passadas (linhas, depois colunas).
+            let ret = retangulo_do_tile(posicao, largura, altura);
+            let r = RAIO_DO_DESFOQUE;
+            let x0 = ret.x.saturating_sub(r);
+            let y0 = ret.y.saturating_sub(r);
+            let x1 = (ret.direita() + r).min(largura);
+            let y1 = (ret.baixo() + r).min(altura);
+            let largo = Retangulo::novo(x0, y0, x1 - x0, y1 - y0);
+            let foto = composicao::compor_recorte(&self.base, &self.doc, &largo);
+            let (w, h) = (foto.width() as i64, foto.height() as i64);
+            let passar = |img: &RgbImage, horizontal: bool| -> RgbImage {
+                RgbImage::from_fn(img.width(), img.height(), |px, py| {
+                    let mut soma = [0u32; 3];
+                    let mut peso = 0u32;
+                    for (k, b) in BINOMIO.iter().enumerate() {
+                        let d = k as i64 - r as i64;
+                        let (qx, qy) = if horizontal {
+                            ((px as i64 + d).clamp(0, w - 1), py as i64)
+                        } else {
+                            (px as i64, (py as i64 + d).clamp(0, h - 1))
+                        };
+                        let p = img.get_pixel(qx as u32, qy as u32).0;
+                        for i in 0..3 {
+                            soma[i] += p[i] as u32 * b;
+                        }
+                        peso += b;
+                    }
+                    image::Rgb(soma.map(|v| ((v + peso / 2) / peso) as u8))
+                })
+            };
+            let suave = passar(&passar(&foto, true), false);
+            image::imageops::crop_imm(&suave, ret.x - x0, ret.y - y0, ret.largura, ret.altura)
+                .to_image()
+        });
+        Some(tile.get_pixel(x % LADO_DO_TILE, y % LADO_DO_TILE).0)
     }
 
     /// A cor que vai para `(x, y)`; `None` quando a origem cai fora da foto.
@@ -94,5 +148,24 @@ mod testes {
         // Até a camada 1, o pixel pintado nela aparece.
         let mut f = Fonte::nova(base, &doc, 1, (-100.0, 0.0));
         assert_eq!(f.cor(100, 0), Some([200, 200, 200]));
+    }
+
+    #[test]
+    fn a_fonte_desfocada_suaviza_e_atravessa_a_emenda_dos_tiles() {
+        // Listras de 1 px: desfocadas, viram cinza no meio.
+        let base = Arc::new(RgbImage::from_fn(600, 300, |x, _| {
+            if x % 2 == 0 {
+                image::Rgb([255, 255, 255])
+            } else {
+                image::Rgb([0, 0, 0])
+            }
+        }));
+        let doc = Documento::novo(BaseRef::da_imagem(&base));
+        let mut f = Fonte::nova(base, &doc, 0, (0.0, 0.0));
+        for x in [10, 255, 256, 257] {
+            let p = f.desfocada(x, 100).unwrap();
+            assert!((120..=135).contains(&p[0]), "x={x}: {p:?}");
+        }
+        assert_eq!(f.desfocada(600, 0), None);
     }
 }

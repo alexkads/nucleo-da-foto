@@ -768,6 +768,17 @@ impl Sessao {
             return false;
         }
         let mut traco = Traco::novo(self.pincel).dentro_de(self.selecao.clone());
+        if self.pincel.ferramenta.le_a_foto()
+            && self.pincel.ferramenta != crate::pincel::Ferramenta::Carimbo
+        {
+            // Tom e foco: a foto até a camada escolhida, no próprio lugar.
+            traco = traco.copiando_de(crate::carimbo::Fonte::nova(
+                self.base.clone(),
+                &self.doc,
+                ativa,
+                (0.0, 0.0),
+            ));
+        }
         if self.pincel.ferramenta == crate::pincel::Ferramenta::Carimbo {
             let Some(origem) = self.origem else {
                 return false;
@@ -896,6 +907,21 @@ impl Sessao {
             }
             None => false,
         }
+    }
+
+    /// O painel Histórico: volta (ou avança) até ficarem `posicao` passos
+    /// aplicados. Devolve se andou.
+    pub fn ir_para(&mut self, posicao: usize) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let alvo = posicao.min(self.hist.passos().len());
+        let mut andou = false;
+        while self.hist.posicao() > alvo && self.desfazer() {
+            andou = true;
+        }
+        while self.hist.posicao() < alvo && self.refazer() {
+            andou = true;
+        }
+        andou
     }
 
     pub fn refazer(&mut self) -> bool {
@@ -1335,6 +1361,33 @@ mod testes {
         s.desfazer();
         assert_eq!(s.compor().get_pixel(105, 105).0, [105, 105, 50]);
         assert!(!s.colar_remendo(9, &ret, &rgba, &|_, _| 255));
+    }
+
+    #[test]
+    fn subexposicao_e_desfoque_escrevem_na_camada_vazia_e_o_historico_anda() {
+        use crate::pincel::Faixa;
+        let mut s = sessao();
+        s.nova_camada();
+        s.pincel.ferramenta = Ferramenta::Subexposicao(Faixa::MeiosTons);
+        s.pincel.dureza = 1.0;
+        s.pincel.raio = 10.0;
+        let antes = s.compor().get_pixel(400, 128).0;
+        assert!(s.apertar(400.0, 128.0));
+        s.soltar();
+        let depois = s.compor().get_pixel(400, 128).0;
+        assert!(depois[1] > antes[1], "clareou: {antes:?} → {depois:?}");
+        assert!(s.documento().camadas[0].pixels.vazia(), "a de baixo fica");
+
+        s.pincel.ferramenta = Ferramenta::Desfoque;
+        assert!(s.apertar(100.0, 100.0));
+        s.soltar();
+        assert_eq!(s.historico().posicao(), 3);
+        assert!(s.ir_para(1));
+        assert_eq!(s.historico().posicao(), 1);
+        assert_eq!(s.compor().get_pixel(400, 128).0, antes);
+        assert!(s.ir_para(3));
+        assert_eq!(s.compor().get_pixel(400, 128).0, depois);
+        assert!(!s.ir_para(3), "já está lá");
     }
 
     #[test]

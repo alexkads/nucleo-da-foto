@@ -35,6 +35,83 @@ pub enum Ferramenta {
     Borracha,
     /// Copia da [`Fonte`] em vez de pintar uma cor — o carimbo (S).
     Carimbo,
+    /// Clareia a foto onde passa, na faixa de tons escolhida (O).
+    Subexposicao(Faixa),
+    /// Escurece a foto onde passa, na faixa de tons escolhida (⇧O).
+    Superexposicao(Faixa),
+    /// Suaviza (R).
+    Desfoque,
+    /// Realça o detalhe (⇧R).
+    Nitidez,
+}
+
+impl Ferramenta {
+    /// A ferramenta lê a foto (a [`Fonte`]) para decidir a cor de cada pixel —
+    /// o carimbo e as de tom e de foco.
+    pub fn le_a_foto(self) -> bool {
+        !matches!(self, Ferramenta::Pincel | Ferramenta::Borracha)
+    }
+}
+
+/// Os tons que a subexposição e a superexposição mexem — as do Photoshop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Faixa {
+    Sombras,
+    #[default]
+    MeiosTons,
+    Realces,
+}
+
+impl Faixa {
+    pub const TODAS: [Faixa; 3] = [Faixa::Sombras, Faixa::MeiosTons, Faixa::Realces];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Faixa::Sombras => "Sombras",
+            Faixa::MeiosTons => "Meios-tons",
+            Faixa::Realces => "Realces",
+        }
+    }
+
+    /// Quanto um tom de luminância `l` (`0..=1`) é desta faixa.
+    pub fn peso(self, l: f32) -> f32 {
+        match self {
+            Faixa::Sombras => (1.0 - l) * (1.0 - l),
+            Faixa::MeiosTons => 1.0 - (2.0 * l - 1.0) * (2.0 * l - 1.0),
+            Faixa::Realces => l * l,
+        }
+    }
+}
+
+/// O tanto que uma passada de subexposição ou superexposição mexe, no tom
+/// mais da faixa (a opacidade do pincel é a "exposição" por cima disso).
+const FORCA_DO_TOM: f32 = 0.5;
+
+/// A cor de um pixel depois da ferramenta de tom ou de foco, a partir da foto
+/// (`foto`) e da foto desfocada no mesmo ponto (`suave`).
+pub fn cor_da_ferramenta(ferramenta: Ferramenta, foto: [u8; 3], suave: [u8; 3]) -> [u8; 3] {
+    let n = |v: u8| v as f32 / 255.0;
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let l = 0.3 * n(foto[0]) + 0.59 * n(foto[1]) + 0.11 * n(foto[2]);
+    match ferramenta {
+        Ferramenta::Subexposicao(faixa) => {
+            let k = FORCA_DO_TOM * faixa.peso(l);
+            foto.map(|v| q(n(v) + k * (1.0 - n(v))))
+        }
+        Ferramenta::Superexposicao(faixa) => {
+            let k = FORCA_DO_TOM * faixa.peso(l);
+            foto.map(|v| q(n(v) - k * n(v)))
+        }
+        Ferramenta::Desfoque => suave,
+        Ferramenta::Nitidez => {
+            let mut saida = [0u8; 3];
+            for i in 0..3 {
+                saida[i] = q(n(foto[i]) + (n(foto[i]) - n(suave[i])));
+            }
+            saida
+        }
+        _ => foto,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -265,6 +342,15 @@ impl Traco {
                             // A origem caiu fora da foto: este pixel fica.
                             None => continue,
                         },
+                        (f, Some(fonte)) if f.le_a_foto() => {
+                            let (Some(foto), Some(suave)) =
+                                (fonte.cor(px, py), fonte.desfocada(px, py))
+                            else {
+                                continue;
+                            };
+                            let cor = cor_da_ferramenta(f, foto, suave);
+                            aplicar(&Pincel { cor, ..self.pincel }, de_antes, c)
+                        }
                         _ => aplicar(&self.pincel, de_antes, c),
                     };
                     tile[i..i + 4].copy_from_slice(&novo);
@@ -305,8 +391,9 @@ pub fn aplicar(pincel: &Pincel, antes: [u8; 4], cobertura: u8) -> [u8; 4] {
             let alfa = alfa_antes * (1.0 - a);
             [antes[0], antes[1], antes[2], quantizar(alfa)]
         }
-        // O carimbo pinta como o pincel, com a cor que a fonte deu ao pixel.
-        Ferramenta::Pincel | Ferramenta::Carimbo => {
+        // O carimbo e as de tom e de foco pintam como o pincel, com a cor que
+        // a fonte deu ao pixel.
+        _ => {
             let alfa = a + alfa_antes * (1.0 - a);
             if alfa <= 0.0 {
                 return [0; 4];
@@ -488,5 +575,26 @@ mod testes {
             "o pixel de (400, 250)"
         );
         assert_eq!(camada.pixel(330, 200)[3], 0, "fora do raio");
+    }
+
+    #[test]
+    fn as_ferramentas_de_tom_e_de_foco() {
+        let meio = [128u8, 128, 128];
+        let clara = cor_da_ferramenta(Ferramenta::Subexposicao(Faixa::MeiosTons), meio, meio);
+        let escura = cor_da_ferramenta(Ferramenta::Superexposicao(Faixa::MeiosTons), meio, meio);
+        assert!(clara[0] > 180 && escura[0] < 80, "{clara:?} {escura:?}");
+        // Nas sombras, um meio-tom quase não mexe com a faixa dos realces.
+        let realce =
+            cor_da_ferramenta(Ferramenta::Subexposicao(Faixa::Realces), [20, 20, 20], meio);
+        assert!(realce[0] < 25, "{realce:?}");
+        // Desfoque devolve a suave; nitidez se afasta dela.
+        assert_eq!(
+            cor_da_ferramenta(Ferramenta::Desfoque, [200, 0, 0], [100, 50, 0]),
+            [100, 50, 0]
+        );
+        assert_eq!(
+            cor_da_ferramenta(Ferramenta::Nitidez, [150, 100, 0], [100, 100, 0]),
+            [200, 100, 0]
+        );
     }
 }
