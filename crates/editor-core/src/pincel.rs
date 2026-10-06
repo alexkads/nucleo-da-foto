@@ -85,7 +85,11 @@ impl Faixa {
 
 /// O tanto que uma passada de subexposição ou superexposição mexe, no tom
 /// mais da faixa (a opacidade do pincel é a "exposição" por cima disso).
-const FORCA_DO_TOM: f32 = 0.5;
+///
+/// 0,25: com 0,5 uma passada só já deixava um disco claro visível no rosto
+/// (visto no app real, 06/out/2026); como no Photoshop, o efeito se constrói
+/// passada a passada — cada traço novo lê a foto com o anterior.
+const FORCA_DO_TOM: f32 = 0.25;
 
 /// A cor de um pixel depois da ferramenta de tom ou de foco, a partir da foto
 /// (`foto`) e da foto desfocada no mesmo ponto (`suave`).
@@ -582,7 +586,7 @@ mod testes {
         let meio = [128u8, 128, 128];
         let clara = cor_da_ferramenta(Ferramenta::Subexposicao(Faixa::MeiosTons), meio, meio);
         let escura = cor_da_ferramenta(Ferramenta::Superexposicao(Faixa::MeiosTons), meio, meio);
-        assert!(clara[0] > 180 && escura[0] < 80, "{clara:?} {escura:?}");
+        assert!(clara[0] > 150 && escura[0] < 110, "{clara:?} {escura:?}");
         // Nas sombras, um meio-tom quase não mexe com a faixa dos realces.
         let realce =
             cor_da_ferramenta(Ferramenta::Subexposicao(Faixa::Realces), [20, 20, 20], meio);
