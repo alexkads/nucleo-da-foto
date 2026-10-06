@@ -47,6 +47,56 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A máscara da camada, como no Photoshop: branco revela, preto esconde, os
+/// cinzas deixam passar em parte.
+///
+/// 🔑 **É uma camada de pixels como as outras**, pintada sobre o `fundo`: o
+/// valor de um pixel é a cor pintada (em cinza) sobre o fundo, na proporção do
+/// alfa. Assim o pincel, a borracha (que devolve ao fundo), o Delete, o
+/// preenchimento, o degradê e a lata de tinta funcionam nela sem código à
+/// parte — e um tile que nunca foi pintado não existe, como na camada.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mascara {
+    /// O valor de onde não se pintou: 255 revela tudo (o botão), 0 esconde
+    /// tudo (⌥ + o botão).
+    pub fundo: u8,
+    /// Desligada (⇧ + clique na miniatura), a camada aparece inteira.
+    pub ativa: bool,
+    pub pixels: CamadaDePixels,
+}
+
+impl Mascara {
+    pub fn nova(fundo: u8, largura: u32, altura: u32) -> Self {
+        Self {
+            fundo,
+            ativa: true,
+            pixels: CamadaDePixels::nova(largura, altura),
+        }
+    }
+
+    /// O valor (0 esconde, 255 revela) de um pixel RGBA da máscara.
+    #[inline]
+    pub fn valor_do_pixel(fundo: u8, p: [u8; 4]) -> u8 {
+        if p[3] == 0 {
+            return fundo;
+        }
+        let cinza = ((77 * p[0] as u32 + 150 * p[1] as u32 + 29 * p[2] as u32 + 128) >> 8) as i32;
+        let (f, a) = (fundo as i32, p[3] as i32);
+        let d = (cinza - f) * a;
+        (f + (d + 127 * d.signum()) / 255) as u8
+    }
+
+    /// O valor em `(x, y)`.
+    pub fn valor(&self, x: u32, y: u32) -> u8 {
+        Self::valor_do_pixel(self.fundo, self.pixels.pixel(x, y))
+    }
+
+    /// A máscara esconde a camada inteira.
+    pub fn esconde_tudo(&self) -> bool {
+        self.ativa && self.fundo == 0 && self.pixels.vazia()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Camada {
     pub nome: String,
@@ -55,6 +105,7 @@ pub struct Camada {
     pub opacidade: f32,
     pub modo: Modo,
     pub pixels: CamadaDePixels,
+    pub mascara: Option<Mascara>,
 }
 
 impl Camada {
@@ -66,6 +117,28 @@ impl Camada {
             opacidade: 1.0,
             modo: Modo::Normal,
             pixels: CamadaDePixels::nova(largura, altura),
+            mascara: None,
+        }
+    }
+
+    /// A máscara que vale na composição — `None` sem máscara ou com ela
+    /// desligada.
+    pub fn mascara_ativa(&self) -> Option<&Mascara> {
+        self.mascara.as_ref().filter(|m| m.ativa)
+    }
+
+    /// Os pixels onde se pinta: os da máscara ou os da camada.
+    pub fn alvo(&self, na_mascara: bool) -> &CamadaDePixels {
+        match (&self.mascara, na_mascara) {
+            (Some(m), true) => &m.pixels,
+            _ => &self.pixels,
+        }
+    }
+
+    pub fn alvo_mut(&mut self, na_mascara: bool) -> &mut CamadaDePixels {
+        match (&mut self.mascara, na_mascara) {
+            (Some(m), true) => &mut m.pixels,
+            _ => &mut self.pixels,
         }
     }
 
@@ -82,7 +155,10 @@ impl Camada {
 
     /// A camada não muda nenhum pixel da base (C30).
     pub fn sem_efeito(&self) -> bool {
-        !self.visivel || self.opacidade <= 0.0 || self.pixels.vazia()
+        !self.visivel
+            || self.opacidade <= 0.0
+            || self.pixels.vazia()
+            || self.mascara.as_ref().is_some_and(Mascara::esconde_tudo)
     }
 }
 

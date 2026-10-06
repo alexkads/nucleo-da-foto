@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 
 use crate::composicao;
 use crate::contrato::VersaoEditada;
-use crate::documento::{hex, BaseRef, Camada, Documento};
+use crate::documento::{hex, BaseRef, Camada, Documento, Mascara};
 use crate::historico::{Comando, Historico};
 use crate::mesclagem::Modo;
 use crate::pincel::Mudanca;
@@ -44,7 +44,10 @@ use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 ///   passos de criar, excluir, mover, renomear e mudar o modo. O 1 se lê como
 ///   está (o modo que falta é o Normal); o app de antes recusa o 2 com a
 ///   mensagem de "versão mais nova", em vez de compor as camadas errado.
-pub const FORMATO: u32 = 3;
+/// - **4** (etapa 10): a máscara de camada (`mascara` na camada salva, o passo
+///   `mascara` e o traço com `na_mascara`). A 0.1.101 comporia a camada sem a
+///   máscara — recusa com o aviso.
+pub const FORMATO: u32 = 4;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -210,6 +213,16 @@ pub struct CamadaSalva {
     pub modo: Modo,
     /// `"coluna,linha"` → hash do tile.
     pub tiles: BTreeMap<String, String>,
+    /// Ausente até o formato 3, e em camada sem máscara.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mascara: Option<MascaraSalva>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MascaraSalva {
+    pub fundo: u8,
+    pub ativa: bool,
+    pub tiles: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -223,8 +236,15 @@ pub struct HistoricoSalvo {
 pub enum PassoSalvo {
     Traco {
         camada: usize,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        na_mascara: bool,
         antes: Vec<TileSalvo>,
         depois: Vec<TileSalvo>,
+    },
+    Mascara {
+        camada: usize,
+        antes: Option<MascaraSalva>,
+        depois: Option<MascaraSalva>,
     },
     Visibilidade {
         camada: usize,
@@ -296,6 +316,26 @@ fn salvar_camada(
         visivel: camada.visivel,
         opacidade: camada.opacidade,
         modo: camada.modo,
+        tiles,
+        mascara: camada
+            .mascara
+            .as_ref()
+            .map(|m| salvar_mascara(m, gravar_tile))
+            .transpose()?,
+    })
+}
+
+fn salvar_mascara(
+    mascara: &Mascara,
+    gravar_tile: &mut dyn FnMut(&Tile) -> Result<String, ErroDoProjeto>,
+) -> Result<MascaraSalva, ErroDoProjeto> {
+    let mut tiles = BTreeMap::new();
+    for (posicao, tile) in mascara.pixels.existentes() {
+        tiles.insert(chave_do_tile(*posicao), gravar_tile(tile)?);
+    }
+    Ok(MascaraSalva {
+        fundo: mascara.fundo,
+        ativa: mascara.ativa,
         tiles,
     })
 }
@@ -412,7 +452,27 @@ impl Projeto {
         let mut passos = Vec::with_capacity(hist.passos().len());
         for passo in hist.passos() {
             passos.push(match passo {
-                Comando::Traco { camada, mudanca } => {
+                Comando::Mascara {
+                    camada,
+                    antes,
+                    depois,
+                } => {
+                    let mut lado = |m: &Option<Box<Mascara>>| {
+                        m.as_deref()
+                            .map(|m| salvar_mascara(m, &mut gravar_tile))
+                            .transpose()
+                    };
+                    PassoSalvo::Mascara {
+                        camada: *camada,
+                        antes: lado(antes)?,
+                        depois: lado(depois)?,
+                    }
+                }
+                Comando::Traco {
+                    camada,
+                    na_mascara,
+                    mudanca,
+                } => {
                     let mut salvar_lado = |lado: &[(Posicao, Option<Tile>)]| {
                         lado.iter()
                             .map(|(p, t)| {
@@ -426,6 +486,7 @@ impl Projeto {
                     };
                     PassoSalvo::Traco {
                         camada: *camada,
+                        na_mascara: *na_mascara,
                         antes: salvar_lado(&mudanca.antes)?,
                         depois: salvar_lado(&mudanca.depois)?,
                     }
@@ -640,21 +701,40 @@ impl Projeto {
         };
 
         let (largura, altura) = (manifesto.base.largura, manifesto.base.altura);
-        let ler_camada = |salva: &CamadaSalva,
+        let ler_pixels = |tiles: &BTreeMap<String, String>,
                           ler_tile: &mut dyn FnMut(&str) -> Result<Tile, ErroDoProjeto>|
-         -> Result<Camada, ErroDoProjeto> {
+         -> Result<CamadaDePixels, ErroDoProjeto> {
             let mut pixels = CamadaDePixels::nova(largura, altura);
-            for (chave, hash) in &salva.tiles {
+            for (chave, hash) in tiles {
                 let posicao = posicao_da_chave(chave)
                     .ok_or_else(|| ErroDoProjeto::Formato(format!("tile {chave}")))?;
                 pixels.definir(posicao, Some(ler_tile(hash)?));
             }
+            Ok(pixels)
+        };
+        let ler_mascara = |salva: &MascaraSalva,
+                           ler_tile: &mut dyn FnMut(&str) -> Result<Tile, ErroDoProjeto>|
+         -> Result<Mascara, ErroDoProjeto> {
+            Ok(Mascara {
+                fundo: salva.fundo,
+                ativa: salva.ativa,
+                pixels: ler_pixels(&salva.tiles, ler_tile)?,
+            })
+        };
+        let ler_camada = |salva: &CamadaSalva,
+                          ler_tile: &mut dyn FnMut(&str) -> Result<Tile, ErroDoProjeto>|
+         -> Result<Camada, ErroDoProjeto> {
             Ok(Camada {
                 nome: salva.nome.clone(),
                 visivel: salva.visivel,
                 opacidade: salva.opacidade,
                 modo: salva.modo,
-                pixels,
+                pixels: ler_pixels(&salva.tiles, ler_tile)?,
+                mascara: salva
+                    .mascara
+                    .as_ref()
+                    .map(|m| ler_mascara(m, ler_tile))
+                    .transpose()?,
             })
         };
         let mut camadas = Vec::with_capacity(manifesto.camadas.len());
@@ -664,8 +744,25 @@ impl Projeto {
         let mut passos = Vec::with_capacity(manifesto.historico.passos.len());
         for passo in &manifesto.historico.passos {
             passos.push(match passo {
+                PassoSalvo::Mascara {
+                    camada,
+                    antes,
+                    depois,
+                } => {
+                    let mut lado = |m: &Option<MascaraSalva>| {
+                        m.as_ref()
+                            .map(|m| ler_mascara(m, &mut ler_tile).map(Box::new))
+                            .transpose()
+                    };
+                    Comando::Mascara {
+                        camada: *camada,
+                        antes: lado(antes)?,
+                        depois: lado(depois)?,
+                    }
+                }
                 PassoSalvo::Traco {
                     camada,
+                    na_mascara,
                     antes,
                     depois,
                 } => {
@@ -681,6 +778,7 @@ impl Projeto {
                     };
                     Comando::Traco {
                         camada: *camada,
+                        na_mascara: *na_mascara,
                         mudanca: Mudanca {
                             antes: lado(antes)?,
                             depois: lado(depois)?,
@@ -823,8 +921,15 @@ impl Projeto {
             return Ok(0);
         };
         let mut citados: BTreeSet<String> = BTreeSet::new();
-        for camada in &manifesto.camadas {
+        // A camada e a máscara dela.
+        let citar = |citados: &mut BTreeSet<String>, camada: &CamadaSalva| {
             citados.extend(camada.tiles.values().cloned());
+            if let Some(m) = &camada.mascara {
+                citados.extend(m.tiles.values().cloned());
+            }
+        };
+        for camada in &manifesto.camadas {
+            citar(&mut citados, camada);
         }
         for passo in &manifesto.historico.passos {
             match passo {
@@ -835,7 +940,13 @@ impl Projeto {
                 // devolve com estes tiles.
                 PassoSalvo::CriarCamada { camada, .. }
                 | PassoSalvo::ExcluirCamada { camada, .. } => {
-                    citados.extend(camada.tiles.values().cloned());
+                    citar(&mut citados, camada);
+                }
+                // A máscara excluída mora só aqui.
+                PassoSalvo::Mascara { antes, depois, .. } => {
+                    for m in antes.iter().chain(depois) {
+                        citados.extend(m.tiles.values().cloned());
+                    }
                 }
                 // A de cima mora só no histórico, e a de baixo de antes também.
                 PassoSalvo::Mesclar {
@@ -844,7 +955,7 @@ impl Projeto {
                     depois,
                     ..
                 } => {
-                    citados.extend(de_cima.tiles.values().cloned());
+                    citar(&mut citados, de_cima);
                     citados.extend(antes.iter().chain(depois).filter_map(|t| t.hash.clone()));
                 }
                 _ => {}
@@ -1069,6 +1180,50 @@ mod testes {
         let mut s2 = Sessao::nova(base.clone(), aberto.documento, aberto.historico, 300);
         assert!(s2.desfazer());
         assert_eq!(s2.documento(), &pilha);
+    }
+
+    #[test]
+    fn a_mascara_e_os_passos_dela_voltam_da_gravacao_mesmo_depois_da_coleta() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = base();
+        let mut s = sessao_pintada(&base);
+        // Uma máscara pintada que depois é excluída: os tiles dela moram só
+        // no histórico.
+        s.adicionar_mascara(false);
+        s.pincel.cor = [0, 0, 0];
+        s.apertar(320.0, 240.0);
+        s.soltar();
+        let com_mascara = s.documento().clone();
+        s.excluir_mascara();
+        // E outra, que fica, desligada e com um traço.
+        s.adicionar_mascara(true);
+        s.pincel.cor = [255, 255, 255];
+        s.apertar(200.0, 200.0);
+        s.soltar();
+        s.alternar_mascara_de(0);
+        let (doc, hist) = s.instantaneo();
+        let p = projeto(dir.path(), Arc::new(DiscoReal));
+        p.salvar("e1", &base, &doc, &hist, 1).unwrap();
+        p.coletar(1).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("e1").join(MANIFESTO)).unwrap())
+                .unwrap();
+        assert_eq!(json["formato"], 4);
+        assert_eq!(json["camadas"][0]["mascara"]["fundo"], 0);
+
+        let aberto = p.abrir(&base).unwrap().unwrap();
+        assert_eq!(aberto.documento, doc);
+        assert_eq!(aberto.historico.passos(), hist.passos());
+        let mut s2 = Sessao::nova(base.clone(), aberto.documento, aberto.historico, 300);
+        for _ in 0..4 {
+            assert!(s2.desfazer());
+        }
+        assert_eq!(
+            s2.documento(),
+            &com_mascara,
+            "a máscara excluída volta com os tiles"
+        );
+        assert!(s2.na_mascara());
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! gesto": desfazer até o que foi salvo volta a dizer "sem alterações", como em
 //! todo editor.
 
-use crate::documento::{Camada, Documento};
+use crate::documento::{Camada, Documento, Mascara};
 use crate::mesclagem::Modo;
 use crate::pincel::Mudanca;
 use crate::retangulo::Retangulo;
@@ -21,7 +21,17 @@ pub const TETO_DO_HISTORICO: usize = 256 * 1024 * 1024;
 pub enum Comando {
     Traco {
         camada: usize,
+        /// O traço foi na máscara da camada, e não nos pixels dela.
+        na_mascara: bool,
         mudanca: Mudanca,
+    },
+    /// A máscara da camada antes e depois: `None → Some` é adicionar, `Some →
+    /// None` é excluir, e de `Some` a `Some` é ligar ou desligar. Os tiles
+    /// são `Arc` — guardar os dois lados custa contadores.
+    Mascara {
+        camada: usize,
+        antes: Option<Box<Mascara>>,
+        depois: Option<Box<Mascara>>,
     },
     Visibilidade {
         camada: usize,
@@ -45,21 +55,12 @@ pub enum Comando {
     },
     /// Para a frente, a camada entra em `indice`; para trás, sai. Nova e
     /// duplicada são o mesmo passo — o que muda é o que a camada traz.
-    CriarCamada {
-        indice: usize,
-        camada: Box<Camada>,
-    },
+    CriarCamada { indice: usize, camada: Box<Camada> },
     /// O contrário de [`Comando::CriarCamada`]: guarda a camada inteira, para
     /// o desfazer devolvê-la com os pixels.
-    ExcluirCamada {
-        indice: usize,
-        camada: Box<Camada>,
-    },
+    ExcluirCamada { indice: usize, camada: Box<Camada> },
     /// A camada de `de` passa a ficar em `para` (índices de baixo para cima).
-    MoverCamada {
-        de: usize,
-        para: usize,
-    },
+    MoverCamada { de: usize, para: usize },
     /// ⌘E: a camada `indice` sai, e a de baixo (`indice − 1`) recebe os
     /// pixels dela (`mudanca`). Para trás, a de baixo volta e a de cima entra.
     Mesclar {
@@ -74,13 +75,36 @@ impl Comando {
     /// do histórico do PaintFE.
     pub fn descricao(&self, doc: &Documento) -> String {
         match self {
-            Comando::Traco { mudanca, .. } => {
+            Comando::Traco {
+                mudanca,
+                na_mascara,
+                ..
+            } => {
                 let apagou = mudanca
                     .antes
                     .iter()
                     .zip(&mudanca.depois)
                     .all(|((_, a), (_, d))| alfa_total(d) <= alfa_total(a));
-                if apagou { "Borracha" } else { "Pincel" }.into()
+                let nome = if apagou { "Borracha" } else { "Pincel" };
+                if *na_mascara {
+                    format!("{nome} na máscara")
+                } else {
+                    nome.into()
+                }
+            }
+            Comando::Mascara {
+                camada,
+                antes,
+                depois,
+            } => {
+                let acao = match (antes, depois) {
+                    (None, Some(m)) if m.fundo == 0 => "Máscara que esconde tudo em",
+                    (None, _) => "Máscara em",
+                    (Some(_), None) => "Excluir a máscara de",
+                    (_, Some(m)) if m.ativa => "Ligar a máscara de",
+                    _ => "Desligar a máscara de",
+                };
+                format!("{acao} {}", nome(doc, *camada))
             }
             Comando::Visibilidade { camada, depois, .. } => format!(
                 "{} {}",
@@ -121,6 +145,7 @@ impl Comando {
         let ultima = quantas.checked_sub(1)?;
         let i = match self {
             Comando::Traco { camada, .. }
+            | Comando::Mascara { camada, .. }
             | Comando::Visibilidade { camada, .. }
             | Comando::Opacidade { camada, .. }
             | Comando::Modo { camada, .. }
@@ -158,8 +183,13 @@ impl Comando {
                 (conta(&mudanca.antes) + conta(&mudanca.depois)) * BYTES_DO_TILE
             }
             Comando::CriarCamada { camada, .. } | Comando::ExcluirCamada { camada, .. } => {
-                camada.pixels.bytes()
+                camada.pixels.bytes() + camada.mascara.as_ref().map_or(0, |m| m.pixels.bytes())
             }
+            // Ligar e desligar dividem os tiles; só o lado que sai pesa.
+            Comando::Mascara { antes, depois, .. } => match (antes, depois) {
+                (Some(m), None) | (None, Some(m)) => m.pixels.bytes(),
+                _ => 0,
+            },
             Comando::Mesclar {
                 de_cima, mudanca, ..
             } => {
@@ -176,7 +206,11 @@ impl Comando {
     pub fn aplicar(&self, doc: &mut Documento, para_frente: bool) -> Retangulo {
         let (largura, altura) = (doc.largura(), doc.altura());
         match self {
-            Comando::Traco { camada, mudanca } => {
+            Comando::Traco {
+                camada,
+                na_mascara,
+                mudanca,
+            } => {
                 let lado = if para_frente {
                     &mudanca.depois
                 } else {
@@ -184,12 +218,30 @@ impl Comando {
                 };
                 let mut sujo = Retangulo::default();
                 if let Some(c) = doc.camadas.get_mut(*camada) {
+                    if *na_mascara && c.mascara.is_none() {
+                        return sujo;
+                    }
+                    let alvo = c.alvo_mut(*na_mascara);
                     for (posicao, tile) in lado {
-                        c.pixels.definir(*posicao, tile.clone());
+                        alvo.definir(*posicao, tile.clone());
                         sujo = sujo.uniao(&retangulo_do_tile(*posicao, largura, altura));
                     }
                 }
                 sujo
+            }
+            Comando::Mascara {
+                camada,
+                antes,
+                depois,
+            } => {
+                let lado = if para_frente { depois } else { antes };
+                match doc.camadas.get_mut(*camada) {
+                    Some(c) => {
+                        c.mascara = lado.as_deref().cloned();
+                        c.area()
+                    }
+                    None => Retangulo::default(),
+                }
             }
             Comando::Visibilidade {
                 camada,
@@ -489,7 +541,11 @@ mod testes {
         traco.ate(&mut doc.camadas[0].pixels, x, 100.0);
         traco.ate(&mut doc.camadas[0].pixels, x + 200.0, 150.0);
         let mudanca = traco.terminar(&mut doc.camadas[0].pixels).unwrap();
-        hist.registrar(Comando::Traco { camada: 0, mudanca });
+        hist.registrar(Comando::Traco {
+            camada: 0,
+            na_mascara: false,
+            mudanca,
+        });
     }
 
     #[test]

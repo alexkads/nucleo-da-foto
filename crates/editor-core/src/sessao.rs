@@ -15,7 +15,7 @@ use std::sync::Arc;
 use image::RgbImage;
 
 use crate::composicao;
-use crate::documento::{Camada, Documento};
+use crate::documento::{Camada, Documento, Mascara};
 use crate::historico::{Comando, Historico};
 use crate::mesclagem::Modo;
 use crate::operacoes;
@@ -26,6 +26,9 @@ use crate::selecao::{Forma, Operacao, Selecao};
 use crate::tiles::CamadaDePixels;
 use crate::transformar::{self, Conteudo, Transformacao};
 use crate::vista::Vista;
+
+/// A tolerância da lata de tinta — o padrão do Photoshop.
+pub const TOLERANCIA_DA_LATA: u8 = 32;
 
 /// Um pedido de lupa: o que a vista do pedaço precisa para ser montada fora
 /// da thread da tela. Barato de tirar: a base e os tiles são `Arc`.
@@ -60,6 +63,9 @@ pub struct Sessao {
     pedidos: u64,
     pub pincel: Pincel,
     ativa: usize,
+    /// Pinta na máscara da escolhida, e não nos pixels dela (a miniatura da
+    /// máscara clicada, como no Photoshop).
+    na_mascara: bool,
     traco: Option<Traco>,
     /// A camada e a opacidade dela quando o arrasto do slider começou — o
     /// passo do desfazer é o arrasto inteiro, e não cada valor do caminho.
@@ -77,8 +83,8 @@ pub struct Sessao {
     /// Alinhado (o padrão do Photoshop): o primeiro traço depois de escolher a
     /// origem fixa a distância, e os seguintes copiam à mesma distância.
     distancia_do_carimbo: Option<(f32, f32)>,
-    /// A camada antes de o arrasto do Mover começar.
-    movendo: Option<(usize, crate::tiles::CamadaDePixels)>,
+    /// A camada (e se é a máscara dela) antes de o arrasto do Mover começar.
+    movendo: Option<(usize, bool, crate::tiles::CamadaDePixels)>,
     /// O conteúdo solto da camada (⌘T, ou o Mover com seleção).
     flutuante: Option<Flutuante>,
 }
@@ -86,6 +92,7 @@ pub struct Sessao {
 /// O conteúdo de uma camada tirado dela para ser transformado.
 struct Flutuante {
     camada: usize,
+    na_mascara: bool,
     /// A camada como era — para o desfazer e para cancelar.
     original: CamadaDePixels,
     /// O que fica na camada sem o conteúdo.
@@ -115,6 +122,7 @@ impl Sessao {
             pedidos: 0,
             pincel: Pincel::default(),
             ativa,
+            na_mascara: false,
             traco: None,
             opacidade_antes: None,
             selecao: None,
@@ -235,21 +243,133 @@ impl Sessao {
         self.aplicar_transformacao();
     }
 
+    /// Escolhe a camada — os pixels dela, e não a máscara.
     pub fn escolher_camada(&mut self, indice: usize) {
-        if indice < self.doc.camadas.len() && indice != self.ativa() {
+        if indice < self.doc.camadas.len() && (indice != self.ativa() || self.na_mascara) {
             self.fechar_o_que_esta_aberto();
             self.ativa = indice;
+            self.na_mascara = false;
         }
+    }
+
+    /// Escolhe a máscara da camada `indice` para pintar. Falso sem máscara.
+    pub fn escolher_mascara(&mut self, indice: usize) -> bool {
+        if self
+            .doc
+            .camadas
+            .get(indice)
+            .is_none_or(|c| c.mascara.is_none())
+        {
+            return false;
+        }
+        if indice != self.ativa() || !self.na_mascara {
+            self.fechar_o_que_esta_aberto();
+            self.ativa = indice;
+            self.na_mascara = true;
+        }
+        true
+    }
+
+    /// O pincel está pintando na máscara da escolhida.
+    pub fn na_mascara(&self) -> bool {
+        self.na_mascara && self.camada_ativa().mascara.is_some()
     }
 
     /// Aplica e registra um passo, e leva a escolha para onde ele mexeu.
     fn executar(&mut self, comando: Comando) {
         let sujo = comando.aplicar(&mut self.doc, true);
-        if let Some(i) = comando.camada_depois(true, self.doc.camadas.len()) {
-            self.ativa = i;
-        }
+        self.seguir_o_passo(&comando, true);
         self.hist.registrar(comando);
         self.refazer_a_vista(&sujo);
+    }
+
+    /// A escolha vai para onde o passo mexeu — a camada, e a máscara dela
+    /// quando o traço foi lá.
+    fn seguir_o_passo(&mut self, passo: &Comando, para_frente: bool) {
+        if let Some(i) = passo.camada_depois(para_frente, self.doc.camadas.len()) {
+            if i != self.ativa {
+                self.na_mascara = false;
+            }
+            self.ativa = i;
+        }
+        match passo {
+            Comando::Traco { na_mascara, .. } => self.na_mascara = *na_mascara,
+            Comando::Mascara { antes, depois, .. } => {
+                let fica = if para_frente { depois } else { antes };
+                let entrou = if para_frente { antes } else { depois }.is_none();
+                if fica.is_none() {
+                    self.na_mascara = false;
+                } else if entrou {
+                    self.na_mascara = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ------------------------------------------------------------ máscara
+
+    /// O botão da máscara: uma máscara que revela tudo (ou, com `esconder`
+    /// — o ⌥ —, que esconde tudo) na escolhida, que passa a receber o pincel.
+    /// 🔑 Com seleção, a máscara já nasce dela: revela o selecionado (com ⌥,
+    /// esconde), como no Photoshop. Falso se a camada já tem máscara.
+    pub fn adicionar_mascara(&mut self, esconder: bool) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let camada = self.ativa();
+        if self.doc.camadas[camada].mascara.is_some() {
+            return false;
+        }
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let mascara = match self.selecao.as_deref() {
+            None => Mascara::nova(if esconder { 0 } else { 255 }, largura, altura),
+            Some(selecao) => {
+                let mut m = Mascara::nova(if esconder { 255 } else { 0 }, largura, altura);
+                let cor = if esconder { [0; 3] } else { [255; 3] };
+                operacoes::preencher(&mut m.pixels, Some(selecao), cor);
+                m
+            }
+        };
+        self.executar(Comando::Mascara {
+            camada,
+            antes: None,
+            depois: Some(Box::new(mascara)),
+        });
+        true
+    }
+
+    /// Tira a máscara da escolhida (a lixeira com a máscara escolhida).
+    pub fn excluir_mascara(&mut self) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let camada = self.ativa();
+        let Some(antes) = self.doc.camadas[camada].mascara.clone() else {
+            return false;
+        };
+        self.executar(Comando::Mascara {
+            camada,
+            antes: Some(Box::new(antes)),
+            depois: None,
+        });
+        true
+    }
+
+    /// ⇧ + clique na miniatura da máscara: liga ou desliga.
+    pub fn alternar_mascara_de(&mut self, indice: usize) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let Some(antes) = self.doc.camadas.get(indice).and_then(|c| c.mascara.clone()) else {
+            return false;
+        };
+        let mut depois = antes.clone();
+        depois.ativa = !antes.ativa;
+        let comando = Comando::Mascara {
+            camada: indice,
+            antes: Some(Box::new(antes)),
+            depois: Some(Box::new(depois)),
+        };
+        // Como a visibilidade: não muda o que está escolhido.
+        let sujo = comando.aplicar(&mut self.doc, true);
+        self.hist.registrar(comando);
+        self.refazer_a_vista(&sujo);
+        true
     }
 
     /// Uma camada transparente logo acima da escolhida, que passa a ser a
@@ -407,7 +527,7 @@ impl Sessao {
             return false;
         }
         let mudanca = operacoes::colar(&mut self.doc.camadas[camada].pixels, ret, rgba, peso);
-        self.registrar_mudanca(camada, mudanca)
+        self.registrar_mudanca(camada, false, mudanca)
     }
 
     // ------------------------------------------------------------ mover
@@ -424,7 +544,12 @@ impl Sessao {
         if self.selecao.is_some() {
             return self.comecar_a_transformar();
         }
-        self.movendo = Some((ativa, self.doc.camadas[ativa].pixels.clone()));
+        let na_mascara = self.na_mascara();
+        self.movendo = Some((
+            ativa,
+            na_mascara,
+            self.doc.camadas[ativa].alvo(na_mascara).clone(),
+        ));
         true
     }
 
@@ -434,13 +559,13 @@ impl Sessao {
             self.definir_transformacao(Transformacao::deslocamento(dx as f32, dy as f32));
             return;
         }
-        let Some((camada, original)) = self.movendo.as_ref() else {
+        let Some((camada, na_mascara, original)) = self.movendo.as_ref() else {
             return;
         };
-        let camada = *camada;
+        let (camada, na_mascara) = (*camada, *na_mascara);
         let nova = operacoes::deslocada(original, dx, dy);
         let antes = self.doc.camadas[camada].area();
-        self.doc.camadas[camada].pixels = nova;
+        *self.doc.camadas[camada].alvo_mut(na_mascara) = nova;
         let sujo = antes.uniao(&self.doc.camadas[camada].area());
         self.refazer_a_vista(&sujo);
     }
@@ -450,13 +575,17 @@ impl Sessao {
         if self.flutuante.is_some() {
             return self.aplicar_transformacao();
         }
-        let Some((camada, original)) = self.movendo.take() else {
+        let Some((camada, na_mascara, original)) = self.movendo.take() else {
             return false;
         };
-        let mudanca = operacoes::diferenca(&original, &self.doc.camadas[camada].pixels);
+        let mudanca = operacoes::diferenca(&original, self.doc.camadas[camada].alvo(na_mascara));
         match mudanca {
             Some(m) => {
-                self.hist.registrar(Comando::Traco { camada, mudanca: m });
+                self.hist.registrar(Comando::Traco {
+                    camada,
+                    na_mascara,
+                    mudanca: m,
+                });
                 true
             }
             None => false,
@@ -481,7 +610,8 @@ impl Sessao {
         if !self.doc.camadas[camada].visivel {
             return false;
         }
-        let original = self.doc.camadas[camada].pixels.clone();
+        let na_mascara = self.na_mascara();
+        let original = self.doc.camadas[camada].alvo(na_mascara).clone();
         let selecao = self.selecao.clone();
         let Some(conteudo) = Conteudo::da_camada(&original, selecao.as_deref()) else {
             return false;
@@ -496,6 +626,7 @@ impl Sessao {
         let area = conteudo.caixa;
         self.flutuante = Some(Flutuante {
             camada,
+            na_mascara,
             original,
             fundo,
             conteudo,
@@ -530,8 +661,8 @@ impl Sessao {
             });
         let sujo = f.area.uniao(&area_nova);
         f.area = area_nova.uniao(&f.conteudo.caixa);
-        let camada = f.camada;
-        self.doc.camadas[camada].pixels = nova;
+        let (camada, na_mascara) = (f.camada, f.na_mascara);
+        *self.doc.camadas[camada].alvo_mut(na_mascara) = nova;
         self.refazer_a_vista(&sujo);
     }
 
@@ -552,10 +683,11 @@ impl Sessao {
             self.versao += 1;
             self.versao_da_selecao += 1;
         }
-        match operacoes::diferenca(&f.original, &self.doc.camadas[f.camada].pixels) {
+        match operacoes::diferenca(&f.original, self.doc.camadas[f.camada].alvo(f.na_mascara)) {
             Some(m) => {
                 self.hist.registrar(Comando::Traco {
                     camada: f.camada,
+                    na_mascara: f.na_mascara,
                     mudanca: m,
                 });
                 true
@@ -569,7 +701,7 @@ impl Sessao {
         let Some(f) = self.flutuante.take() else {
             return;
         };
-        self.doc.camadas[f.camada].pixels = f.original;
+        *self.doc.camadas[f.camada].alvo_mut(f.na_mascara) = f.original;
         self.refazer_a_vista(&f.area);
     }
 
@@ -608,7 +740,7 @@ impl Sessao {
         camada.pixels = pixels;
         if recortar {
             let mudanca = operacoes::apagar(&mut self.doc.camadas[origem].pixels, &selecao);
-            self.registrar_mudanca(origem, mudanca);
+            self.registrar_mudanca(origem, false, mudanca);
         }
         self.executar(Comando::CriarCamada {
             indice: origem + 1,
@@ -686,7 +818,12 @@ impl Sessao {
     }
 
     /// Um passo de pixels na camada escolhida, feito de uma vez.
-    fn registrar_mudanca(&mut self, camada: usize, mudanca: Option<Mudanca>) -> bool {
+    fn registrar_mudanca(
+        &mut self,
+        camada: usize,
+        na_mascara: bool,
+        mudanca: Option<Mudanca>,
+    ) -> bool {
         let Some(mudanca) = mudanca else {
             return false;
         };
@@ -697,7 +834,11 @@ impl Sessao {
             .fold(Retangulo::default(), |a, (p, _)| {
                 a.uniao(&crate::tiles::retangulo_do_tile(*p, largura, altura))
             });
-        self.hist.registrar(Comando::Traco { camada, mudanca });
+        self.hist.registrar(Comando::Traco {
+            camada,
+            na_mascara,
+            mudanca,
+        });
         self.refazer_a_vista(&sujo);
         true
     }
@@ -708,9 +849,9 @@ impl Sessao {
         let Some(selecao) = self.selecao.clone() else {
             return false;
         };
-        let camada = self.ativa();
-        let mudanca = operacoes::apagar(&mut self.doc.camadas[camada].pixels, &selecao);
-        self.registrar_mudanca(camada, mudanca)
+        let (camada, na_mascara) = (self.ativa(), self.na_mascara());
+        let mudanca = operacoes::apagar(self.doc.camadas[camada].alvo_mut(na_mascara), &selecao);
+        self.registrar_mudanca(camada, na_mascara, mudanca)
     }
 
     /// ⌥Delete: preenche a seleção (ou a camada inteira) com a cor do pincel.
@@ -721,12 +862,72 @@ impl Sessao {
             return false;
         }
         let selecao = self.selecao.clone();
+        let na_mascara = self.na_mascara();
         let mudanca = operacoes::preencher(
-            &mut self.doc.camadas[camada].pixels,
+            self.doc.camadas[camada].alvo_mut(na_mascara),
             selecao.as_deref(),
             self.pincel.cor,
         );
-        self.registrar_mudanca(camada, mudanca)
+        self.registrar_mudanca(camada, na_mascara, mudanca)
+    }
+
+    /// O degradê (G) de `de` até `ate`, em pixels da foto, na seleção ou na
+    /// camada inteira. Na camada, da cor do pincel para o transparente, por
+    /// cima do que ela tem; na máscara, opaco da cor até o oposto dela (preto
+    /// → branco), refazendo a máscara ali — o uso clássico de esmaecer.
+    pub fn degrade(&mut self, de: (f32, f32), ate: (f32, f32)) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let camada = self.ativa();
+        if !self.doc.camadas[camada].visivel {
+            return false;
+        }
+        let na_mascara = self.na_mascara();
+        let cor = self.pincel.cor;
+        let ate_a_cor = na_mascara.then(|| {
+            let cinza = (77 * cor[0] as u32 + 150 * cor[1] as u32 + 29 * cor[2] as u32) >> 8;
+            if cinza < 128 {
+                [255; 3]
+            } else {
+                [0; 3]
+            }
+        });
+        let selecao = self.selecao.clone();
+        let mudanca = operacoes::degrade(
+            self.doc.camadas[camada].alvo_mut(na_mascara),
+            selecao.as_deref(),
+            cor,
+            ate_a_cor,
+            de,
+            ate,
+        );
+        self.registrar_mudanca(camada, na_mascara, mudanca)
+    }
+
+    /// A lata de tinta (⇧G) em `(x, y)`: a área parecida em volta, na camada
+    /// (ou na máscara) escolhida, com a cor do pincel. Tolerância 32.
+    pub fn lata_de_tinta(&mut self, x: f32, y: f32) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let camada = self.ativa();
+        if !self.doc.camadas[camada].visivel || x < 0.0 || y < 0.0 {
+            return false;
+        }
+        let na_mascara = self.na_mascara();
+        let fundo = self.doc.camadas[camada]
+            .mascara
+            .as_ref()
+            .filter(|_| na_mascara)
+            .map(|m| m.fundo);
+        let selecao = self.selecao.clone();
+        let cor = self.pincel.cor;
+        let mudanca = operacoes::lata_de_tinta(
+            self.doc.camadas[camada].alvo_mut(na_mascara),
+            selecao.as_deref(),
+            cor,
+            (x as u32, y as u32),
+            TOLERANCIA_DA_LATA,
+            fundo,
+        );
+        self.registrar_mudanca(camada, na_mascara, mudanca)
     }
 
     /// ⌘E: a escolhida entra na de baixo, com o modo e a opacidade dela.
@@ -767,6 +968,10 @@ impl Sessao {
         if !self.doc.camadas[ativa].visivel {
             return false;
         }
+        // Na máscara só se pinta cinza: o carimbo, o tom e o foco leem a foto.
+        if self.na_mascara() && self.pincel.ferramenta.le_a_foto() {
+            return false;
+        }
         let mut traco = Traco::novo(self.pincel).dentro_de(self.selecao.clone());
         if self.pincel.ferramenta.le_a_foto()
             && self.pincel.ferramenta != crate::pincel::Ferramenta::Carimbo
@@ -793,7 +998,7 @@ impl Sessao {
                 distancia,
             ));
         }
-        let sujo = traco.ate(&mut self.doc.camadas[ativa].pixels, x, y);
+        let sujo = traco.ate(self.doc.camadas[ativa].alvo_mut(self.na_mascara), x, y);
         self.traco = Some(traco);
         self.refazer_a_vista(&sujo);
         true
@@ -802,10 +1007,11 @@ impl Sessao {
     /// O ponteiro andou, apertado.
     pub fn arrastar(&mut self, x: f32, y: f32) {
         let ativa = self.ativa();
+        let na_mascara = self.na_mascara;
         let Some(traco) = self.traco.as_mut() else {
             return;
         };
-        let sujo = traco.ate(&mut self.doc.camadas[ativa].pixels, x, y);
+        let sujo = traco.ate(self.doc.camadas[ativa].alvo_mut(na_mascara), x, y);
         self.refazer_a_vista(&sujo);
     }
 
@@ -816,9 +1022,14 @@ impl Sessao {
             return false;
         };
         let camada = self.ativa();
-        match traco.terminar(&mut self.doc.camadas[camada].pixels) {
+        let na_mascara = self.na_mascara();
+        match traco.terminar(self.doc.camadas[camada].alvo_mut(na_mascara)) {
             Some(mudanca) => {
-                self.hist.registrar(Comando::Traco { camada, mudanca });
+                self.hist.registrar(Comando::Traco {
+                    camada,
+                    na_mascara,
+                    mudanca,
+                });
                 true
             }
             None => false,
@@ -898,9 +1109,8 @@ impl Sessao {
         let passo = self.hist.a_desfazer().cloned();
         match self.hist.desfazer(&mut self.doc) {
             Some(sujo) => {
-                if let Some(i) = passo.and_then(|p| p.camada_depois(false, self.doc.camadas.len()))
-                {
-                    self.ativa = i;
+                if let Some(p) = passo {
+                    self.seguir_o_passo(&p, false);
                 }
                 self.refazer_a_vista(&sujo);
                 true
@@ -929,8 +1139,8 @@ impl Sessao {
         let passo = self.hist.a_refazer().cloned();
         match self.hist.refazer(&mut self.doc) {
             Some(sujo) => {
-                if let Some(i) = passo.and_then(|p| p.camada_depois(true, self.doc.camadas.len())) {
-                    self.ativa = i;
+                if let Some(p) = passo {
+                    self.seguir_o_passo(&p, true);
                 }
                 self.refazer_a_vista(&sujo);
                 true
@@ -1401,5 +1611,167 @@ mod testes {
         assert_ne!(s.vista().imagem().as_raw(), pintada.as_raw());
         s.desfazer();
         assert_eq!(s.vista().imagem().as_raw(), pintada.as_raw());
+    }
+
+    /// Uma camada de vermelho cheio por cima da foto, numa sessão nova.
+    fn vermelha() -> Sessao {
+        let mut s = sessao();
+        s.selecionar_tudo();
+        s.pincel.cor = [255, 0, 0];
+        assert!(s.preencher_selecao());
+        s.desmarcar();
+        s
+    }
+
+    #[test]
+    fn a_mascara_esconde_onde_e_preta_e_volta_ao_desligar() {
+        let mut s = vermelha();
+        let base = s.base().clone();
+        assert!(s.adicionar_mascara(false));
+        assert!(s.na_mascara(), "a máscara nova recebe o pincel");
+        assert!(!s.adicionar_mascara(false), "uma só por camada");
+        assert_eq!(
+            s.cor_em(10.0, 10.0),
+            Some([255, 0, 0]),
+            "branca revela tudo"
+        );
+        // Preto na máscara: a foto aparece ali.
+        s.pincel.cor = [0, 0, 0];
+        s.pincel.raio = 20.0;
+        s.pincel.dureza = 1.0;
+        assert!(s.apertar(100.0, 100.0));
+        s.soltar();
+        assert_eq!(s.cor_em(100.0, 100.0), Some(base.get_pixel(100, 100).0));
+        assert_eq!(s.cor_em(400.0, 400.0), Some([255, 0, 0]));
+        assert!(
+            s.documento().camadas[0].pixels.pixel(100, 100) == [255, 0, 0, 255],
+            "a camada ficou intacta"
+        );
+        assert_eq!(
+            s.historico().a_desfazer().unwrap().descricao(s.documento()),
+            "Pincel na máscara"
+        );
+        // ⇧ + clique: desligada, a camada aparece inteira.
+        assert!(s.alternar_mascara_de(0));
+        assert_eq!(s.cor_em(100.0, 100.0), Some([255, 0, 0]));
+        assert!(s.desfazer());
+        assert_eq!(s.cor_em(100.0, 100.0), Some(base.get_pixel(100, 100).0));
+        // Pintar nos pixels de novo, e a borracha na máscara devolve o fundo.
+        s.escolher_camada(0);
+        assert!(!s.na_mascara());
+        assert!(s.escolher_mascara(0));
+        s.pincel.ferramenta = Ferramenta::Borracha;
+        s.apertar(100.0, 100.0);
+        s.soltar();
+        assert_eq!(s.cor_em(100.0, 100.0), Some([255, 0, 0]));
+        // O carimbo não pinta na máscara.
+        s.pincel.ferramenta = Ferramenta::Carimbo;
+        s.definir_origem(10.0, 10.0);
+        assert!(!s.apertar(200.0, 200.0));
+        // Excluir a máscara, e desfazer devolve tudo, com o pincel nela.
+        assert!(s.excluir_mascara());
+        assert!(!s.na_mascara());
+        assert!(s.desfazer());
+        assert!(s.documento().camadas[0].mascara.is_some());
+        // Desfazer até antes da máscara: ela sai e o alvo volta aos pixels.
+        while s.documento().camadas[0].mascara.is_some() {
+            assert!(s.desfazer());
+        }
+        assert!(!s.na_mascara());
+        assert_eq!(s.cor_em(100.0, 100.0), Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn a_mascara_com_alt_esconde_tudo_e_a_selecao_vira_mascara() {
+        let mut s = vermelha();
+        let base = s.base().clone();
+        assert!(s.adicionar_mascara(true));
+        assert!(s.documento().neutro(), "escondendo tudo, a foto é a base");
+        assert_eq!(s.cor_em(10.0, 10.0), Some(base.get_pixel(10, 10).0));
+        s.desfazer();
+
+        // Com seleção, só o selecionado aparece (com ⌥, só ele some).
+        s.escolher_camada(0);
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(300, 200, 100, 100)),
+            Operacao::Nova,
+        );
+        assert!(s.adicionar_mascara(false));
+        assert_eq!(s.cor_em(350.0, 250.0), Some([255, 0, 0]));
+        assert_eq!(s.cor_em(10.0, 10.0), Some(base.get_pixel(10, 10).0));
+        s.desfazer();
+        assert!(s.adicionar_mascara(true));
+        assert_eq!(s.cor_em(350.0, 250.0), Some(base.get_pixel(350, 250).0));
+        assert_eq!(s.cor_em(10.0, 10.0), Some([255, 0, 0]));
+    }
+
+    #[test]
+    fn o_degrade_na_mascara_esmaece_a_camada_e_a_lata_preenche() {
+        let mut s = vermelha();
+        let base = s.base().clone();
+        s.adicionar_mascara(false);
+        s.pincel.cor = [0, 0, 0];
+        assert!(s.degrade((100.0, 0.0), (700.0, 0.0)));
+        assert_eq!(
+            s.cor_em(50.0, 300.0),
+            Some(base.get_pixel(50, 300).0),
+            "começo escondido"
+        );
+        assert_eq!(s.cor_em(750.0, 300.0), Some([255, 0, 0]), "fim revelado");
+        let meio = s.cor_em(400.0, 300.0).unwrap();
+        assert!(
+            meio[0] > base.get_pixel(400, 300).0[0] && meio[0] < 255,
+            "meio a meio"
+        );
+        assert_eq!(
+            s.historico().a_desfazer().unwrap().descricao(s.documento()),
+            "Pincel na máscara"
+        );
+
+        // A lata na máscara: a área preta toda (antes do degradê) volta a branco.
+        s.pincel.cor = [255, 255, 255];
+        assert!(s.lata_de_tinta(10.0, 10.0));
+        assert_eq!(s.cor_em(10.0, 300.0), Some([255, 0, 0]));
+
+        // Na camada: a lata pinta o vermelho todo (é tudo igual) de azul.
+        s.escolher_camada(0);
+        s.pincel.cor = [0, 0, 255];
+        assert!(s.lata_de_tinta(10.0, 10.0));
+        assert_eq!(
+            s.documento().camadas[0].pixels.pixel(799, 599),
+            [0, 0, 255, 255]
+        );
+    }
+
+    #[test]
+    fn o_mover_e_o_delete_na_mascara_mexem_so_nela() {
+        let mut s = vermelha();
+        let base = s.base().clone();
+        s.adicionar_mascara(true);
+        // Revela um quadrado e o leva para o lado com o Mover.
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(0, 0, 100, 100)),
+            Operacao::Nova,
+        );
+        s.pincel.cor = [255, 255, 255];
+        assert!(s.preencher_selecao());
+        s.desmarcar();
+        assert_eq!(s.cor_em(50.0, 50.0), Some([255, 0, 0]));
+        assert!(s.comecar_a_mover());
+        s.mover_por(300, 0);
+        assert!(s.terminar_de_mover());
+        assert_eq!(s.cor_em(50.0, 50.0), Some(base.get_pixel(50, 50).0));
+        assert_eq!(s.cor_em(350.0, 50.0), Some([255, 0, 0]));
+        assert_eq!(
+            s.documento().camadas[0].pixels.pixel(50, 50),
+            [255, 0, 0, 255]
+        );
+        // Delete na máscara devolve o fundo (esconde, aqui).
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(300, 0, 100, 100)),
+            Operacao::Nova,
+        );
+        assert!(s.apagar_selecao());
+        assert_eq!(s.cor_em(350.0, 50.0), Some(base.get_pixel(350, 50).0));
     }
 }

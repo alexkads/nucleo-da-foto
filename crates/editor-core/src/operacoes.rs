@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::documento::Camada;
+use crate::documento::{Camada, Mascara};
 use crate::mesclagem::mesclar_em_camada;
 use crate::pincel::Mudanca;
 use crate::retangulo::Retangulo;
@@ -122,22 +122,262 @@ pub fn preencher(
     })
 }
 
-/// Mescla `cima` em `baixo` (⌘E), com o modo e a opacidade de `cima`. A de
-/// baixo guarda o modo e a opacidade dela, como no Photoshop.
+/// Mescla `cima` em `baixo` (⌘E), com o modo, a opacidade e a máscara de
+/// `cima` (a máscara é aplicada: o escondido não desce). A de baixo guarda o
+/// modo, a opacidade e a máscara dela, como no Photoshop.
 pub fn mesclar_na_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<Mudanca> {
     let posicoes: Vec<Posicao> = cima.pixels.existentes().map(|(p, _)| *p).collect();
+    let mascara = cima.mascara_ativa();
     refazer_tiles(baixo, posicoes, |posicao, velho| {
         let de_cima = cima.pixels.tile(posicao)?;
+        let m = mascara.map(|m| (m.pixels.tile(posicao), m.fundo));
+        if let Some((None, 0)) = m {
+            return None;
+        }
         let mut novo = velho.map_or_else(|| vec![0; BYTES_DO_TILE], |t| t.as_ref().clone());
         for k in (0..BYTES_DO_TILE).step_by(4) {
             let c = [de_cima[k], de_cima[k + 1], de_cima[k + 2], de_cima[k + 3]];
             if c[3] == 0 {
                 continue;
             }
+            let opacidade = match m {
+                None => cima.opacidade,
+                Some((None, fundo)) => cima.opacidade * fundo as f32 / 255.0,
+                Some((Some(t), fundo)) => {
+                    let v = Mascara::valor_do_pixel(fundo, [t[k], t[k + 1], t[k + 2], t[k + 3]]);
+                    cima.opacidade * v as f32 / 255.0
+                }
+            };
+            if opacidade <= 0.0 {
+                continue;
+            }
             let b = [novo[k], novo[k + 1], novo[k + 2], novo[k + 3]];
-            novo[k..k + 4].copy_from_slice(&mesclar_em_camada(b, c, cima.opacidade, cima.modo));
+            novo[k..k + 4].copy_from_slice(&mesclar_em_camada(b, c, opacidade, cima.modo));
         }
         Some(novo)
+    })
+}
+
+/// O degradê (G), de `de` até `ate` em pixels da foto, dentro da seleção (ou
+/// na camada inteira).
+///
+/// - `ate_a_cor = None` — **da cor para o transparente**, por cima do que a
+///   camada tem: escurecer um céu numa camada vazia.
+/// - `ate_a_cor = Some(c)` — **opaco, da cor até `c`**, no lugar do que havia:
+///   o degradê da máscara (preto → branco) refeito do zero, como o do
+///   Photoshop com as cores de frente e de fundo.
+pub fn degrade(
+    camada: &mut CamadaDePixels,
+    selecao: Option<&Selecao>,
+    cor: [u8; 3],
+    ate_a_cor: Option<[u8; 3]>,
+    de: (f32, f32),
+    ate: (f32, f32),
+) -> Option<Mudanca> {
+    let (largura, altura) = (camada.largura(), camada.altura());
+    let (vx, vy) = (ate.0 - de.0, ate.1 - de.1);
+    let comprimento2 = vx * vx + vy * vy;
+    if comprimento2 < 1.0 {
+        return None;
+    }
+    // A posição ao longo do degradê: 0 no começo, 1 no fim.
+    let t = |x: f32, y: f32| ((x - de.0) * vx + (y - de.1) * vy) / comprimento2;
+    let area = selecao.map_or(Retangulo::inteiro(largura, altura), Selecao::limites);
+    let posicoes: Vec<Posicao> = camada
+        .tiles_do_retangulo(&area)
+        .into_iter()
+        .filter(|p| {
+            // Da cor para o transparente, o tile todo depois do fim não muda.
+            let r = retangulo_do_tile(*p, largura, altura);
+            ate_a_cor.is_some()
+                || [
+                    (r.x, r.y),
+                    (r.direita(), r.y),
+                    (r.x, r.baixo()),
+                    (r.direita(), r.baixo()),
+                ]
+                .iter()
+                .any(|&(x, y)| t(x as f32, y as f32) < 1.0)
+        })
+        .collect();
+    let pincel = crate::pincel::Pincel {
+        cor,
+        opacidade: 1.0,
+        ..Default::default()
+    };
+    refazer_tiles(camada, posicoes, |posicao, velho| {
+        let m = selecao.map_or(Err(255), |s| s.do_tile(posicao));
+        if let Err(0) = m {
+            return None;
+        }
+        let pedaco = retangulo_do_tile(posicao, largura, altura);
+        let mut novo = velho.map_or_else(|| vec![0; BYTES_DO_TILE], |t| t.as_ref().clone());
+        for ly in 0..pedaco.altura {
+            for lx in 0..pedaco.largura {
+                let v = mascara(&m, lx, ly) as f32 / 255.0;
+                if v <= 0.0 {
+                    continue;
+                }
+                let k =
+                    t((pedaco.x + lx) as f32 + 0.5, (pedaco.y + ly) as f32 + 0.5).clamp(0.0, 1.0);
+                let i = indice(lx, ly);
+                let antes = [novo[i], novo[i + 1], novo[i + 2], novo[i + 3]];
+                let depois = match ate_a_cor {
+                    None => {
+                        let cobertura = ((1.0 - k) * v * 255.0).round() as u8;
+                        if cobertura == 0 {
+                            continue;
+                        }
+                        crate::pincel::aplicar(&pincel, antes, cobertura)
+                    }
+                    Some(fim) => {
+                        let c = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * k).round() as u8;
+                        let cheio = [c(cor[0], fim[0]), c(cor[1], fim[1]), c(cor[2], fim[2]), 255];
+                        if v >= 1.0 {
+                            cheio
+                        } else {
+                            mesclar_em_camada(antes, cheio, v, crate::mesclagem::Modo::Normal)
+                        }
+                    }
+                };
+                novo[i..i + 4].copy_from_slice(&depois);
+            }
+        }
+        Some(novo)
+    })
+}
+
+/// A lata de tinta (⇧G): pinta com `cor` a área contínua em volta de `(x, y)`
+/// cuja amostra difere da do ponto no máximo `tolerancia` em cada canal (32,
+/// como no Photoshop). A amostra é a da própria camada — numa camada vazia,
+/// o transparente todo; na máscara, o valor dela (`fundo` = o de onde não se
+/// pintou). Com seleção, não passa da borda dela.
+pub fn lata_de_tinta(
+    camada: &mut CamadaDePixels,
+    selecao: Option<&Selecao>,
+    cor: [u8; 3],
+    (x, y): (u32, u32),
+    tolerancia: u8,
+    fundo_da_mascara: Option<u8>,
+) -> Option<Mudanca> {
+    let (largura, altura) = (camada.largura(), camada.altura());
+    if x >= largura || y >= altura || selecao.is_some_and(|s| s.valor(x, y) == 0) {
+        return None;
+    }
+    let amostra = |p: [u8; 4]| -> [u8; 4] {
+        match fundo_da_mascara {
+            Some(f) => {
+                let v = crate::documento::Mascara::valor_do_pixel(f, p);
+                [v, v, v, 255]
+            }
+            // O transparente é um só, seja qual for a cor guardada nele.
+            None if p[3] == 0 => [0; 4],
+            None => p,
+        }
+    };
+    let alvo = amostra(camada.pixel(x, y));
+    let tol = tolerancia as i16;
+    let parecido = |p: [u8; 4]| (0..4).all(|i| (p[i] as i16 - alvo[i] as i16).abs() <= tol);
+    let (l, a) = (largura as usize, altura as usize);
+    // 🔑 **Onde a tinta pode entrar, montado tile a tile** — e não perguntando
+    // ao mapa de tiles por cada um dos 24 milhões de pixels. Tile que não
+    // existe é uma amostra só.
+    let mut livre = vec![false; l * a];
+    let vazio_serve = parecido(amostra([0; 4]));
+    for posicao in camada.tiles_do_retangulo(&Retangulo::inteiro(largura, altura)) {
+        let pedaco = retangulo_do_tile(posicao, largura, altura);
+        let m = selecao.map_or(Err(255), |s| s.do_tile(posicao));
+        if let Err(0) = m {
+            continue;
+        }
+        let tile = camada.tile(posicao);
+        if tile.is_none() && !vazio_serve {
+            continue;
+        }
+        for ly in 0..pedaco.altura {
+            let linha = (pedaco.y + ly) as usize * l + pedaco.x as usize;
+            for lx in 0..pedaco.largura {
+                if mascara(&m, lx, ly) == 0 {
+                    continue;
+                }
+                livre[linha + lx as usize] = match tile {
+                    None => true,
+                    Some(t) => {
+                        let i = indice(lx, ly);
+                        parecido(amostra([t[i], t[i + 1], t[i + 2], t[i + 3]]))
+                    }
+                };
+            }
+        }
+    }
+    // Por linhas: cada trecho contínuo entra de uma vez, e as linhas de cima e
+    // de baixo dele vão para a pilha.
+    let mut cheio = vec![false; l * a];
+    let mut pilha = vec![(x as usize, y as usize)];
+    let pode = |cheio: &[bool], x: usize, y: usize| livre[y * l + x] && !cheio[y * l + x];
+    let mut limites = Retangulo::default();
+    while let Some((px, py)) = pilha.pop() {
+        if !pode(&cheio, px, py) {
+            continue;
+        }
+        let mut x0 = px;
+        while x0 > 0 && pode(&cheio, x0 - 1, py) {
+            x0 -= 1;
+        }
+        let mut x1 = px;
+        while x1 + 1 < l && pode(&cheio, x1 + 1, py) {
+            x1 += 1;
+        }
+        cheio[py * l + x0..=py * l + x1].fill(true);
+        limites = limites.uniao(&Retangulo::novo(
+            x0 as u32,
+            py as u32,
+            (x1 - x0 + 1) as u32,
+            1,
+        ));
+        for ny in [py.wrapping_sub(1), py + 1] {
+            if ny >= a {
+                continue;
+            }
+            let mut xx = x0;
+            while xx <= x1 {
+                if pode(&cheio, xx, ny) {
+                    pilha.push((xx, ny));
+                    // Um por trecho: pula o resto do trecho contínuo.
+                    while xx <= x1 && pode(&cheio, xx, ny) {
+                        xx += 1;
+                    }
+                } else {
+                    xx += 1;
+                }
+            }
+        }
+    }
+    let posicoes = camada.tiles_do_retangulo(&limites);
+    let pincel = crate::pincel::Pincel {
+        cor,
+        opacidade: 1.0,
+        ..Default::default()
+    };
+    refazer_tiles(camada, posicoes, |posicao, velho| {
+        let pedaco = retangulo_do_tile(posicao, largura, altura);
+        let m = selecao.map_or(Err(255), |s| s.do_tile(posicao));
+        let mut novo = velho.map_or_else(|| vec![0; BYTES_DO_TILE], |t| t.as_ref().clone());
+        let mut mexeu = false;
+        for ly in 0..pedaco.altura {
+            for lx in 0..pedaco.largura {
+                let (fx, fy) = ((pedaco.x + lx) as usize, (pedaco.y + ly) as usize);
+                if !cheio[fy * l + fx] {
+                    continue;
+                }
+                let v = mascara(&m, lx, ly);
+                let i = indice(lx, ly);
+                let antes = [novo[i], novo[i + 1], novo[i + 2], novo[i + 3]];
+                novo[i..i + 4].copy_from_slice(&crate::pincel::aplicar(&pincel, antes, v));
+                mexeu = true;
+            }
+        }
+        mexeu.then_some(novo)
     })
 }
 
@@ -261,6 +501,16 @@ pub fn miniatura(camada: &CamadaDePixels, largura: u32, altura: u32) -> Vec<u8> 
     saida
 }
 
+/// A miniatura da máscara: o valor dela em cinza, opaco.
+pub fn miniatura_da_mascara(mascara: &Mascara, largura: u32, altura: u32) -> Vec<u8> {
+    let mut saida = miniatura(&mascara.pixels, largura, altura);
+    for p in saida.as_chunks_mut::<4>().0 {
+        let v = Mascara::valor_do_pixel(mascara.fundo, *p);
+        *p = [v, v, v, 255];
+    }
+    saida
+}
+
 #[cfg(test)]
 mod testes {
     use super::*;
@@ -375,5 +625,129 @@ mod testes {
         let m = miniatura(&c, 4, 2);
         assert_eq!(m.len(), 4 * 2 * 4);
         assert_eq!(&m[..4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn o_degrade_vai_da_cor_ao_transparente_por_cima_e_opaco_na_mascara() {
+        let mut c = CamadaDePixels::nova(600, 100);
+        let m = degrade(
+            &mut c,
+            None,
+            [0, 0, 255],
+            None,
+            (100.0, 50.0),
+            (500.0, 50.0),
+        )
+        .unwrap();
+        assert_eq!(
+            c.pixel(50, 10),
+            [0, 0, 255, 255],
+            "antes do começo, a cor cheia"
+        );
+        let meio = c.pixel(300, 10)[3];
+        assert!(
+            (120..=135).contains(&meio),
+            "no meio, meio transparente ({meio})"
+        );
+        assert_eq!(c.pixel(550, 10)[3], 0, "depois do fim, nada");
+        assert!(
+            m.depois.iter().all(|(p, _)| p.0 < 2),
+            "o tile todo depois do fim nem é tocado"
+        );
+        // Opaco (o da máscara): preto → branco, refeito por cima do que havia.
+        let mut mascara = cheia(600, 100, [0, 255, 0, 255]);
+        degrade(
+            &mut mascara,
+            None,
+            [0; 3],
+            Some([255; 3]),
+            (0.0, 0.0),
+            (600.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(mascara.pixel(0, 5), [0, 0, 0, 255]);
+        assert_eq!(mascara.pixel(599, 5), [255, 255, 255, 255]);
+        assert!((120..=135).contains(&mascara.pixel(300, 5)[0]));
+        // Sem comprimento, nada.
+        assert!(degrade(&mut c, None, [1; 3], None, (5.0, 5.0), (5.2, 5.0)).is_none());
+    }
+
+    #[test]
+    fn a_lata_pinta_so_a_area_parecida_e_continua() {
+        // Um quadrado vermelho numa camada vazia, e um vermelho solto longe.
+        let mut c = CamadaDePixels::nova(600, 400);
+        preencher(
+            &mut c,
+            Some(&Selecao::da_forma(
+                600,
+                400,
+                &Forma::Retangulo(Retangulo::novo(100, 100, 100, 100)),
+            )),
+            [255, 0, 0],
+        );
+        preencher(
+            &mut c,
+            Some(&Selecao::da_forma(
+                600,
+                400,
+                &Forma::Retangulo(Retangulo::novo(400, 300, 20, 20)),
+            )),
+            [250, 5, 0],
+        );
+        // Dentro do quadrado: só ele (o solto é parecido, mas não encosta).
+        lata_de_tinta(&mut c, None, [0, 255, 0], (150, 150), 32, None).unwrap();
+        assert_eq!(c.pixel(150, 150), [0, 255, 0, 255]);
+        assert_eq!(c.pixel(410, 310), [250, 5, 0, 255], "o solto não foi");
+        assert_eq!(c.pixel(50, 50)[3], 0, "nem o transparente em volta");
+        // No transparente: tudo menos os dois quadrados.
+        lata_de_tinta(&mut c, None, [0, 0, 255], (10, 10), 32, None).unwrap();
+        assert_eq!(c.pixel(599, 399), [0, 0, 255, 255]);
+        assert_eq!(c.pixel(150, 150), [0, 255, 0, 255]);
+        // A seleção é parede.
+        let mut d = CamadaDePixels::nova(600, 400);
+        let s = Selecao::da_forma(600, 400, &Forma::Retangulo(Retangulo::novo(0, 0, 300, 400)));
+        lata_de_tinta(&mut d, Some(&s), [9, 9, 9], (10, 10), 32, None).unwrap();
+        assert_eq!(d.pixel(299, 10)[3], 255);
+        assert_eq!(d.pixel(300, 10)[3], 0);
+        assert!(lata_de_tinta(&mut d, Some(&s), [9, 9, 9], (500, 10), 32, None).is_none());
+    }
+
+    #[test]
+    fn a_mesclagem_aplica_a_mascara_de_quem_desce() {
+        let mut cima = Camada::nova("c", 300, 10);
+        cima.pixels = cheia(300, 10, [255, 0, 0, 255]);
+        let mut m = Mascara::nova(255, 300, 10);
+        m.pixels = cheia(300, 10, [0, 0, 0, 255]);
+        // Revela de volta só a metade de cima do tile 1.
+        preencher(
+            &mut m.pixels,
+            Some(&Selecao::da_forma(
+                300,
+                10,
+                &Forma::Retangulo(Retangulo::novo(256, 0, 44, 10)),
+            )),
+            [255; 3],
+        );
+        cima.mascara = Some(m);
+        let mut baixo = CamadaDePixels::nova(300, 10);
+        mesclar_na_de_baixo(&mut baixo, &cima).unwrap();
+        assert_eq!(baixo.pixel(10, 5)[3], 0, "o escondido não desceu");
+        assert_eq!(baixo.pixel(280, 5), [255, 0, 0, 255]);
+        // Desligada, a máscara não conta.
+        cima.mascara.as_mut().unwrap().ativa = false;
+        let mut baixo = CamadaDePixels::nova(300, 10);
+        mesclar_na_de_baixo(&mut baixo, &cima).unwrap();
+        assert_eq!(baixo.pixel(10, 5), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn o_valor_da_mascara_e_o_cinza_sobre_o_fundo() {
+        assert_eq!(Mascara::valor_do_pixel(255, [0, 0, 0, 0]), 255);
+        assert_eq!(Mascara::valor_do_pixel(0, [0, 0, 0, 0]), 0);
+        assert_eq!(Mascara::valor_do_pixel(255, [0, 0, 0, 255]), 0);
+        assert_eq!(Mascara::valor_do_pixel(0, [255, 255, 255, 255]), 255);
+        assert_eq!(Mascara::valor_do_pixel(255, [0, 0, 0, 128]), 127);
+        // Uma cor vira o cinza dela.
+        assert_eq!(Mascara::valor_do_pixel(0, [255, 0, 0, 255]), 77);
     }
 }

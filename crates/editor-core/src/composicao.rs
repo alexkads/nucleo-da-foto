@@ -13,7 +13,7 @@
 
 use image::RgbImage;
 
-use crate::documento::{Camada, Documento};
+use crate::documento::{Camada, Documento, Mascara};
 use crate::mesclagem::{mesclar, Modo};
 use crate::retangulo::Retangulo;
 use crate::tiles::{indice, retangulo_do_tile, CamadaDePixels, LADO_DO_TILE};
@@ -23,6 +23,10 @@ use crate::tiles::{indice, retangulo_do_tile, CamadaDePixels, LADO_DO_TILE};
 pub fn sobre(baixo: [u8; 3], cima: [u8; 4], opacidade: f32) -> [u8; 3] {
     mesclar(baixo, cima, opacidade, Modo::Normal)
 }
+
+/// Um tile de camada na composição: os pixels, a opacidade (já com a máscara
+/// quando ela é lisa no tile), o modo, e a máscara do tile com o fundo dela.
+type TileNaComposicao<'a> = (&'a [u8], f32, Modo, Option<(&'a [u8], u8)>);
 
 /// A imagem editada em resolução cheia.
 pub fn compor(base: &RgbImage, doc: &Documento) -> RgbImage {
@@ -78,12 +82,20 @@ fn compor_deslocado(
     for posicao in referencia.tiles_do_retangulo(&ret) {
         let pedaco = retangulo_do_tile(posicao, largura, altura).limitado(largura, altura);
         let pedaco = interseccao(&pedaco, &ret);
-        let tiles: Vec<(&[u8], f32, Modo)> = camadas
+        // A máscara de cada camada neste tile: sem tile pintado nela, o tile
+        // inteiro vale o fundo — e entra na opacidade de uma vez.
+        let tiles: Vec<TileNaComposicao> = camadas
             .iter()
             .filter_map(|c| {
-                c.pixels
-                    .tile(posicao)
-                    .map(|t| (t.as_slice(), c.opacidade, c.modo))
+                let t = c.pixels.tile(posicao)?.as_slice();
+                match c.mascara_ativa() {
+                    None => Some((t, c.opacidade, c.modo, None)),
+                    Some(m) => match m.pixels.tile(posicao) {
+                        Some(mt) => Some((t, c.opacidade, c.modo, Some((mt.as_slice(), m.fundo)))),
+                        None if m.fundo == 0 => None,
+                        None => Some((t, c.opacidade * m.fundo as f32 / 255.0, c.modo, None)),
+                    },
+                }
             })
             .collect();
         for y in pedaco.y..pedaco.baixo() {
@@ -100,11 +112,24 @@ fn compor_deslocado(
                 let i = y as usize * largura_em_bytes + x as usize * 3;
                 let mut pixel = [fonte[i], fonte[i + 1], fonte[i + 2]];
                 let j = indice(x % LADO_DO_TILE, ty);
-                for (tile, opacidade, modo) in &tiles {
+                for (tile, opacidade, modo, mascara) in &tiles {
+                    let opacidade = match mascara {
+                        None => *opacidade,
+                        Some((m, fundo)) => {
+                            let v = Mascara::valor_do_pixel(
+                                *fundo,
+                                [m[j], m[j + 1], m[j + 2], m[j + 3]],
+                            );
+                            if v == 0 {
+                                continue;
+                            }
+                            *opacidade * v as f32 / 255.0
+                        }
+                    };
                     pixel = mesclar(
                         pixel,
                         [tile[j], tile[j + 1], tile[j + 2], tile[j + 3]],
-                        *opacidade,
+                        opacidade,
                         *modo,
                     );
                 }
