@@ -8,9 +8,13 @@
 //! que ele toca.
 //!
 //! As formas viram máscara na hora (rasterizadas): retângulo de borda exata,
-//! elipse com um pixel de anti-aliasing, laço pelo centro de cada pixel (par e
-//! ímpar). Somar (⇧) é o máximo das duas, subtrair (⌥) é `a · (1 − b)`, cruzar
-//! (⇧⌥) é o mínimo.
+//! elipse e laço com ou sem antisserrilhado ([`Acabamento`]) — sem ele, pelo
+//! centro de cada pixel (par e ímpar no laço); com ele, um pixel de rampa na
+//! elipse e a cobertura de verdade no laço (quatro linhas por pixel, a área
+//! exata na horizontal). A difusão do acabamento é a da forma **antes** de
+//! entrar na seleção, como o "Difusão" da barra de opções do Photoshop.
+//! Somar (⇧) é o máximo das duas, subtrair (⌥) é `a · (1 − b)`, cruzar (⇧⌥) é
+//! o mínimo.
 //!
 //! A seleção **entra no desfazer** como no Photoshop (`Comando::Selecao`, desde
 //! a etapa 13), mas **não vai para o projeto**: não muda pixel, e a seleção não
@@ -90,6 +94,67 @@ fn maximo(d: &mut [u8], l: usize, a: usize, r: usize, horizontal: bool) {
     }
 }
 
+/// Os cruzamentos das arestas do polígono com a linha horizontal `yc`,
+/// ordenados — dentro é entre o 1º e o 2º, o 3º e o 4º… (par e ímpar).
+fn cortes(pontos: &[(f32, f32)], yc: f32) -> Vec<f32> {
+    let mut cortes = Vec::new();
+    for i in 0..pontos.len() {
+        let (ax, ay) = pontos[i];
+        let (bx, by) = pontos[(i + 1) % pontos.len()];
+        if (ay <= yc) != (by <= yc) {
+            cortes.push(ax + (yc - ay) / (by - ay) * (bx - ax));
+        }
+    }
+    cortes.sort_by(f32::total_cmp);
+    cortes
+}
+
+/// Quantas linhas por pixel o laço antisserrilhado amostra.
+const LINHAS_POR_PIXEL: usize = 4;
+
+/// O polígono rasterizado em `caixa`, um byte por pixel. Sem `suavizar`, pelo
+/// centro de cada pixel; com ele, a cobertura: quatro linhas por pixel, e em
+/// cada uma a fração exata de cada pixel que cai dentro.
+fn cobertura_do_poligono(pontos: &[(f32, f32)], caixa: &Retangulo, suavizar: bool) -> Vec<u8> {
+    let (l, a) = (caixa.largura as usize, caixa.altura as usize);
+    let mut saida = vec![0u8; l * a];
+    let mut soma = vec![0f32; l];
+    let (xa, xb) = (caixa.x as f32, caixa.direita() as f32);
+    for linha in 0..a {
+        let y = (caixa.y as usize + linha) as f32;
+        let fora = &mut saida[linha * l..(linha + 1) * l];
+        if !suavizar {
+            let c = cortes(pontos, y + 0.5);
+            for (i, v) in fora.iter_mut().enumerate() {
+                let xc = xa + i as f32 + 0.5;
+                if c.iter().take_while(|k| **k <= xc).count() % 2 == 1 {
+                    *v = 255;
+                }
+            }
+            continue;
+        }
+        soma.iter_mut().for_each(|s| *s = 0.0);
+        for k in 0..LINHAS_POR_PIXEL {
+            let c = cortes(pontos, y + (k as f32 + 0.5) / LINHAS_POR_PIXEL as f32);
+            for par in c.as_chunks::<2>().0 {
+                let (de, ate) = (par[0].max(xa), par[1].min(xb));
+                if ate <= de {
+                    continue;
+                }
+                let (i0, i1) = ((de - xa) as usize, ((ate - xa).ceil() as usize).min(l));
+                for (i, s) in soma.iter_mut().enumerate().take(i1).skip(i0) {
+                    let x = xa + i as f32;
+                    *s += (ate.min(x + 1.0) - de.max(x)).max(0.0);
+                }
+            }
+        }
+        for (v, s) in fora.iter_mut().zip(&soma) {
+            *v = (s / LINHAS_POR_PIXEL as f32 * 255.0).round().min(255.0) as u8;
+        }
+    }
+    saida
+}
+
 const BYTES: usize = (LADO_DO_TILE * LADO_DO_TILE) as usize;
 
 /// Uma forma desenhada, em pixels da foto.
@@ -98,8 +163,235 @@ pub enum Forma {
     Retangulo(Retangulo),
     /// A elipse inscrita no retângulo.
     Elipse(Retangulo),
-    /// Os vértices do laço, fechado do último ao primeiro.
+    /// A elipse inscrita na caixa `(x0, y0, x1, y1)`, que pode passar da foto:
+    /// o pedaço de fora se perde, sem achatar a elipse (o `Retangulo` não tem
+    /// canto negativo, e cortá-lo antes mudaria a forma).
+    ElipseNaCaixa(f32, f32, f32, f32),
+    /// Os vértices do laço, fechado do último ao primeiro (o laço livre e o
+    /// poligonal).
     Laco(Vec<(f32, f32)>),
+}
+
+/// Como a forma vira máscara: a borda antisserrilhada e a difusão, em pixels
+/// do documento — as opções da ferramenta valem para a **próxima** seleção, e
+/// nunca mudam a que já existe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Acabamento {
+    /// Antisserrilhado na elipse e no laço (o retângulo é sempre exato).
+    pub suavizar: bool,
+    /// Difusão da forma antes de entrar na seleção (0 = borda como desenhada).
+    pub difusao: u32,
+}
+
+impl Default for Acabamento {
+    /// O padrão do Photoshop: antisserrilhado ligado, difusão 0.
+    fn default() -> Self {
+        Self {
+            suavizar: true,
+            difusao: 0,
+        }
+    }
+}
+
+/// O estilo da seleção retangular e da elíptica ("Estilo" na barra de opções do
+/// Photoshop). Tudo em pixels **do documento**: zoom e giro da vista não mudam
+/// nada.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Estilo {
+    /// O arrasto decide a caixa (⇧ quadrado, ⌥ do centro).
+    #[default]
+    Normal,
+    /// A razão largura:altura fica presa; o arrasto decide o tamanho.
+    Proporcao { largura: f32, altura: f32 },
+    /// Largura e altura exatas; o arrasto só leva a caixa.
+    Tamanho { largura: u32, altura: u32 },
+}
+
+impl Estilo {
+    /// As predefinições de proporção da barra.
+    pub const PROPORCOES: [(u32, u32); 4] = [(1, 1), (3, 2), (4, 3), (16, 9)];
+
+    /// Largura e altura trocadas (o ⇄ da barra).
+    pub fn trocado(self) -> Self {
+        match self {
+            Estilo::Normal => Estilo::Normal,
+            Estilo::Proporcao { largura, altura } => Estilo::Proporcao {
+                largura: altura,
+                altura: largura,
+            },
+            Estilo::Tamanho { largura, altura } => Estilo::Tamanho {
+                largura: altura,
+                altura: largura,
+            },
+        }
+    }
+}
+
+/// O sinal de um deslocamento, com o zero para a frente (`f32::signum(0.0)` é
+/// 1, mas `-0.0` daria −1).
+fn sentido(d: f32) -> f32 {
+    if d < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
+/// Os dois cantos opostos da caixa de um arrasto de seleção, em pixels da foto
+/// (sem ordenar e sem cortar na foto).
+///
+/// Como os modificadores conversam com o estilo — a regra desta casa, a mesma
+/// do Photoshop onde ele é claro:
+///
+/// | estilo | ⇧ no arrasto | ⌥ no arrasto | Espaço |
+/// |---|---|---|---|
+/// | Normal | quadrado/círculo | do centro | reposiciona (quem chama anda `inicio`) |
+/// | Proporção fixa | nada (a razão já prende) | do centro, com a razão | reposiciona |
+/// | Tamanho fixo | nada | a caixa centrada no ponteiro | a caixa já segue o ponteiro |
+///
+/// Na proporção fixa vale a maior das duas medidas que o arrasto pede (a caixa
+/// cobre sempre o ponteiro). No tamanho fixo o canto de cima à esquerda fica
+/// no ponteiro, e a caixa anda com ele enquanto o botão está apertado.
+pub fn caixa_do_arrasto(
+    inicio: (f32, f32),
+    fim: (f32, f32),
+    estilo: Estilo,
+    quadrado: bool,
+    do_centro: bool,
+) -> ((f32, f32), (f32, f32)) {
+    let (dx, dy) = (fim.0 - inicio.0, fim.1 - inicio.1);
+    let b = match estilo {
+        Estilo::Tamanho { largura, altura } => {
+            let (l, a) = (largura as f32, altura as f32);
+            if do_centro {
+                let x0 = (fim.0 - l / 2.0).round();
+                let y0 = (fim.1 - a / 2.0).round();
+                return ((x0, y0), (x0 + l, y0 + a));
+            }
+            let (x0, y0) = (fim.0.round(), fim.1.round());
+            return ((x0, y0), (x0 + l, y0 + a));
+        }
+        Estilo::Proporcao { largura, altura } if largura > 0.0 && altura > 0.0 => {
+            let razao = altura / largura;
+            let l = dx.abs().max(dy.abs() / razao);
+            (
+                inicio.0 + l * sentido(dx),
+                inicio.1 + l * razao * sentido(dy),
+            )
+        }
+        _ if quadrado => {
+            let lado = dx.abs().max(dy.abs());
+            // Sem andar num eixo, fica no lugar nele (a lição do `signum` da
+            // etapa 3).
+            (
+                if dx == 0.0 {
+                    inicio.0
+                } else {
+                    inicio.0 + lado * sentido(dx)
+                },
+                if dy == 0.0 {
+                    inicio.1
+                } else {
+                    inicio.1 + lado * sentido(dy)
+                },
+            )
+        }
+        _ => fim,
+    };
+    if do_centro {
+        ((2.0 * inicio.0 - b.0, 2.0 * inicio.1 - b.1), b)
+    } else {
+        (inicio, b)
+    }
+}
+
+/// Largura e altura, em pixels do documento, da caixa de dois cantos — o que a
+/// tela mostra durante o arrasto.
+pub fn medida_da_caixa(a: (f32, f32), b: (f32, f32)) -> (u32, u32) {
+    (
+        (a.0.round() - b.0.round()).abs() as u32,
+        (a.1.round() - b.1.round()).abs() as u32,
+    )
+}
+
+/// O que a varinha mágica lê: um pixel do documento por posição, `[r, g, b,
+/// a]` com a cor **pré-multiplicada** pelo alfa — o transparente é tudo zero,
+/// qualquer que seja a cor guardada no pixel apagado, e um vermelho meio
+/// apagado não passa por um vermelho cheio.
+///
+/// 🔑 A fonte de amostragem fica fora da operação de seleção
+/// ([`Selecao::por_cor_em`]): a sessão escolhe entre a camada atual e a foto
+/// como aparece.
+pub struct Amostra {
+    largura: u32,
+    altura: u32,
+    pixels: Vec<[u8; 4]>,
+}
+
+impl Amostra {
+    /// A foto composta (todas as camadas visíveis sobre a base): opaca.
+    pub fn da_imagem(foto: &RgbImage) -> Self {
+        Self {
+            largura: foto.width(),
+            altura: foto.height(),
+            pixels: foto.pixels().map(|p| [p[0], p[1], p[2], 255]).collect(),
+        }
+    }
+
+    /// Só os pixels de uma camada, no espaço do documento `largura × altura` —
+    /// sem a base nem as outras camadas. O que a camada não cobre (tile que não
+    /// existe, ou fora dela) é transparente.
+    pub fn da_camada(camada: &CamadaDePixels, largura: u32, altura: u32) -> Self {
+        let (l, a) = (largura as usize, altura as usize);
+        let mut pixels = vec![[0u8; 4]; l * a];
+        for (posicao, tile) in camada.existentes() {
+            let r = retangulo_do_tile(*posicao, camada.largura(), camada.altura())
+                .limitado(largura, altura);
+            for y in 0..r.altura {
+                for x in 0..r.largura {
+                    let k = (y * LADO_DO_TILE + x) as usize * 4;
+                    let p = &tile[k..k + 4];
+                    let alfa = p[3] as u32;
+                    let pre = |c: u8| ((c as u32 * alfa + 127) / 255) as u8;
+                    pixels[(r.y + y) as usize * l + (r.x + x) as usize] =
+                        [pre(p[0]), pre(p[1]), pre(p[2]), p[3]];
+                }
+            }
+        }
+        Self {
+            largura,
+            altura,
+            pixels,
+        }
+    }
+
+    /// Uma máscara como cinza opaco (a varinha com a máscara escolhida).
+    pub fn da_mascara(mascara: &Mascara) -> Self {
+        let (largura, altura) = (mascara.pixels.largura(), mascara.pixels.altura());
+        let f = mascara.fundo;
+        let mut pixels = vec![[f, f, f, 255]; largura as usize * altura as usize];
+        for (posicao, tile) in mascara.pixels.existentes() {
+            let r = retangulo_do_tile(*posicao, largura, altura);
+            for y in 0..r.altura {
+                for x in 0..r.largura {
+                    let k = (y * LADO_DO_TILE + x) as usize * 4;
+                    let p = [tile[k], tile[k + 1], tile[k + 2], tile[k + 3]];
+                    let v = Mascara::valor_do_pixel(f, p);
+                    pixels[(r.y + y) as usize * largura as usize + (r.x + x) as usize] =
+                        [v, v, v, 255];
+                }
+            }
+        }
+        Self {
+            largura,
+            altura,
+            pixels,
+        }
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
+        self.pixels[y as usize * self.largura as usize + x as usize]
+    }
 }
 
 /// Como uma forma nova entra na seleção que já existe.
@@ -126,6 +418,108 @@ impl Operacao {
             (false, true) => Operacao::Subtrair,
             (false, false) => Operacao::Nova,
         }
+    }
+}
+
+/// A seleção guardada para ser transformada muitas vezes — o arrasto do
+/// "Transformar seleção": a máscara densa do pedaço selecionado sai uma vez,
+/// e cada passo do arrasto só a amostra.
+#[derive(Clone, Debug)]
+pub struct Molde {
+    largura: u32,
+    altura: u32,
+    regiao: Retangulo,
+    densa: Arc<Vec<u8>>,
+}
+
+impl Molde {
+    pub fn de(selecao: &Selecao) -> Self {
+        let regiao = selecao.caixa_justa();
+        Self {
+            largura: selecao.largura,
+            altura: selecao.altura,
+            regiao,
+            densa: Arc::new(selecao.densa_em(&regiao)),
+        }
+    }
+
+    /// A caixa do que está selecionado — a caixa da transformação.
+    pub fn caixa(&self) -> Retangulo {
+        self.regiao
+    }
+
+    /// A seleção transformada pela afim `(u, v) = c + a·x + b·y`, que leva o
+    /// centro de um pixel do destino ao ponto da seleção de antes de onde ele
+    /// vem — bilinear, fora do molde é 0. Só calcula dentro de `destino`; uma
+    /// faixa de tiles por thread, como o ⌘T dos pixels.
+    pub fn transformado(
+        &self,
+        destino: &Retangulo,
+        c: (f32, f32),
+        a: (f32, f32),
+        b: (f32, f32),
+    ) -> Selecao {
+        let mut s = Selecao::vazia(self.largura, self.altura);
+        let destino = destino.limitado(self.largura, self.altura);
+        if destino.vazio() || self.regiao.vazio() {
+            return s;
+        }
+        let (rx, ry) = (self.regiao.x as i64, self.regiao.y as i64);
+        let (rl, ra) = (self.regiao.largura as i64, self.regiao.altura as i64);
+        let ler = |x: i64, y: i64| -> f32 {
+            let (i, j) = (x - rx, y - ry);
+            if i < 0 || j < 0 || i >= rl || j >= ra {
+                0.0
+            } else {
+                self.densa[(j * rl + i) as usize] as f32
+            }
+        };
+        let faixa = |linha: u32| -> Vec<(Posicao, Vec<u8>)> {
+            let mut tiles: BTreeMap<Posicao, Vec<u8>> = BTreeMap::new();
+            let ya = destino.y.max(linha * LADO_DO_TILE);
+            let yb = destino.baixo().min((linha + 1) * LADO_DO_TILE);
+            for y in ya..yb {
+                let yc = y as f32 + 0.5;
+                for x in destino.x..destino.direita() {
+                    let xc = x as f32 + 0.5;
+                    let u = c.0 + a.0 * xc + b.0 * yc - 0.5;
+                    let v = c.1 + a.1 * xc + b.1 * yc - 0.5;
+                    let (x0, y0) = (u.floor(), v.floor());
+                    let (fx, fy) = (u - x0, v - y0);
+                    let (x0, y0) = (x0 as i64, y0 as i64);
+                    let topo = ler(x0, y0) * (1.0 - fx) + ler(x0 + 1, y0) * fx;
+                    let base = ler(x0, y0 + 1) * (1.0 - fx) + ler(x0 + 1, y0 + 1) * fx;
+                    let valor = (topo * (1.0 - fy) + base * fy).round().clamp(0.0, 255.0) as u8;
+                    if valor == 0 {
+                        continue;
+                    }
+                    let tile = tiles
+                        .entry((x / LADO_DO_TILE, y / LADO_DO_TILE))
+                        .or_insert_with(|| vec![0; BYTES]);
+                    tile[((y % LADO_DO_TILE) * LADO_DO_TILE + x % LADO_DO_TILE) as usize] = valor;
+                }
+            }
+            tiles.into_iter().collect()
+        };
+        let linhas: Vec<u32> =
+            (destino.y / LADO_DO_TILE..=(destino.baixo() - 1) / LADO_DO_TILE).collect();
+        let resultados: Vec<Vec<(Posicao, Vec<u8>)>> = std::thread::scope(|escopo| {
+            let tarefas: Vec<_> = linhas
+                .iter()
+                .map(|&l| {
+                    let faixa = &faixa;
+                    escopo.spawn(move || faixa(l))
+                })
+                .collect();
+            tarefas
+                .into_iter()
+                .map(|t| t.join().unwrap_or_default())
+                .collect()
+        });
+        for (posicao, tile) in resultados.into_iter().flatten() {
+            s.tiles.insert(posicao, Arc::new(tile));
+        }
+        s
     }
 }
 
@@ -156,25 +550,53 @@ impl Selecao {
         }
     }
 
-    /// A máscara de uma forma.
+    /// A máscara de uma forma, com o acabamento padrão (antisserrilhado, sem
+    /// difusão).
     pub fn da_forma(largura: u32, altura: u32, forma: &Forma) -> Self {
+        Self::da_forma_com(largura, altura, forma, Acabamento::default())
+    }
+
+    /// A máscara de uma forma com o acabamento da ferramenta: antisserrilhado
+    /// ou não, e a difusão aplicada à forma (antes de ela entrar na seleção).
+    pub fn da_forma_com(largura: u32, altura: u32, forma: &Forma, acabamento: Acabamento) -> Self {
         let mut s = Self::vazia(largura, altura);
+        let suavizar = acabamento.suavizar;
         match forma {
             Forma::Retangulo(r) => {
                 let r = r.limitado(largura, altura);
                 s.pintar(&r, |_, _| 255);
             }
             Forma::Elipse(r) => {
-                let r = r.limitado(largura, altura);
-                let (rx, ry) = (r.largura as f32 / 2.0, r.altura as f32 / 2.0);
+                let (x0, y0) = (r.x as f32, r.y as f32);
+                return Self::da_forma_com(
+                    largura,
+                    altura,
+                    &Forma::ElipseNaCaixa(x0, y0, x0 + r.largura as f32, y0 + r.altura as f32),
+                    acabamento,
+                );
+            }
+            Forma::ElipseNaCaixa(a0, b0, a1, b1) => {
+                let (x0, x1) = (a0.min(*a1), a0.max(*a1));
+                let (y0, y1) = (b0.min(*b1), b0.max(*b1));
+                let (rx, ry) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
                 if rx < 0.5 || ry < 0.5 {
                     return s;
                 }
-                let (cx, cy) = (r.x as f32 + rx, r.y as f32 + ry);
+                let (cx, cy) = (x0 + rx, y0 + ry);
                 let menor = rx.min(ry);
-                s.pintar(&r, |x, y| {
+                let caixa = Retangulo::novo(
+                    x0.floor().max(0.0) as u32,
+                    y0.floor().max(0.0) as u32,
+                    (x1.ceil() - x0.floor().max(0.0)).max(0.0) as u32,
+                    (y1.ceil() - y0.floor().max(0.0)).max(0.0) as u32,
+                )
+                .limitado(largura, altura);
+                s.pintar(&caixa, |x, y| {
                     let (dx, dy) = ((x as f32 + 0.5 - cx) / rx, (y as f32 + 0.5 - cy) / ry);
                     let raio = (dx * dx + dy * dy).sqrt();
+                    if !suavizar {
+                        return if raio <= 1.0 { 255 } else { 0 };
+                    }
                     // A distância à borda, em pixels, aproximada pelo raio menor:
                     // meio pixel de cada lado da borda é a rampa.
                     let dentro = (0.5 - (raio - 1.0) * menor).clamp(0.0, 1.0);
@@ -199,35 +621,20 @@ impl Selecao {
                     (y1.ceil() - y0.floor()).max(0.0) as u32 + 1,
                 )
                 .limitado(largura, altura);
-                // Por linha: os cruzamentos das arestas com o centro da linha,
-                // ordenados; dentro é entre o 1º e o 2º, o 3º e o 4º…
-                let mut linhas: BTreeMap<u32, Vec<f32>> = BTreeMap::new();
-                for y in caixa.y..caixa.baixo() {
-                    let yc = y as f32 + 0.5;
-                    let mut cortes = Vec::new();
-                    for i in 0..pontos.len() {
-                        let (ax, ay) = pontos[i];
-                        let (bx, by) = pontos[(i + 1) % pontos.len()];
-                        if (ay <= yc) != (by <= yc) {
-                            cortes.push(ax + (yc - ay) / (by - ay) * (bx - ax));
-                        }
-                    }
-                    cortes.sort_by(f32::total_cmp);
-                    linhas.insert(y, cortes);
+                if caixa.vazio() {
+                    return s;
                 }
+                let cobertura = cobertura_do_poligono(pontos, &caixa, suavizar);
+                let l = caixa.largura as usize;
                 s.pintar(&caixa, |x, y| {
-                    let xc = x as f32 + 0.5;
-                    let cortes = &linhas[&y];
-                    let antes = cortes.iter().take_while(|c| **c <= xc).count();
-                    if antes % 2 == 1 {
-                        255
-                    } else {
-                        0
-                    }
+                    cobertura[(y - caixa.y) as usize * l + (x - caixa.x) as usize]
                 });
             }
         }
         s.enxugar();
+        if acabamento.difusao > 0 {
+            s = s.difusa(acabamento.difusao);
+        }
         s
     }
 
@@ -255,21 +662,41 @@ impl Selecao {
         caixa
     }
 
-    /// A varinha mágica (W): os pixels de `foto` cuja cor difere da de `(x, y)`
-    /// no máximo `tolerancia` em cada canal (32 no Photoshop). Contígua, só a
-    /// área ligada ao ponto; senão, todos os parecidos da foto.
-    pub fn por_cor(foto: &RgbImage, (x, y): (u32, u32), tolerancia: u8, contigua: bool) -> Self {
-        let (largura, altura) = (foto.width(), foto.height());
+    /// A varinha mágica (W) numa foto opaca — ver [`Self::por_cor_em`].
+    pub fn por_cor(foto: &RgbImage, ponto: (u32, u32), tolerancia: u8, contigua: bool) -> Self {
+        Self::por_cor_em(
+            &Amostra::da_imagem(foto),
+            ponto,
+            tolerancia,
+            contigua,
+            false,
+        )
+    }
+
+    /// A varinha mágica (W): os pixels da `amostra` cuja cor (pré-multiplicada)
+    /// e cujo alfa diferem dos de `(x, y)` no máximo `tolerancia` em cada canal
+    /// (32 no Photoshop). Contígua, só a área ligada ao ponto; senão, todos os
+    /// parecidos. Num pixel transparente, pega o transparente em volta.
+    /// `suavizar`: a borda ganha um pixel de rampa (média 3×3 da máscara), com
+    /// a metade do caminho na borda de antes.
+    pub fn por_cor_em(
+        amostra: &Amostra,
+        (x, y): (u32, u32),
+        tolerancia: u8,
+        contigua: bool,
+        suavizar: bool,
+    ) -> Self {
+        let (largura, altura) = (amostra.largura, amostra.altura);
         let mut s = Self::vazia(largura, altura);
         if x >= largura || y >= altura {
             return s;
         }
-        let alvo = foto.get_pixel(x, y).0;
+        let alvo = amostra.pixel(x, y);
         let tol = tolerancia as i16;
         let (l, a) = (largura as usize, altura as usize);
-        let bruto = foto.as_raw();
+        let bruto = &amostra.pixels;
         let parecido =
-            |i: usize| (0..3).all(|c| (bruto[i * 3 + c] as i16 - alvo[c] as i16).abs() <= tol);
+            |i: usize| (0..4).all(|c| (bruto[i][c] as i16 - alvo[c] as i16).abs() <= tol);
         let mut marcado = vec![false; l * a];
         if contigua {
             // Por linhas, como a lata de tinta.
@@ -310,7 +737,14 @@ impl Selecao {
                 *m = parecido(i);
             }
         }
-        let densa: Vec<u8> = marcado.iter().map(|m| if *m { 255 } else { 0 }).collect();
+        let densa: Vec<u8> = if suavizar {
+            let mut d: Vec<u16> = marcado.iter().map(|m| if *m { 255 } else { 0 }).collect();
+            caixa(&mut d, l, a, 1, true);
+            caixa(&mut d, l, a, 1, false);
+            d.iter().map(|v| *v as u8).collect()
+        } else {
+            marcado.iter().map(|m| if *m { 255 } else { 0 }).collect()
+        };
         s.carregar_densa(&densa);
         s
     }
@@ -350,15 +784,25 @@ impl Selecao {
 
     /// A máscara inteira, um byte por pixel da foto.
     fn densa(&self) -> Vec<u8> {
-        let (l, a) = (self.largura as usize, self.altura as usize);
-        let mut d = vec![self.padrao; l * a];
+        self.densa_em(&Retangulo::inteiro(self.largura, self.altura))
+    }
+
+    /// A máscara do recorte `ret`, um byte por pixel, linha a linha.
+    fn densa_em(&self, ret: &Retangulo) -> Vec<u8> {
+        let l = ret.largura as usize;
+        let mut d = vec![self.padrao; l * ret.altura as usize];
         for (posicao, tile) in &self.tiles {
-            let r = retangulo_do_tile(*posicao, self.largura, self.altura);
-            for y in 0..r.altura {
-                let de = (y * LADO_DO_TILE) as usize;
-                let para = (r.y + y) as usize * l + r.x as usize;
-                d[para..para + r.largura as usize]
-                    .copy_from_slice(&tile[de..de + r.largura as usize]);
+            let t = retangulo_do_tile(*posicao, self.largura, self.altura);
+            let (x0, x1) = (t.x.max(ret.x), t.direita().min(ret.direita()));
+            let (y0, y1) = (t.y.max(ret.y), t.baixo().min(ret.baixo()));
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            for y in y0..y1 {
+                let de = ((y - t.y) * LADO_DO_TILE + (x0 - t.x)) as usize;
+                let para = (y - ret.y) as usize * l + (x0 - ret.x) as usize;
+                let n = (x1 - x0) as usize;
+                d[para..para + n].copy_from_slice(&tile[de..de + n]);
             }
         }
         d
@@ -366,45 +810,48 @@ impl Selecao {
 
     /// Troca o conteúdo pelo de uma máscara densa (do tamanho da foto).
     fn carregar_densa(&mut self, d: &[u8]) {
-        self.padrao = 0;
         self.tiles.clear();
-        let colunas = self.largura.div_ceil(LADO_DO_TILE);
-        let linhas = self.altura.div_ceil(LADO_DO_TILE);
-        let l = self.largura as usize;
-        for tl in 0..linhas {
-            for tc in 0..colunas {
-                let r = retangulo_do_tile((tc, tl), self.largura, self.altura);
-                let mut tile = vec![0u8; BYTES];
-                let mut algum = false;
-                for y in 0..r.altura {
-                    let de = (r.y + y) as usize * l + r.x as usize;
-                    let linha = &d[de..de + r.largura as usize];
-                    algum |= linha.iter().any(|v| *v != 0);
-                    let para = (y * LADO_DO_TILE) as usize;
-                    tile[para..para + r.largura as usize].copy_from_slice(linha);
-                }
-                if algum {
-                    self.tiles.insert((tc, tl), Arc::new(tile));
-                }
-            }
-        }
+        self.padrao = 0;
+        let inteiro = Retangulo::inteiro(self.largura, self.altura);
+        self.carregar_recorte(&inteiro, d);
+    }
+
+    /// Escreve a máscara densa do recorte `ret` (o resto fica como está — 0
+    /// numa seleção recém-criada).
+    fn carregar_recorte(&mut self, ret: &Retangulo, d: &[u8]) {
+        let l = ret.largura as usize;
+        self.pintar(ret, |x, y| {
+            d[(y - ret.y) as usize * l + (x - ret.x) as usize]
+        });
+        self.enxugar();
     }
 
     /// Difusão (⇧F6): a borda vira uma rampa de `raio` pixels — três passadas
-    /// de caixa em cada direção, perto de um desfoque gaussiano.
+    /// de caixa em cada direção, perto de um desfoque gaussiano. Só o pedaço
+    /// em volta do selecionado é calculado: fora dele tudo é zero e continua
+    /// zero (a margem cobre o alcance das três passadas).
     pub fn difusa(&self, raio: u32) -> Selecao {
         if raio == 0 || self.nada() {
             return self.clone();
         }
-        let (l, a) = (self.largura as usize, self.altura as usize);
-        let mut d: Vec<u16> = self.densa().iter().map(|v| *v as u16).collect();
         let r = (raio as usize).div_ceil(2).max(1);
+        let regiao = if self.padrao == 0 {
+            let margem = (3 * r + 1) as u32;
+            let c = self.caixa_justa();
+            let (x0, y0) = (c.x.saturating_sub(margem), c.y.saturating_sub(margem));
+            Retangulo::novo(x0, y0, c.direita() + margem - x0, c.baixo() + margem - y0)
+                .limitado(self.largura, self.altura)
+        } else {
+            Retangulo::inteiro(self.largura, self.altura)
+        };
+        let (l, a) = (regiao.largura as usize, regiao.altura as usize);
+        let mut d: Vec<u16> = self.densa_em(&regiao).iter().map(|v| *v as u16).collect();
         for _ in 0..3 {
             caixa(&mut d, l, a, r, true);
             caixa(&mut d, l, a, r, false);
         }
         let mut s = Selecao::vazia(self.largura, self.altura);
-        s.carregar_densa(&d.iter().map(|v| *v as u8).collect::<Vec<_>>());
+        s.carregar_recorte(&regiao, &d.iter().map(|v| *v as u8).collect::<Vec<_>>());
         s
     }
 
@@ -866,6 +1313,361 @@ mod testes {
         let s = Selecao::da_mascara(&m);
         assert_eq!(s.valor(256, 0), 0, "o preto não é selecionado");
         assert_eq!(s.valor(10, 10), 255, "o fundo branco é");
+    }
+
+    // ------------------------------------------- estilo e modificadores
+
+    fn ordenada(c: ((f32, f32), (f32, f32))) -> (f32, f32, f32, f32) {
+        let ((ax, ay), (bx, by)) = c;
+        (ax.min(bx), ay.min(by), ax.max(bx), ay.max(by))
+    }
+
+    #[test]
+    fn o_arrasto_normal_com_shift_e_alt() {
+        let n = Estilo::Normal;
+        assert_eq!(
+            ordenada(caixa_do_arrasto(
+                (10.0, 10.0),
+                (50.0, 30.0),
+                n,
+                false,
+                false
+            )),
+            (10.0, 10.0, 50.0, 30.0)
+        );
+        // ⇧: quadrado pelo lado maior, para o lado do arrasto.
+        assert_eq!(
+            ordenada(caixa_do_arrasto((10.0, 10.0), (50.0, 30.0), n, true, false)),
+            (10.0, 10.0, 50.0, 50.0)
+        );
+        assert_eq!(
+            ordenada(caixa_do_arrasto(
+                (100.0, 100.0),
+                (60.0, 90.0),
+                n,
+                true,
+                false
+            )),
+            (60.0, 60.0, 100.0, 100.0)
+        );
+        // ⌥: o começo é o centro.
+        assert_eq!(
+            ordenada(caixa_do_arrasto(
+                (100.0, 100.0),
+                (130.0, 110.0),
+                n,
+                false,
+                true
+            )),
+            (70.0, 90.0, 130.0, 110.0)
+        );
+        // ⇧⌥: quadrado do centro.
+        assert_eq!(
+            ordenada(caixa_do_arrasto(
+                (100.0, 100.0),
+                (130.0, 110.0),
+                n,
+                true,
+                true
+            )),
+            (70.0, 70.0, 130.0, 130.0)
+        );
+    }
+
+    #[test]
+    fn a_proporcao_fixa_prende_a_razao_e_ignora_o_shift() {
+        let p = Estilo::Proporcao {
+            largura: 16.0,
+            altura: 9.0,
+        };
+        // Arrasto mais largo: a largura manda.
+        let (x0, y0, x1, y1) =
+            ordenada(caixa_do_arrasto((0.0, 0.0), (160.0, 10.0), p, false, false));
+        assert_eq!((x0, y0, x1, y1), (0.0, 0.0, 160.0, 90.0));
+        // Arrasto mais alto: a altura manda (a caixa cobre o ponteiro).
+        let (_, _, x1, y1) = ordenada(caixa_do_arrasto((0.0, 0.0), (10.0, 90.0), p, false, false));
+        assert_eq!((x1, y1), (160.0, 90.0));
+        // Para cima e para a esquerda.
+        assert_eq!(
+            ordenada(caixa_do_arrasto(
+                (200.0, 200.0),
+                (40.0, 190.0),
+                p,
+                false,
+                false
+            )),
+            (40.0, 110.0, 200.0, 200.0)
+        );
+        // ⇧ não muda nada: a razão já está presa.
+        assert_eq!(
+            caixa_do_arrasto((0.0, 0.0), (160.0, 10.0), p, true, false),
+            caixa_do_arrasto((0.0, 0.0), (160.0, 10.0), p, false, false)
+        );
+        // ⌥: do centro, com a razão.
+        assert_eq!(
+            ordenada(caixa_do_arrasto(
+                (100.0, 100.0),
+                (116.0, 100.0),
+                p,
+                false,
+                true
+            )),
+            (84.0, 91.0, 116.0, 109.0)
+        );
+        // 1:1 é o quadrado.
+        let q = Estilo::Proporcao {
+            largura: 1.0,
+            altura: 1.0,
+        };
+        assert_eq!(
+            medida_da_caixa(
+                (0.0, 0.0),
+                caixa_do_arrasto((0.0, 0.0), (33.0, 12.0), q, false, false).1
+            ),
+            (33, 33)
+        );
+    }
+
+    #[test]
+    fn o_tamanho_fixo_segue_o_ponteiro_e_o_alt_centraliza() {
+        let t = Estilo::Tamanho {
+            largura: 300,
+            altura: 200,
+        };
+        // O canto de cima à esquerda vai onde o ponteiro está, e anda com ele.
+        let (a, b) = caixa_do_arrasto((10.0, 10.0), (50.4, 70.6), t, false, false);
+        assert_eq!((a, b), ((50.0, 71.0), (350.0, 271.0)));
+        assert_eq!(medida_da_caixa(a, b), (300, 200));
+        // ⇧ não muda; ⌥ centraliza no ponteiro.
+        assert_eq!(
+            caixa_do_arrasto((10.0, 10.0), (50.4, 70.6), t, true, false),
+            (a, b)
+        );
+        let (a, b) = caixa_do_arrasto((10.0, 10.0), (500.0, 500.0), t, false, true);
+        assert_eq!((a, b), ((350.0, 400.0), (650.0, 600.0)));
+        // Trocar largura e altura.
+        assert_eq!(
+            t.trocado(),
+            Estilo::Tamanho {
+                largura: 200,
+                altura: 300
+            }
+        );
+    }
+
+    // ------------------------------------------------------- acabamento
+
+    #[test]
+    fn a_elipse_sem_antisserrilhado_e_so_dentro_ou_fora() {
+        let forma = Forma::Elipse(Retangulo::novo(100, 100, 201, 99));
+        let seca = Selecao::da_forma_com(
+            400,
+            400,
+            &forma,
+            Acabamento {
+                suavizar: false,
+                difusao: 0,
+            },
+        );
+        let lisa = Selecao::da_forma_com(400, 400, &forma, Acabamento::default());
+        let meios = |s: &Selecao| {
+            (90..310)
+                .flat_map(|x| (90..210).map(move |y| (x, y)))
+                .filter(|&(x, y)| (1..255).contains(&s.valor(x, y)))
+                .count()
+        };
+        assert_eq!(meios(&seca), 0);
+        assert!(meios(&lisa) > 100, "a lisa tem a rampa de um pixel");
+        assert_eq!(seca.valor(200, 150), 255);
+    }
+
+    #[test]
+    fn a_elipse_que_passa_da_foto_nao_achata() {
+        // A caixa vai de −100 a 100: o centro da elipse fica no canto (0, 0).
+        let forma = Forma::ElipseNaCaixa(-100.0, -100.0, 100.0, 100.0);
+        let s = Selecao::da_forma_com(
+            300,
+            300,
+            &forma,
+            Acabamento {
+                suavizar: false,
+                difusao: 0,
+            },
+        );
+        assert_eq!(s.valor(0, 0), 255);
+        assert_eq!(s.valor(69, 69), 255, "dentro do círculo de raio 100");
+        assert_eq!(s.valor(72, 72), 0);
+        assert_eq!(s.valor(99, 0), 255);
+        assert_eq!(s.valor(101, 0), 0);
+    }
+
+    #[test]
+    fn o_laco_antisserrilhado_cobre_a_fracao_da_borda() {
+        // Um triângulo com a hipotenusa na diagonal.
+        let tri = Forma::Laco(vec![(10.0, 10.0), (110.0, 10.0), (10.0, 110.0)]);
+        let seco = Selecao::da_forma_com(
+            200,
+            200,
+            &tri,
+            Acabamento {
+                suavizar: false,
+                difusao: 0,
+            },
+        );
+        let liso = Selecao::da_forma_com(200, 200, &tri, Acabamento::default());
+        // O pixel cortado ao meio pela diagonal (x + y + 1 = 120): metade.
+        let meio = liso.valor(59, 60);
+        assert!((100..=155).contains(&meio), "meio pixel coberto: {meio}");
+        assert!([0, 255].contains(&seco.valor(59, 60)));
+        assert_eq!(liso.valor(20, 20), 255);
+        assert_eq!(liso.valor(100, 100), 0);
+        // Borda reta em pixel inteiro: exata nas duas.
+        assert_eq!((liso.valor(10, 50), liso.valor(9, 50)), (255, 0));
+    }
+
+    #[test]
+    fn a_difusao_da_forma_e_zero_e_a_de_valor() {
+        let r = Forma::Retangulo(Retangulo::novo(100, 100, 100, 100));
+        let zero = Selecao::da_forma_com(
+            400,
+            400,
+            &r,
+            Acabamento {
+                suavizar: true,
+                difusao: 0,
+            },
+        );
+        assert_eq!(
+            zero,
+            Selecao::da_forma(400, 400, &r),
+            "difusão 0 é a borda exata"
+        );
+        let dez = Selecao::da_forma_com(
+            400,
+            400,
+            &r,
+            Acabamento {
+                suavizar: true,
+                difusao: 10,
+            },
+        );
+        assert!((100..160).contains(&dez.valor(100, 150)));
+        assert!(dez.valor(150, 150) > 250);
+    }
+
+    /// A difusão calculada só em volta do selecionado dá o mesmo que a da
+    /// foto inteira (a conta de antes da otimização).
+    #[test]
+    fn a_difusao_no_recorte_e_igual_a_da_foto_inteira() {
+        let s = Selecao::da_forma(
+            700,
+            500,
+            &Forma::Laco(vec![(300.0, 200.0), (420.0, 230.0), (350.0, 330.0)]),
+        );
+        for raio in [1, 7, 30] {
+            let rapida = s.difusa(raio);
+            let (l, a) = (700usize, 500usize);
+            let mut d: Vec<u16> = s.densa().iter().map(|v| *v as u16).collect();
+            let r = (raio as usize).div_ceil(2).max(1);
+            for _ in 0..3 {
+                caixa(&mut d, l, a, r, true);
+                caixa(&mut d, l, a, r, false);
+            }
+            let inteira: Vec<u8> = d.iter().map(|v| *v as u8).collect();
+            assert_eq!(rapida.densa(), inteira, "raio {raio}");
+        }
+    }
+
+    // ------------------------------------------------------------ varinha
+
+    #[test]
+    fn a_varinha_na_camada_ve_o_transparente_e_nao_a_base() {
+        let mut c = CamadaDePixels::nova(300, 300);
+        // Um quadrado vermelho opaco em (50..100), e um vermelho meio apagado
+        // logo ao lado (100..150) — o resto é transparente, com lixo de cor.
+        for y in 50..100 {
+            for x in 0..300u32 {
+                let i = crate::tiles::indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
+                let p = if (50..100).contains(&x) {
+                    [200, 0, 0, 255]
+                } else if (100..150).contains(&x) {
+                    [200, 0, 0, 128]
+                } else {
+                    [13, 250, 77, 0]
+                };
+                c.tile_mut((x / LADO_DO_TILE, y / LADO_DO_TILE))[i..i + 4].copy_from_slice(&p);
+            }
+        }
+        let amostra = Amostra::da_camada(&c, 300, 300);
+        let vermelho = Selecao::por_cor_em(&amostra, (60, 60), 32, true, false);
+        assert_eq!(vermelho.valor(99, 60), 255);
+        assert_eq!(vermelho.valor(100, 60), 0, "o meio apagado tem outro alfa");
+        // Clique no transparente: todo o transparente ligado, com o lixo de cor
+        // e os tiles que nem existem.
+        let vazio = Selecao::por_cor_em(&amostra, (5, 5), 0, true, false);
+        assert_eq!(vazio.valor(299, 299), 255);
+        assert_eq!(vazio.valor(10, 60), 255, "o pixel apagado com cor guardada");
+        assert_eq!(vazio.valor(60, 60), 0);
+        assert_eq!(vazio.valor(120, 60), 0);
+    }
+
+    #[test]
+    fn a_varinha_suavizada_tem_meio_caminho_na_borda() {
+        let foto = dois_quadrados();
+        let s = Selecao::por_cor_em(&Amostra::da_imagem(&foto), (100, 150), 32, true, true);
+        assert_eq!(s.valor(100, 150), 255);
+        let (dentro, fora) = (s.valor(50, 150), s.valor(49, 150));
+        assert!(dentro > 128 && dentro < 255, "{dentro}");
+        assert!(fora > 0 && fora < 128, "{fora}");
+        assert_eq!(s.valor(40, 150), 0);
+    }
+
+    // ------------------------------------------------- transformar seleção
+
+    #[test]
+    fn o_molde_anda_e_amplia_a_selecao() {
+        let s = Selecao::da_forma(
+            600,
+            400,
+            &Forma::Retangulo(Retangulo::novo(100, 100, 50, 40)),
+        );
+        let m = Molde::de(&s);
+        assert_eq!(m.caixa(), Retangulo::novo(100, 100, 50, 40));
+        // Identidade: a mesma seleção.
+        let igual = m.transformado(
+            &Retangulo::inteiro(600, 400),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+        );
+        assert_eq!(igual.densa(), s.densa());
+        // Andar 30 para a direita: (u, v) = (x − 30, y).
+        let andou = m.transformado(
+            &Retangulo::inteiro(600, 400),
+            (-30.0, 0.0),
+            (1.0, 0.0),
+            (0.0, 1.0),
+        );
+        assert_eq!(
+            (
+                andou.valor(130, 110),
+                andou.valor(129, 110),
+                andou.valor(179, 139)
+            ),
+            (255, 0, 255)
+        );
+        // O dobro em volta da origem: (u, v) = (x/2, y/2).
+        let dobro = m.transformado(
+            &Retangulo::inteiro(600, 400),
+            (0.0, 0.0),
+            (0.5, 0.0),
+            (0.0, 0.5),
+        );
+        // A borda a meio caminho fica no dobro exato (a bilinear faz um pixel
+        // de rampa em volta).
+        assert!(dobro.valor(200, 250) >= 128 && dobro.valor(199, 250) < 128);
+        assert!(dobro.valor(299, 250) >= 128 && dobro.valor(300, 250) < 128);
+        assert!(dobro.valor(250, 279) >= 128 && dobro.valor(250, 280) < 128);
     }
 
     #[test]

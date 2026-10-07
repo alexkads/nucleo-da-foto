@@ -32,6 +32,8 @@ pub mod vista;
 #[cfg(test)]
 mod testes_da_mascara;
 #[cfg(test)]
+mod testes_das_ferramentas_de_selecao;
+#[cfg(test)]
 mod testes_dos_controles;
 
 pub use ajuste::Ajuste;
@@ -41,7 +43,7 @@ pub use historico::{Comando, Historico};
 pub use mesclagem::Modo;
 pub use pincel::{Ferramenta, Pincel};
 pub use retangulo::Retangulo;
-pub use selecao::{Forma, Operacao, Selecao};
-pub use sessao::Sessao;
+pub use selecao::{Acabamento, Amostra, Estilo, Forma, Molde, Operacao, Selecao};
+pub use sessao::{AmostraDaVarinha, OpcoesDaVarinha, Sessao, VarinhaRecusada};
 pub use tiles::{CamadaDePixels, LADO_DO_TILE};
 pub use transformar::Transformacao;

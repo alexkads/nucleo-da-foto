@@ -23,13 +23,68 @@ use crate::operacoes;
 use crate::pincel::Mudanca;
 use crate::pincel::{Pincel, Traco};
 use crate::retangulo::Retangulo;
-use crate::selecao::{Forma, Operacao, Selecao};
+use crate::selecao::{Acabamento, Amostra, Forma, Molde, Operacao, Selecao};
 use crate::tiles::CamadaDePixels;
 use crate::transformar::{self, Conteudo, Transformacao};
 use crate::vista::Vista;
 
 /// A tolerância da lata de tinta — o padrão do Photoshop.
 pub const TOLERANCIA_DA_LATA: u8 = 32;
+
+/// De onde a varinha mágica lê a cor ("Amostrar todas as camadas" do
+/// Photoshop, desligado ou ligado).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AmostraDaVarinha {
+    /// Só os pixels da camada escolhida (ou da máscara dela, se é a máscara
+    /// que está escolhida) — sem a fotografia base nem as outras camadas; o
+    /// transparente conta como cor.
+    CamadaAtual,
+    /// A foto como aparece: a base e todas as camadas visíveis.
+    #[default]
+    Todas,
+}
+
+/// As opções da varinha mágica (W) na barra.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpcoesDaVarinha {
+    /// 0–255 por canal (32 no Photoshop).
+    pub tolerancia: u8,
+    pub contigua: bool,
+    /// Antisserrilhado na borda do que ela pega.
+    pub suavizar: bool,
+    pub amostra: AmostraDaVarinha,
+}
+
+impl Default for OpcoesDaVarinha {
+    fn default() -> Self {
+        Self {
+            tolerancia: 32,
+            contigua: true,
+            suavizar: true,
+            amostra: AmostraDaVarinha::Todas,
+        }
+    }
+}
+
+/// Por que a varinha não pegou nada.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VarinhaRecusada {
+    /// O clique caiu fora da foto.
+    ForaDaFoto,
+    /// "Camada atual" numa camada de ajuste sem a máscara escolhida: não há
+    /// pixel para ler.
+    CamadaSemPixels,
+    /// "Camada atual" com a camada escondida (o Photoshop também recusa).
+    CamadaEscondida,
+}
+
+/// A seleção solta para o "Transformar seleção": a de antes, o molde dela e
+/// a transformação de agora. Nenhum pixel muda.
+struct SelecaoSolta {
+    antes: Arc<Selecao>,
+    molde: Molde,
+    t: Transformacao,
+}
 
 /// Um pedido de lupa: o que a vista do pedaço precisa para ser montada fora
 /// da thread da tela. Barato de tirar: a base e os tiles são `Arc`.
@@ -101,6 +156,8 @@ pub struct Sessao {
     contorno_movendo: Option<Arc<Selecao>>,
     /// Onde o último traço terminou — ⇧ + clique liga até ali com uma reta.
     fim_do_ultimo_traco: Option<(f32, f32)>,
+    /// "Transformar seleção" em curso: só o contorno, sem os pixels.
+    selecao_solta: Option<SelecaoSolta>,
 }
 
 /// O conteúdo de uma camada tirado dela para ser transformado.
@@ -151,6 +208,7 @@ impl Sessao {
             flutuante: None,
             contorno_movendo: None,
             fim_do_ultimo_traco: None,
+            selecao_solta: None,
         }
     }
 
@@ -823,7 +881,7 @@ impl Sessao {
     pub fn comecar_a_transformar(&mut self) -> bool {
         self.soltar();
         self.confirmar_opacidade();
-        if self.flutuante.is_some() {
+        if self.flutuante.is_some() || self.selecao_solta.is_some() {
             return true;
         }
         let camada = self.ativa();
@@ -857,13 +915,79 @@ impl Sessao {
         true
     }
 
+    /// "Transformar seleção": a caixa aparece em volta do selecionado e só o
+    /// contorno se transforma — nenhum pixel muda (o ⌘T é o dos pixels).
+    /// Falso sem seleção.
+    pub fn comecar_a_transformar_a_selecao(&mut self) -> bool {
+        if self.selecao_solta.is_some() {
+            return true;
+        }
+        self.fechar_o_que_esta_aberto();
+        let Some(antes) = self.selecao.clone() else {
+            return false;
+        };
+        let molde = Molde::de(&antes);
+        if molde.caixa().vazio() {
+            return false;
+        }
+        self.selecao_solta = Some(SelecaoSolta {
+            antes,
+            molde,
+            t: Transformacao::default(),
+        });
+        true
+    }
+
+    /// O "Transformar seleção" está aberto (e não o ⌘T dos pixels).
+    pub fn transformando_a_selecao(&self) -> bool {
+        self.selecao_solta.is_some()
+    }
+
     /// A caixa do conteúdo e a transformação de agora — o que a tela desenha.
     pub fn transformacao(&self) -> Option<(Retangulo, Transformacao)> {
+        if let Some(s) = &self.selecao_solta {
+            return Some((s.molde.caixa(), s.t));
+        }
         self.flutuante.as_ref().map(|f| (f.conteudo.caixa, f.t))
     }
 
-    /// A camada passa a mostrar o conteúdo transformado por `t`.
+    /// A camada passa a mostrar o conteúdo transformado por `t` (ou a
+    /// seleção, no "Transformar seleção").
     pub fn definir_transformacao(&mut self, t: Transformacao) {
+        if let Some(solta) = self.selecao_solta.as_mut() {
+            if solta.t == t {
+                return;
+            }
+            solta.t = t;
+            let caixa = solta.molde.caixa();
+            let (l, a) = (self.doc.largura(), self.doc.altura());
+            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for (x, y) in t.cantos(&caixa) {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+            let x0 = (x0.floor() - 1.0).max(0.0) as u32;
+            let y0 = (y0.floor() - 1.0).max(0.0) as u32;
+            let x1 = ((x1.ceil() + 1.0).max(0.0) as u32).min(l);
+            let y1 = ((y1.ceil() + 1.0).max(0.0) as u32).min(a);
+            let destino = Retangulo::novo(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0));
+            // A inversa é afim: três coeficientes, e uma soma por pixel.
+            let c = t.inversa(&caixa, 0.0, 0.0);
+            let ex = t.inversa(&caixa, 1.0, 0.0);
+            let ey = t.inversa(&caixa, 0.0, 1.0);
+            let nova = solta.molde.transformado(
+                &destino,
+                c,
+                (ex.0 - c.0, ex.1 - c.1),
+                (ey.0 - c.0, ey.1 - c.1),
+            );
+            self.selecao = (!nova.nada()).then(|| Arc::new(nova));
+            self.versao += 1;
+            self.versao_da_selecao += 1;
+            return;
+        }
         let Some(f) = self.flutuante.as_mut() else {
             return;
         };
@@ -889,6 +1013,16 @@ impl Sessao {
     /// Enter: a transformação vira um passo do desfazer. A seleção anda junto
     /// num deslocamento; com escala ou giro, sai (o recorte já não é o mesmo).
     pub fn aplicar_transformacao(&mut self) -> bool {
+        if let Some(solta) = self.selecao_solta.take() {
+            // Um passo de seleção: não muda pixel, não pede para salvar.
+            return match self.passo_da_selecao(Some(solta.antes), "Transformar seleção") {
+                Some(passo) => {
+                    self.hist.registrar(passo);
+                    true
+                }
+                None => false,
+            };
+        }
         let Some(f) = self.flutuante.take() else {
             return false;
         };
@@ -934,6 +1068,12 @@ impl Sessao {
 
     /// Esc: a camada volta a ser o que era.
     pub fn cancelar_transformacao(&mut self) {
+        if let Some(solta) = self.selecao_solta.take() {
+            self.selecao = Some(solta.antes);
+            self.versao += 1;
+            self.versao_da_selecao += 1;
+            return;
+        }
         let Some(f) = self.flutuante.take() else {
             return;
         };
@@ -942,7 +1082,7 @@ impl Sessao {
     }
 
     pub fn transformando(&self) -> bool {
-        self.flutuante.is_some()
+        self.flutuante.is_some() || self.selecao_solta.is_some()
     }
 
     /// ⌘J com seleção: uma camada nova só com o selecionado, logo acima. Sem
@@ -1016,13 +1156,33 @@ impl Sessao {
     /// Uma forma desenhada entra na seleção. Nova sem nada selecionado no fim
     /// (um clique) desmarca, como no Photoshop.
     pub fn selecionar(&mut self, forma: &Forma, operacao: Operacao) {
+        self.selecionar_com(forma, operacao, Acabamento::default());
+    }
+
+    /// Uma forma desenhada entra na seleção com o acabamento da ferramenta
+    /// (antisserrilhado, difusão) — a forma ganha o acabamento **antes** de
+    /// se juntar à seleção de agora; a de agora não muda por isso.
+    pub fn selecionar_com(&mut self, forma: &Forma, operacao: Operacao, acabamento: Acabamento) {
         let (largura, altura) = (self.doc.largura(), self.doc.altura());
         let nome = match forma {
             Forma::Retangulo(_) => "Seleção retangular",
-            Forma::Elipse(_) => "Seleção elíptica",
+            Forma::Elipse(_) | Forma::ElipseNaCaixa(..) => "Seleção elíptica",
             Forma::Laco(_) => "Laço",
         };
-        self.entrar_na_selecao(Selecao::da_forma(largura, altura, forma), operacao, nome);
+        let nova = Selecao::da_forma_com(largura, altura, forma, acabamento);
+        self.entrar_na_selecao(nova, operacao, nome);
+    }
+
+    /// O laço poligonal concluído: um passo só, com o nome do Photoshop.
+    pub fn selecionar_poligono(
+        &mut self,
+        vertices: Vec<(f32, f32)>,
+        operacao: Operacao,
+        acabamento: Acabamento,
+    ) {
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let nova = Selecao::da_forma_com(largura, altura, &Forma::Laco(vertices), acabamento);
+        self.entrar_na_selecao(nova, operacao, "Laço poligonal");
     }
 
     /// A varinha mágica (W) em `(x, y)`: a cor da foto **como ela aparece**
@@ -1036,14 +1196,62 @@ impl Sessao {
         contigua: bool,
         operacao: Operacao,
     ) -> bool {
+        let opcoes = OpcoesDaVarinha {
+            tolerancia,
+            contigua,
+            suavizar: false,
+            amostra: AmostraDaVarinha::Todas,
+        };
+        self.varinha_com(x, y, opcoes, operacao).is_ok()
+    }
+
+    /// A fonte que a varinha lê, do tamanho do documento — separada da
+    /// operação de seleção. Na camada atual, só os pixels dela (com o
+    /// transparente), no espaço do documento: a base não entra.
+    pub fn amostra_da_varinha(
+        &self,
+        amostra: AmostraDaVarinha,
+    ) -> Result<Amostra, VarinhaRecusada> {
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        match amostra {
+            AmostraDaVarinha::Todas => Ok(Amostra::da_imagem(&self.compor())),
+            AmostraDaVarinha::CamadaAtual => {
+                let camada = self.camada_ativa();
+                if !camada.visivel {
+                    return Err(VarinhaRecusada::CamadaEscondida);
+                }
+                match (&camada.mascara, self.na_mascara()) {
+                    (Some(m), true) => Ok(Amostra::da_mascara(m)),
+                    _ if camada.ajuste.is_some() => Err(VarinhaRecusada::CamadaSemPixels),
+                    _ => Ok(Amostra::da_camada(&camada.pixels, largura, altura)),
+                }
+            }
+        }
+    }
+
+    /// A varinha mágica (W) em `(x, y)` com as opções da barra: tolerância,
+    /// contígua, antisserrilhado e de onde ler a cor. Um passo do desfazer.
+    pub fn varinha_com(
+        &mut self,
+        x: f32,
+        y: f32,
+        opcoes: OpcoesDaVarinha,
+        operacao: Operacao,
+    ) -> Result<(), VarinhaRecusada> {
         if x < 0.0 || y < 0.0 || x >= self.doc.largura() as f32 || y >= self.doc.altura() as f32 {
-            return false;
+            return Err(VarinhaRecusada::ForaDaFoto);
         }
         self.fechar_o_que_esta_aberto();
-        let foto = self.compor();
-        let nova = Selecao::por_cor(&foto, (x as u32, y as u32), tolerancia, contigua);
+        let amostra = self.amostra_da_varinha(opcoes.amostra)?;
+        let nova = Selecao::por_cor_em(
+            &amostra,
+            (x as u32, y as u32),
+            opcoes.tolerancia,
+            opcoes.contigua,
+            opcoes.suavizar,
+        );
         self.entrar_na_selecao(nova, operacao, "Varinha mágica");
-        true
+        Ok(())
     }
 
     /// ⌘ + clique na miniatura: a seleção do que a camada tem pintado (o
