@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(any(target_os = "macos", windows, feature = "cuda"))]
 use ort::ep::ExecutionProvider;
 use ort::session::{RunOptions, Session};
 use ort::value::Tensor;
@@ -70,22 +71,28 @@ impl Backend {
 
     /// Está disponível nesta máquina? (A CPU, sempre.)
     pub fn disponivel(self) -> Result<(), String> {
-        let sim = match self {
-            Backend::Automatico | Backend::Cpu => return Ok(()),
+        match self {
+            Backend::Automatico | Backend::Cpu => Ok(()),
             #[cfg(target_os = "macos")]
-            Backend::CoreMl => ort::ep::CoreML::default().is_available(),
+            Backend::CoreMl => encontrado(ort::ep::CoreML::default().is_available()),
             #[cfg(windows)]
-            Backend::DirectMl => ort::ep::DirectML::default().is_available(),
+            Backend::DirectMl => encontrado(ort::ep::DirectML::default().is_available()),
             #[cfg(feature = "cuda")]
-            Backend::Cuda => ort::ep::CUDA::default().is_available(),
+            Backend::Cuda => encontrado(ort::ep::CUDA::default().is_available()),
             #[allow(unreachable_patterns)]
-            _ => return Err("não compilado nesta versão do app".into()),
-        };
-        match sim {
-            Ok(true) => Ok(()),
-            Ok(false) => Err("o ONNX Runtime não o encontrou nesta máquina".into()),
-            Err(e) => Err(e.to_string()),
+            _ => Err("não compilado nesta versão do app".into()),
         }
+    }
+}
+
+/// A resposta do ONNX Runtime sobre um backend acelerado. Só existe onde há
+/// algum compilado — no Linux sem `cuda` não há (a 0.1.106 quebrou ali).
+#[cfg(any(target_os = "macos", windows, feature = "cuda"))]
+fn encontrado(sim: ort::Result<bool>) -> Result<(), String> {
+    match sim {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("o ONNX Runtime não o encontrou nesta máquina".into()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -164,7 +171,7 @@ pub fn liberar() {
 fn carregar(modelo: &Path, backend: Backend) -> Result<Session, String> {
     backend.disponivel()?;
     let mut construtor = Session::builder().map_err(|e| e.to_string())?;
-    let ep = match backend {
+    let ep: Option<ort::ep::ExecutionProviderDispatch> = match backend {
         #[cfg(target_os = "macos")]
         Backend::CoreMl => Some(ort::ep::CoreML::default().build().error_on_failure()),
         #[cfg(windows)]
