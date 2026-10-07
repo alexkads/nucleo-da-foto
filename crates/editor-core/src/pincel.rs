@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::carimbo::Fonte;
+use crate::mesclagem::Modo;
 use crate::retangulo::Retangulo;
 use crate::selecao::Selecao;
 use crate::tiles::{indice, CamadaDePixels, Posicao, Tile, LADO_DO_TILE};
@@ -147,6 +148,11 @@ pub struct Pincel {
     /// `0..=1`: a suavização do traço (o "cordão" do Photoshop: a ponta só
     /// anda quando o ponteiro se afasta mais que o comprimento dele).
     pub suavizacao: f32,
+    /// O modo da **ferramenta** (o "Modo" da barra do pincel e do carimbo no
+    /// Photoshop), separado do modo da camada: como a tinta se mistura com o
+    /// que a camada já tem. Sobre transparente não há com o que misturar, e a
+    /// tinta entra como no Normal (a conta do W3C, `mesclar_em_camada`).
+    pub modo: Modo,
 }
 
 impl Default for Pincel {
@@ -162,6 +168,7 @@ impl Default for Pincel {
             espacamento: ESPACAMENTO_PADRAO,
             // O padrão do Photoshop é 10%.
             suavizacao: 0.1,
+            modo: Modo::Normal,
         }
     }
 }
@@ -535,8 +542,23 @@ impl Traco {
                         None => [0; 4],
                     };
                     let novo = match (self.pincel.ferramenta, self.fonte.as_mut()) {
-                        (Ferramenta::Carimbo, Some(fonte)) => match fonte.cor(px, py) {
-                            Some(cor) => aplicar_alfa(&Pincel { cor, ..self.pincel }, de_antes, a),
+                        (Ferramenta::Carimbo, Some(fonte)) => match fonte.cor_com_alfa(px, py) {
+                            // O alfa da origem (a camada atual tem
+                            // transparência) entra na cobertura.
+                            Some([r, g, b, alfa]) => {
+                                let a = a * alfa as f32 / 255.0;
+                                if a <= 0.0 {
+                                    continue;
+                                }
+                                pintar(
+                                    &Pincel {
+                                        cor: [r, g, b],
+                                        ..self.pincel
+                                    },
+                                    de_antes,
+                                    a,
+                                )
+                            }
                             // A origem caiu fora da foto: este pixel fica.
                             None => continue,
                         },
@@ -549,7 +571,7 @@ impl Traco {
                             let cor = cor_da_ferramenta(f, foto, suave);
                             aplicar_alfa(&Pincel { cor, ..self.pincel }, de_antes, a)
                         }
-                        _ => aplicar_alfa(&self.pincel, de_antes, a),
+                        _ => pintar(&self.pincel, de_antes, a),
                     };
                     tile[i..i + 4].copy_from_slice(&novo);
                 }
@@ -587,6 +609,17 @@ const CHEIO: u16 = u16::MAX;
 pub fn aplicar(pincel: &Pincel, antes: [u8; 4], cobertura: u8) -> [u8; 4] {
     let a = cobertura as f32 / 255.0 * pincel.opacidade.clamp(0.0, 1.0);
     aplicar_alfa(pincel, antes, a)
+}
+
+/// A tinta no modo da ferramenta: no Normal (e na borracha) a conta de
+/// [`aplicar_alfa`], bit a bit a de antes; nos outros modos, a do W3C com o
+/// pixel da camada como fundo.
+fn pintar(pincel: &Pincel, antes: [u8; 4], a: f32) -> [u8; 4] {
+    if pincel.modo == Modo::Normal || pincel.ferramenta == Ferramenta::Borracha {
+        return aplicar_alfa(pincel, antes, a);
+    }
+    let [r, g, b] = pincel.cor;
+    crate::mesclagem::mesclar_em_camada(antes, [r, g, b, 255], a, pincel.modo)
 }
 
 /// O mesmo, com o `a` (`0..=1`) já pronto — a máscara do traço vezes a

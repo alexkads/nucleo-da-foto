@@ -31,6 +31,25 @@ use crate::vista::Vista;
 /// A tolerância da lata de tinta — o padrão do Photoshop.
 pub const TOLERANCIA_DA_LATA: u8 = 32;
 
+/// As opções do carimbo (S) na barra do Photoshop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpcoesDoCarimbo {
+    /// Alinhado (o padrão): o primeiro traço depois de escolher a origem fixa
+    /// a distância, e os seguintes copiam à mesma distância. Desligado, cada
+    /// traço novo volta a copiar da origem escolhida.
+    pub alinhado: bool,
+    pub amostra: crate::carimbo::AmostraDoCarimbo,
+}
+
+impl Default for OpcoesDoCarimbo {
+    fn default() -> Self {
+        Self {
+            alinhado: true,
+            amostra: crate::carimbo::AmostraDoCarimbo::AtualEAbaixo,
+        }
+    }
+}
+
 /// De onde a varinha mágica lê a cor ("Amostrar todas as camadas" do
 /// Photoshop, desligado ou ligado).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,6 +137,8 @@ pub struct Sessao {
     lupa_pedida: Option<(u64, Retangulo)>,
     pedidos: u64,
     pub pincel: Pincel,
+    /// Alinhado e amostra do carimbo — opções da ferramenta, fora do desfazer.
+    pub carimbo: OpcoesDoCarimbo,
     /// Pontos da tela por pixel da foto, o zoom de agora — a suavização do
     /// pincel é medida na tela (ver `Traco::com_cordao`). A janela atualiza.
     pub escala_da_tela: f32,
@@ -192,6 +213,7 @@ impl Sessao {
             lupa_pedida: None,
             pedidos: 0,
             pincel: Pincel::default(),
+            carimbo: OpcoesDoCarimbo::default(),
             escala_da_tela: 1.0,
             ativa,
             na_mascara: false,
@@ -699,11 +721,45 @@ impl Sessao {
     /// De onde o carimbo copia quando o ponteiro está em `(x, y)` — a mira que
     /// a tela desenha. Antes do primeiro traço, é a própria origem.
     pub fn mira_do_carimbo(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        // Sem alinhar, fora de um traço a mira volta à origem.
+        if !self.carimbo.alinhado && self.traco.is_none() {
+            return self.origem;
+        }
         match (self.origem, self.distancia_do_carimbo) {
             (_, Some(d)) => Some((x + d.0, y + d.1)),
             (Some(o), None) => Some(o),
             _ => None,
         }
+    }
+
+    /// A prévia da origem com o ponteiro em `(x, y)` e o pincel de `raio`: o
+    /// quadrado do destino em volta do ponteiro (pixels da foto) e o que o
+    /// carimbo copiaria para ele, com a amostra escolhida. `None` sem origem.
+    pub fn previa_do_carimbo(
+        &self,
+        x: f32,
+        y: f32,
+        raio: f32,
+    ) -> Option<(Retangulo, image::RgbaImage)> {
+        let (mx, my) = self.mira_do_carimbo(x, y)?;
+        let r = raio.max(1.0);
+        let (l, a) = (self.doc.largura() as f32, self.doc.altura() as f32);
+        let x0 = (x - r).floor().clamp(0.0, l);
+        let y0 = (y - r).floor().clamp(0.0, a);
+        let x1 = (x + r).ceil().clamp(0.0, l);
+        let y1 = (y + r).ceil().clamp(0.0, a);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let ret = Retangulo::novo(x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32);
+        let mut fonte = crate::carimbo::Fonte::da_amostra(
+            self.base.clone(),
+            &self.doc,
+            self.ativa(),
+            self.carimbo.amostra,
+            (mx - x, my - y),
+        );
+        Some((ret, fonte.recorte(&ret)))
     }
 
     /// O conta-gotas: a cor da foto como ela aparece em `(x, y)`.
@@ -1055,7 +1111,12 @@ impl Sessao {
             "Transformação livre"
         };
         match (pixels, selecao) {
-            (Some(p), None) => self.hist.registrar(p),
+            // Com o nome do gesto no Histórico ("Mover", "Transformação
+            // livre"), e não o do traço que ele grava ("Pincel").
+            (Some(p), None) => self.hist.registrar(Comando::Varios {
+                nome: nome.into(),
+                passos: vec![p],
+            }),
             (Some(p), Some(s)) => self.hist.registrar(Comando::Varios {
                 nome: nome.into(),
                 passos: vec![p, s],
@@ -1640,13 +1701,22 @@ impl Sessao {
             let Some(origem) = self.origem else {
                 return false;
             };
-            let distancia = *self
-                .distancia_do_carimbo
-                .get_or_insert((origem.0 - x, origem.1 - y));
-            traco = traco.copiando_de(crate::carimbo::Fonte::nova(
+            // Alinhado: a distância do primeiro traço vale para os seguintes.
+            // Sem alinhar, cada traço começa copiando da origem.
+            let distancia = if self.carimbo.alinhado {
+                *self
+                    .distancia_do_carimbo
+                    .get_or_insert((origem.0 - x, origem.1 - y))
+            } else {
+                let d = (origem.0 - x, origem.1 - y);
+                self.distancia_do_carimbo = Some(d);
+                d
+            };
+            traco = traco.copiando_de(crate::carimbo::Fonte::da_amostra(
                 self.base.clone(),
                 &self.doc,
                 ativa,
+                self.carimbo.amostra,
                 distancia,
             ));
         }

@@ -182,6 +182,89 @@ impl Transformacao {
         )
     }
 
+    /// As oito alças da caixa, **na caixa de origem**, no sentido do relógio a
+    /// partir do canto de cima à esquerda: cantos nos índices pares, meios dos
+    /// lados nos ímpares (0 ↖, 1 ↑, 2 ↗, 3 →, 4 ↘, 5 ↓, 6 ↙, 7 ←). A oposta de
+    /// `i` é `(i + 4) % 8`.
+    pub fn alcas(caixa: &Retangulo) -> [(f32, f32); 8] {
+        let (x0, y0) = (caixa.x as f32, caixa.y as f32);
+        let (x1, y1) = (caixa.direita() as f32, caixa.baixo() as f32);
+        let (xm, ym) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        [
+            (x0, y0),
+            (xm, y0),
+            (x1, y0),
+            (x1, ym),
+            (x1, y1),
+            (xm, y1),
+            (x0, y1),
+            (x0, ym),
+        ]
+    }
+
+    /// A mesma escala e o mesmo giro, com o deslocamento acertado para o ponto
+    /// `pivo` (da caixa de origem) ficar onde estava em `antes` — escalar ou
+    /// girar em volta da alça oposta ou do ponto de referência.
+    pub fn fixando(mut self, caixa: &Retangulo, pivo: (f32, f32), antes: &Transformacao) -> Self {
+        let alvo = antes.aplicar(caixa, pivo.0, pivo.1);
+        let agora = self.aplicar(caixa, pivo.0, pivo.1);
+        self.dx += alvo.0 - agora.0;
+        self.dy += alvo.1 - agora.1;
+        self
+    }
+
+    /// A alça `alca` arrastada até `ponteiro` (pixels da foto), com `ancora`
+    /// (ponto da caixa de origem) parada: a alça oposta, ou o ponto de
+    /// referência com ⌥. Num canto, `proporcional` mantém a razão (o padrão do
+    /// Photoshop; ⇧ solta); num meio de lado, só aquele eixo muda. A escala não
+    /// passa por zero nem vira espelho (mínimo de 1%).
+    pub fn pela_alca(
+        &self,
+        caixa: &Retangulo,
+        alca: usize,
+        ponteiro: (f32, f32),
+        ancora: (f32, f32),
+        proporcional: bool,
+    ) -> Self {
+        let alcas = Self::alcas(caixa);
+        let h = alcas[alca % 8];
+        let o = (h.0 - ancora.0, h.1 - ancora.1);
+        let a = self.aplicar(caixa, ancora.0, ancora.1);
+        // O ponteiro no referencial da caixa (sem o giro), a partir da âncora.
+        let (s, c) = self.angulo.sin_cos();
+        let (px, py) = (ponteiro.0 - a.0, ponteiro.1 - a.1);
+        let d = (px * c + py * s, -px * s + py * c);
+        let canto = alca.is_multiple_of(2);
+        let mut nova = *self;
+        const MINIMO: f32 = 0.01;
+        if canto && proporcional {
+            let v = (self.escala_x * o.0, self.escala_y * o.1);
+            let v2 = v.0 * v.0 + v.1 * v.1;
+            if v2 > 1e-9 {
+                let k = (d.0 * v.0 + d.1 * v.1) / v2;
+                let k = k.max(MINIMO / self.escala_x.min(self.escala_y).max(MINIMO));
+                nova.escala_x = self.escala_x * k;
+                nova.escala_y = self.escala_y * k;
+            }
+        } else {
+            if o.0.abs() > 1e-6 {
+                nova.escala_x = (d.0 / o.0).max(MINIMO);
+            }
+            if o.1.abs() > 1e-6 {
+                nova.escala_y = (d.1 / o.1).max(MINIMO);
+            }
+        }
+        nova.fixando(caixa, ancora, self)
+    }
+
+    /// Girada de `delta` radianos em volta de `pivo` (ponto da caixa de
+    /// origem, o ponto de referência).
+    pub fn girada_em_volta(&self, caixa: &Retangulo, pivo: (f32, f32), delta: f32) -> Self {
+        let mut nova = *self;
+        nova.angulo += delta;
+        nova.fixando(caixa, pivo, self)
+    }
+
     /// Os quatro cantos da caixa transformada (sentido do relógio a partir do
     /// de cima à esquerda) — o que a tela desenha com as alças.
     pub fn cantos(&self, caixa: &Retangulo) -> [(f32, f32); 4] {
@@ -455,5 +538,65 @@ mod testes {
         let s = sobre(&fundo, &cima);
         assert_eq!(s.pixel(0, 0), [10, 10, 10, 255]);
         assert_eq!(s.pixel(1, 0), [200, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_alca_escala_com_a_oposta_parada() {
+        let caixa = Retangulo::novo(100, 100, 200, 100);
+        let t = Transformacao::default();
+        let alcas = Transformacao::alcas(&caixa);
+        // O canto ↘ (4) puxado até (500, 300) com o ↖ (0) parado, livre.
+        let n = t.pela_alca(&caixa, 4, (500.0, 300.0), alcas[0], false);
+        assert!((n.escala_x - 2.0).abs() < 1e-4 && (n.escala_y - 2.0).abs() < 1e-4);
+        let p0 = n.aplicar(&caixa, 100.0, 100.0);
+        assert!(
+            (p0.0 - 100.0).abs() < 1e-3 && (p0.1 - 100.0).abs() < 1e-3,
+            "{p0:?}"
+        );
+        // Proporcional: um arrasto torto mantém a razão.
+        let n = t.pela_alca(&caixa, 4, (500.0, 250.0), alcas[0], true);
+        assert!((n.escala_x - n.escala_y).abs() < 1e-4);
+        // O meio do lado direito (3): só a largura.
+        let n = t.pela_alca(&caixa, 3, (400.0, 170.0), alcas[7], true);
+        assert!((n.escala_x - 1.5).abs() < 1e-4 && (n.escala_y - 1.0).abs() < 1e-6);
+        let esquerda = n.aplicar(&caixa, 100.0, 150.0);
+        assert!((esquerda.0 - 100.0).abs() < 1e-3);
+        // Com ⌥ a âncora é o centro: o centro fica e os dois lados andam.
+        let centro = (200.0, 150.0);
+        let n = t.pela_alca(&caixa, 3, (400.0, 150.0), centro, false);
+        assert!((n.escala_x - 2.0).abs() < 1e-4);
+        let c = n.aplicar(&caixa, 200.0, 150.0);
+        assert!((c.0 - 200.0).abs() < 1e-3);
+        // Nunca vira espelho.
+        let n = t.pela_alca(&caixa, 3, (0.0, 150.0), alcas[7], false);
+        assert!(n.escala_x >= 0.01);
+    }
+
+    #[test]
+    fn o_giro_e_a_escala_respeitam_o_ponto_de_referencia() {
+        let caixa = Retangulo::novo(100, 100, 200, 100);
+        let t = Transformacao::default();
+        let referencia = (100.0, 100.0);
+        let n = t.girada_em_volta(&caixa, referencia, std::f32::consts::FRAC_PI_2);
+        let r = n.aplicar(&caixa, 100.0, 100.0);
+        assert!(
+            (r.0 - 100.0).abs() < 1e-3 && (r.1 - 100.0).abs() < 1e-3,
+            "{r:?}"
+        );
+        // O canto ↗ (300, 100) gira 90° em volta de (100, 100): vai a (100, 300).
+        let q = n.aplicar(&caixa, 300.0, 100.0);
+        assert!(
+            (q.0 - 100.0).abs() < 1e-3 && (q.1 - 300.0).abs() < 1e-3,
+            "{q:?}"
+        );
+        // Depois de girada, a alça segue no referencial da caixa.
+        let e = n.pela_alca(
+            &caixa,
+            3,
+            (100.0, 400.0),
+            Transformacao::alcas(&caixa)[7],
+            false,
+        );
+        assert!((e.escala_x - 1.5).abs() < 1e-3, "{}", e.escala_x);
     }
 }

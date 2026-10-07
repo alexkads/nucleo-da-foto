@@ -21,11 +21,51 @@ use image::RgbImage;
 use crate::composicao;
 use crate::documento::Documento;
 use crate::retangulo::Retangulo;
-use crate::tiles::{retangulo_do_tile, Posicao, LADO_DO_TILE};
+use crate::tiles::{retangulo_do_tile, CamadaDePixels, Posicao, LADO_DO_TILE};
+
+/// De onde o carimbo copia ("Amostra" na barra do carimbo do Photoshop).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AmostraDoCarimbo {
+    /// Só os pixels da camada escolhida, com a transparência — copiar de um
+    /// lugar vazio não pinta nada.
+    CamadaAtual,
+    /// A foto como aparece até a camada escolhida (o padrão dos retoques numa
+    /// camada vazia por cima).
+    #[default]
+    AtualEAbaixo,
+    /// A foto como aparece, com todas as camadas visíveis — também as de cima.
+    Todas,
+}
+
+impl AmostraDoCarimbo {
+    pub const TODAS: [AmostraDoCarimbo; 3] = [
+        AmostraDoCarimbo::CamadaAtual,
+        AmostraDoCarimbo::AtualEAbaixo,
+        AmostraDoCarimbo::Todas,
+    ];
+
+    pub fn chave(self) -> &'static str {
+        match self {
+            AmostraDoCarimbo::CamadaAtual => "atual",
+            AmostraDoCarimbo::AtualEAbaixo => "abaixo",
+            AmostraDoCarimbo::Todas => "todas",
+        }
+    }
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            AmostraDoCarimbo::CamadaAtual => "Camada atual",
+            AmostraDoCarimbo::AtualEAbaixo => "Atual e abaixo",
+            AmostraDoCarimbo::Todas => "Todas as camadas",
+        }
+    }
+}
 
 pub struct Fonte {
     base: Arc<RgbImage>,
     doc: Documento,
+    /// "Camada atual": os pixels da camada, sem compor (com alfa).
+    so_a_camada: Option<CamadaDePixels>,
     /// Da posição pintada à posição copiada, em pixels da foto.
     deslocamento: (i64, i64),
     tiles: BTreeMap<Posicao, RgbImage>,
@@ -46,11 +86,30 @@ impl Fonte {
         ate: usize,
         deslocamento: (f32, f32),
     ) -> Self {
+        Self::da_amostra(base, doc, ate, AmostraDoCarimbo::AtualEAbaixo, deslocamento)
+    }
+
+    /// A fonte da amostra escolhida, com a camada `ativa` como a escolhida.
+    pub fn da_amostra(
+        base: Arc<RgbImage>,
+        doc: &Documento,
+        ativa: usize,
+        amostra: AmostraDoCarimbo,
+        deslocamento: (f32, f32),
+    ) -> Self {
         let mut doc = doc.clone();
-        doc.camadas.truncate(ate + 1);
+        let so_a_camada = match amostra {
+            AmostraDoCarimbo::CamadaAtual => doc.camadas.get(ativa).map(|c| c.pixels.clone()),
+            AmostraDoCarimbo::AtualEAbaixo => {
+                doc.camadas.truncate(ativa + 1);
+                None
+            }
+            AmostraDoCarimbo::Todas => None,
+        };
         Self {
             base,
             doc,
+            so_a_camada,
             deslocamento: (deslocamento.0.round() as i64, deslocamento.1.round() as i64),
             tiles: BTreeMap::new(),
             suaves: BTreeMap::new(),
@@ -102,6 +161,38 @@ impl Fonte {
                 .to_image()
         });
         Some(tile.get_pixel(x % LADO_DO_TILE, y % LADO_DO_TILE).0)
+    }
+
+    /// A cor que vai para `(x, y)` com o alfa da origem (255 na foto
+    /// composta; o da camada em "Camada atual"); `None` fora da foto.
+    pub fn cor_com_alfa(&mut self, x: u32, y: u32) -> Option<[u8; 4]> {
+        if let Some(camada) = &self.so_a_camada {
+            let (ox, oy) = (
+                x as i64 + self.deslocamento.0,
+                y as i64 + self.deslocamento.1,
+            );
+            if ox < 0 || oy < 0 || ox >= camada.largura() as i64 || oy >= camada.altura() as i64 {
+                return None;
+            }
+            return Some(camada.pixel(ox as u32, oy as u32));
+        }
+        self.cor(x, y).map(|[r, g, b]| [r, g, b, 255])
+    }
+
+    /// A região da origem (pixels da foto) em RGBA — a prévia da origem que a
+    /// tela desenha dentro do círculo do pincel. Fora da foto, transparente.
+    pub fn recorte(&mut self, ret: &Retangulo) -> image::RgbaImage {
+        image::RgbaImage::from_fn(ret.largura, ret.altura, |x, y| {
+            let (px, py) = (ret.x + x, ret.y + y);
+            let (ox, oy) = (
+                px as i64 + self.deslocamento.0,
+                py as i64 + self.deslocamento.1,
+            );
+            if ox < 0 || oy < 0 {
+                return image::Rgba([0; 4]);
+            }
+            image::Rgba(self.cor_com_alfa(px, py).unwrap_or([0; 4]))
+        })
     }
 
     /// A cor que vai para `(x, y)`; `None` quando a origem cai fora da foto.
