@@ -1996,12 +1996,11 @@ impl Sessao {
         for _ in base + 1..=fim {
             let de_cima = doc.camadas[base + 1].clone();
             let mut pixels = doc.camadas[base].pixels.clone();
-            let mudanca = operacoes::mesclar_recortada_na_base(&mut pixels, &de_cima).unwrap_or(
-                Mudanca {
+            let mudanca =
+                operacoes::mesclar_recortada_na_base(&mut pixels, &de_cima).unwrap_or(Mudanca {
                     antes: Vec::new(),
                     depois: Vec::new(),
-                },
-            );
+                });
             let passo = Comando::Mesclar {
                 indice: base + 1,
                 de_cima: Box::new(de_cima),
@@ -2064,9 +2063,7 @@ impl Sessao {
         let mut traco = Traco::novo(pincel)
             .dentro_de(self.selecao.clone())
             .com_cordao(self.escala_da_tela);
-        if self.pincel.ferramenta.le_a_foto()
-            && self.pincel.ferramenta != crate::pincel::Ferramenta::Carimbo
-        {
+        if self.pincel.ferramenta.le_a_foto() && !self.pincel.ferramenta.copia_da_origem() {
             // Tom e foco: a foto até a camada escolhida, no próprio lugar.
             traco = traco.copiando_de(crate::carimbo::Fonte::nova(
                 self.base.clone(),
@@ -2075,7 +2072,7 @@ impl Sessao {
                 (0.0, 0.0),
             ));
         }
-        if self.pincel.ferramenta == crate::pincel::Ferramenta::Carimbo {
+        if self.pincel.ferramenta.copia_da_origem() {
             let Some(origem) = self.origem else {
                 return false;
             };
@@ -2123,12 +2120,18 @@ impl Sessao {
     /// O ponteiro subiu: o traço vira um passo do desfazer. Devolve se houve
     /// mudança.
     pub fn soltar(&mut self) -> bool {
-        let Some(traco) = self.traco.take() else {
+        let Some(mut traco) = self.traco.take() else {
             return false;
         };
         self.fim_do_ultimo_traco = traco.ponta().or(self.fim_do_ultimo_traco);
         let camada = self.ativa();
         let na_mascara = self.na_mascara();
+        // A recuperação adapta a cópia ao destino agora, num passo só com o
+        // traço.
+        let sujo = traco.recuperar(self.doc.camadas[camada].alvo_mut(na_mascara));
+        if !sujo.vazio() {
+            self.refazer_a_vista(&sujo);
+        }
         match traco.terminar(self.doc.camadas[camada].alvo_mut(na_mascara)) {
             Some(mudanca) => {
                 self.hist.registrar(Comando::Traco {
@@ -2656,7 +2659,10 @@ mod testes {
         assert_eq!((nova.pixel(50, 50)[3], nova.pixel(150, 50)[3]), (255, 0));
         assert!(s.selecao().is_none(), "a seleção sai com a cópia");
         s.escolher_camada(0);
-        assert!(!s.camada_via_copia(true), "sem seleção não há o que recortar");
+        assert!(
+            !s.camada_via_copia(true),
+            "sem seleção não há o que recortar"
+        );
         s.selecionar(
             &Forma::Retangulo(Retangulo::novo(0, 0, 100, 100)),
             Operacao::Nova,

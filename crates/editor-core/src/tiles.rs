@@ -69,7 +69,12 @@ impl CamadaDePixels {
                         let inicio = ((y0 + ly) as usize * largura as usize + x0 as usize) * 3;
                         let linha = &fonte[inicio..inicio + w * 3];
                         let destino = &mut tile[indice(0, ly)..indice(0, ly) + w * 4];
-                        for (d, o) in destino.chunks_exact_mut(4).zip(linha.chunks_exact(3)) {
+                        for (d, o) in destino
+                            .as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(linha.as_chunks::<3>().0)
+                        {
                             d.copy_from_slice(&[o[0], o[1], o[2], 255]);
                         }
                     }

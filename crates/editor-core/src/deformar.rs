@@ -150,7 +150,10 @@ impl Malha {
             p.1 += dy;
         };
         if canto {
-            let (jj, ii) = (if linha == 0 { 1 } else { 2 }, if coluna == 0 { 1 } else { 2 });
+            let (jj, ii) = (
+                if linha == 0 { 1 } else { 2 },
+                if coluna == 0 { 1 } else { 2 },
+            );
             mover(linha, coluna);
             mover(linha, ii);
             mover(jj, coluna);
@@ -352,7 +355,10 @@ pub fn desenhar(conteudo: &Conteudo, malha: &Malha, largura: u32, altura: u32) -
                     continue;
                 }
                 let ys = xy.map(|p| p.1);
-                let (ymin, ymax) = (ys.iter().cloned().fold(f32::MAX, f32::min), ys.iter().cloned().fold(f32::MIN, f32::max));
+                let (ymin, ymax) = (
+                    ys.iter().cloned().fold(f32::MAX, f32::min),
+                    ys.iter().cloned().fold(f32::MIN, f32::max),
+                );
                 triangulos.push(Triangulo {
                     xy,
                     uv: tri.map(|v| v.1),

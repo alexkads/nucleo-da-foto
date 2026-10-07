@@ -308,11 +308,7 @@ impl Documento {
     /// própria base quando nada é recortado nela).
     pub fn fim_do_conjunto(&self, indice: usize) -> usize {
         let mut fim = indice;
-        while self
-            .camadas
-            .get(fim + 1)
-            .is_some_and(|c| c.recortada)
-        {
+        while self.camadas.get(fim + 1).is_some_and(|c| c.recortada) {
             fim += 1;
         }
         fim

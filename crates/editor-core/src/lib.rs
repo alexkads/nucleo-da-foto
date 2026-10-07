@@ -23,6 +23,7 @@ pub mod mesclagem;
 pub mod operacoes;
 pub mod pincel;
 pub mod projeto;
+pub mod recuperacao;
 pub mod retangulo;
 pub mod selecao;
 pub mod sessao;
@@ -37,11 +38,11 @@ mod testes_das_ferramentas_de_selecao;
 #[cfg(test)]
 mod testes_do_carimbo;
 #[cfg(test)]
+mod testes_do_retoque;
+#[cfg(test)]
 mod testes_dos_controles;
 #[cfg(test)]
 mod testes_fora_da_foto;
-#[cfg(test)]
-mod testes_do_retoque;
 
 pub use ajuste::Ajuste;
 pub use carimbo::AmostraDoCarimbo;

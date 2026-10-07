@@ -122,7 +122,7 @@ fn o_de_fora_grava_e_reabre_desde_o_formato_7() {
         serde_json::from_slice(&std::fs::read(dir.path().join("e1/projeto.json")).unwrap())
             .unwrap();
     assert_eq!(json["formato"], FORMATO);
-    assert!(FORMATO >= 7);
+    const { assert!(FORMATO >= 7) };
     p.coletar(1).unwrap();
     let aberto = projeto(dir.path()).abrir(&base).unwrap().unwrap();
     assert_eq!(aberto.documento, doc);

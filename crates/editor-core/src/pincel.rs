@@ -43,6 +43,10 @@ pub enum Ferramenta {
     Borracha,
     /// Copia da [`Fonte`] em vez de pintar uma cor — o carimbo (S).
     Carimbo,
+    /// O pincel de recuperação com origem manual (J, ⌥ + clique na origem):
+    /// copia como o carimbo durante o traço e, ao soltar, adapta a cor e a
+    /// luz da cópia ao destino em volta (`recuperacao.rs`).
+    Recuperacao,
     /// Clareia a foto onde passa, na faixa de tons escolhida (O).
     Subexposicao(Faixa),
     /// Escurece a foto onde passa, na faixa de tons escolhida (⇧O).
@@ -58,6 +62,11 @@ impl Ferramenta {
     /// o carimbo e as de tom e de foco.
     pub fn le_a_foto(self) -> bool {
         !matches!(self, Ferramenta::Pincel | Ferramenta::Borracha)
+    }
+
+    /// Copia de uma origem escolhida com ⌥ + clique (carimbo e recuperação).
+    pub fn copia_da_origem(self) -> bool {
+        matches!(self, Ferramenta::Carimbo | Ferramenta::Recuperacao)
     }
 }
 
@@ -153,7 +162,14 @@ pub struct Pincel {
     /// que a camada já tem. Sobre transparente não há com o que misturar, e a
     /// tinta entra como no Normal (a conta do W3C, `mesclar_em_camada`).
     pub modo: Modo,
+    /// A difusão do pincel de recuperação, de 1 a 7 (a do Photoshop): quanto
+    /// a borda do traço é suavizada antes de a cor se adaptar a ela. Não tem
+    /// nada com a difusão da seleção.
+    pub difusao: u8,
 }
+
+/// A difusão padrão da recuperação (a do Photoshop).
+pub const DIFUSAO_PADRAO: u8 = 5;
 
 impl Default for Pincel {
     fn default() -> Self {
@@ -169,6 +185,7 @@ impl Default for Pincel {
             // O padrão do Photoshop é 10%.
             suavizacao: 0.1,
             modo: Modo::Normal,
+            difusao: DIFUSAO_PADRAO,
         }
     }
 }
@@ -545,26 +562,28 @@ impl Traco {
                         None => [0; 4],
                     };
                     let novo = match (self.pincel.ferramenta, self.fonte.as_mut()) {
-                        (Ferramenta::Carimbo, Some(fonte)) => match fonte.cor_com_alfa(px, py) {
-                            // O alfa da origem (a camada atual tem
-                            // transparência) entra na cobertura.
-                            Some([r, g, b, alfa]) => {
-                                let a = a * alfa as f32 / 255.0;
-                                if a <= 0.0 {
-                                    continue;
+                        (Ferramenta::Carimbo | Ferramenta::Recuperacao, Some(fonte)) => {
+                            match fonte.cor_com_alfa(px, py) {
+                                // O alfa da origem (a camada atual tem
+                                // transparência) entra na cobertura.
+                                Some([r, g, b, alfa]) => {
+                                    let a = a * alfa as f32 / 255.0;
+                                    if a <= 0.0 {
+                                        continue;
+                                    }
+                                    pintar(
+                                        &Pincel {
+                                            cor: [r, g, b],
+                                            ..self.pincel
+                                        },
+                                        de_antes,
+                                        a,
+                                    )
                                 }
-                                pintar(
-                                    &Pincel {
-                                        cor: [r, g, b],
-                                        ..self.pincel
-                                    },
-                                    de_antes,
-                                    a,
-                                )
+                                // A origem caiu fora da foto: este pixel fica.
+                                None => continue,
                             }
-                            // A origem caiu fora da foto: este pixel fica.
-                            None => continue,
-                        },
+                        }
                         (f, Some(fonte)) if f.le_a_foto() => {
                             let (Some(foto), Some(suave)) =
                                 (fonte.cor(px, py), fonte.desfocada(px, py))
@@ -581,6 +600,105 @@ impl Traco {
             }
         }
         area
+    }
+
+    /// A recuperação (`Ferramenta::Recuperacao`), no soltar: o traço já
+    /// copiou a origem; aqui cada pixel tocado é refeito a partir do de antes
+    /// do traço com a cor **adaptada** (`recuperacao::adaptar`), com a mesma
+    /// cobertura. Devolve a região refeita.
+    pub fn recuperar(&mut self, camada: &mut CamadaDePixels) -> Retangulo {
+        let Some(fonte) = self.fonte.as_mut() else {
+            return Retangulo::default();
+        };
+        if self.pincel.ferramenta != Ferramenta::Recuperacao {
+            return Retangulo::default();
+        }
+        let (largura, altura) = (camada.largura(), camada.altura());
+        // A caixa do traço, com folga para a borda e a suavização dela.
+        let mut caixa = Retangulo::default();
+        for (posicao, cob) in &self.cobertura {
+            if cob.iter().any(|m| *m > 0) {
+                caixa = caixa.uniao(&crate::tiles::retangulo_do_tile(*posicao, largura, altura));
+            }
+        }
+        if caixa.vazio() {
+            return caixa;
+        }
+        let folga = 2 + 3 * self.pincel.difusao.clamp(1, 7) as u32;
+        let x0 = caixa.x.saturating_sub(folga);
+        let y0 = caixa.y.saturating_sub(folga);
+        let caixa = Retangulo::novo(
+            x0,
+            y0,
+            (caixa.direita() + folga).min(largura) - x0,
+            (caixa.baixo() + folga).min(altura) - y0,
+        );
+        let (w, h) = (caixa.largura as usize, caixa.altura as usize);
+        if w * h > crate::recuperacao::LIMITE_DE_PIXELS || w < 3 || h < 3 {
+            return Retangulo::default();
+        }
+        let cobertura_em = |x: u32, y: u32| -> u16 {
+            let posicao = crate::tiles::tile_de(x, y);
+            self.cobertura.get(&posicao).map_or(0, |c| {
+                c[((y % LADO_DO_TILE) * LADO_DO_TILE + x % LADO_DO_TILE) as usize]
+            })
+        };
+        let mut origem = Vec::with_capacity(w * h);
+        let mut destino = Vec::with_capacity(w * h);
+        let mut livre = Vec::with_capacity(w * h);
+        let mut alfa = Vec::with_capacity(w * h);
+        for y in caixa.y..caixa.baixo() {
+            for x in caixa.x..caixa.direita() {
+                let d = fonte.no_lugar(x, y).unwrap_or([0; 4]);
+                let o = fonte.cor_com_alfa(x, y);
+                let d3 = [d[0] as f32, d[1] as f32, d[2] as f32];
+                origem.push(o.map_or(d3, |o| [o[0] as f32, o[1] as f32, o[2] as f32]));
+                destino.push(d3);
+                alfa.push(o.map_or(0, |o| o[3]));
+                // A beira do retângulo é sempre borda.
+                let na_beira = x == caixa.x
+                    || y == caixa.y
+                    || x + 1 == caixa.direita()
+                    || y + 1 == caixa.baixo();
+                livre.push(!na_beira && cobertura_em(x, y) > 0);
+            }
+        }
+        let resultado =
+            crate::recuperacao::adaptar(&origem, &destino, &livre, w, h, self.pincel.difusao);
+        let opacidade = self.pincel.opacidade.clamp(0.0, 1.0);
+        let pincel = self.pincel;
+        for (posicao, cob) in &self.cobertura {
+            let antes = self.antes.get(posicao).cloned().flatten();
+            let (tx0, ty0) = (
+                posicao.0 as u32 * LADO_DO_TILE,
+                posicao.1 as u32 * LADO_DO_TILE,
+            );
+            let tile = camada.tile_mut(*posicao);
+            for (k, m) in cob.iter().enumerate() {
+                if *m == 0 {
+                    continue;
+                }
+                let (lx, ly) = (k as u32 % LADO_DO_TILE, k as u32 / LADO_DO_TILE);
+                let (x, y) = (tx0 + lx, ty0 + ly);
+                if x < caixa.x || y < caixa.y || x >= caixa.direita() || y >= caixa.baixo() {
+                    continue;
+                }
+                let j = ((y - caixa.y) as usize) * w + (x - caixa.x) as usize;
+                let a = *m as f32 / CHEIO as f32 * opacidade * alfa[j] as f32 / 255.0;
+                let i = indice(lx, ly);
+                let de_antes = match &antes {
+                    Some(t) => [t[i], t[i + 1], t[i + 2], t[i + 3]],
+                    None => [0; 4],
+                };
+                if a <= 0.0 {
+                    continue;
+                }
+                let cor = resultado[j].map(|v| v.round() as u8);
+                let novo = pintar(&Pincel { cor, ..pincel }, de_antes, a);
+                tile[i..i + 4].copy_from_slice(&novo);
+            }
+        }
+        caixa
     }
 
     /// Fecha o traço. `None` quando ele não mudou nada (clique fora da foto).

@@ -62,9 +62,17 @@ fn a_camada_da_fotografia_e_a_base_opaca_logo_acima_dela() {
         let b = base.get_pixel(x, y).0;
         assert_eq!(p.pixel(x, y), [b[0], b[1], b[2], 255], "({x}, {y})");
     }
-    assert_eq!(p.pixel_em(700, 10)[3], 0, "o resto do tile da borda é vazio");
+    assert_eq!(
+        p.pixel_em(700, 10)[3],
+        0,
+        "o resto do tile da borda é vazio"
+    );
     assert_eq!(p.quantos(), 3 * 3, "um tile por posição da foto");
-    assert_eq!(doc.base, BaseRef::da_imagem(&base), "a referência da base fica");
+    assert_eq!(
+        doc.base,
+        BaseRef::da_imagem(&base),
+        "a referência da base fica"
+    );
     assert_eq!(s.compor().as_raw(), base.as_raw(), "compõe a base exata");
     assert!(s.alterado());
 
@@ -90,8 +98,13 @@ fn a_camada_da_fotografia_sozinha_nao_publica_versao_editada() {
     let base = s.base().clone();
     let (doc, hist) = s.instantaneo();
     assert!(!doc.neutro(), "a camada tem pixels…");
-    let salvo = projeto(dir.path()).salvar("e1", &base, &doc, &hist, 1).unwrap();
-    assert!(salvo.versao.is_none(), "…mas compõe a base: sem versão (C30)");
+    let salvo = projeto(dir.path())
+        .salvar("e1", &base, &doc, &hist, 1)
+        .unwrap();
+    assert!(
+        salvo.versao.is_none(),
+        "…mas compõe a base: sem versão (C30)"
+    );
 
     // Um retoque nela já é edição — e reabre igual.
     s.pincel.cor = [255, 0, 0];
@@ -100,7 +113,9 @@ fn a_camada_da_fotografia_sozinha_nao_publica_versao_editada() {
     s.arrastar(140.0, 100.0);
     s.soltar();
     let (doc, hist) = s.instantaneo();
-    let salvo = projeto(dir.path()).salvar("e1", &base, &doc, &hist, 2).unwrap();
+    let salvo = projeto(dir.path())
+        .salvar("e1", &base, &doc, &hist, 2)
+        .unwrap();
     assert!(salvo.versao.is_some());
     projeto(dir.path()).coletar(2).unwrap();
     let aberto = projeto(dir.path()).abrir(&base).unwrap().unwrap();
@@ -145,7 +160,10 @@ fn via_copia_da_fotografia_leva_a_borda_difusa_e_tira_a_selecao() {
     let passos = s.historico().passos().len();
     assert!(s.desfazer());
     assert_eq!(s.documento().camadas.len(), 2);
-    assert_eq!(s.selecao().map(|x| x.valor(borda, 230)), Some(sel.valor(borda, 230)));
+    assert_eq!(
+        s.selecao().map(|x| x.valor(borda, 230)),
+        Some(sel.valor(borda, 230))
+    );
     assert!(s.refazer());
     assert_eq!(s.historico().passos().len(), passos);
 }
@@ -166,7 +184,10 @@ fn dois_ctrl_j_dao_duas_copias_identicas_sem_atenuar_a_borda() {
     );
     // "Duplicar camada" também é exato.
     s.duplicar_camada();
-    assert_eq!(s.documento().camadas[3].pixels, s.documento().camadas[1].pixels);
+    assert_eq!(
+        s.documento().camadas[3].pixels,
+        s.documento().camadas[1].pixels
+    );
 }
 
 // ------------------------------------------------------ máscara de corte
@@ -223,7 +244,11 @@ fn a_recortada_so_aparece_onde_a_base_tem_pixels() {
     assert_eq!(px(&s, 350, 200), foto, "fora da base a azul não aparece");
     assert_eq!(px(&s, 200, 200), [20, 40, 230], "dentro, a azul");
     assert_eq!(px(&s, 120, 120), [220, 30, 30], "a base fora da azul");
-    assert_eq!(solto.get_pixel(350, 200).0, [20, 40, 230], "solta, aparecia");
+    assert_eq!(
+        solto.get_pixel(350, 200).0,
+        [20, 40, 230],
+        "solta, aparecia"
+    );
     assert_eq!(s.historico().passos().len(), 1);
     assert!(s.desfazer());
     assert_eq!(s.compor(), solto);
@@ -268,7 +293,11 @@ fn mascara_da_base_e_da_recortada_e_visibilidade() {
     pintar(&mut m.pixels, 0, 0, 220, 520, [0, 0, 0], 255);
     doc.camadas[1].mascara = Some(m);
     let s2 = Sessao::nova(s.base().clone(), doc.clone(), Historico::novo(), 350);
-    assert_eq!(s2.compor().get_pixel(200, 200).0, f200, "a base esconde a recortada");
+    assert_eq!(
+        s2.compor().get_pixel(200, 200).0,
+        f200,
+        "a base esconde a recortada"
+    );
     assert_eq!(s2.compor().get_pixel(250, 200).0, [20, 40, 230]);
     // A máscara da recortada só esconde ela.
     doc.camadas[1].mascara = None;
@@ -288,7 +317,10 @@ fn mascara_da_base_e_da_recortada_e_visibilidade() {
     let s5 = Sessao::nova(s.base().clone(), doc.clone(), Historico::novo(), 350);
     assert_eq!(s5.compor().get_pixel(200, 200).0, f200);
     assert_eq!(s5.compor().get_pixel(120, 120).0, f120);
-    assert!(s5.documento().neutro(), "recortada sobre base escondida não é edição");
+    assert!(
+        s5.documento().neutro(),
+        "recortada sobre base escondida não é edição"
+    );
 }
 
 #[test]
@@ -329,7 +361,11 @@ fn mesclar_a_recortada_na_base_nao_muda_a_foto() {
         "a base não cresce"
     );
     assert!(s.desfazer());
-    assert_eq!(s.documento(), &doc_antes, "camadas, máscaras e recorte voltam");
+    assert_eq!(
+        s.documento(),
+        &doc_antes,
+        "camadas, máscaras e recorte voltam"
+    );
 }
 
 #[test]
@@ -338,11 +374,22 @@ fn ctrl_e_na_base_mescla_o_conjunto_num_passo() {
     s.criar_mascara_de_corte(2);
     s.escolher_camada(2);
     s.duplicar_camada();
-    assert!(s.documento().camadas[3].recortada, "a cópia fica no conjunto");
+    assert!(
+        s.documento().camadas[3].recortada,
+        "a cópia fica no conjunto"
+    );
     let mut doc = s.documento().clone();
     doc.camadas[3].opacidade = 0.4;
     doc.camadas[3].pixels = CamadaDePixels::nova(700, 520);
-    pintar(&mut doc.camadas[3].pixels, 250, 120, 330, 280, [250, 250, 0], 200);
+    pintar(
+        &mut doc.camadas[3].pixels,
+        250,
+        120,
+        330,
+        280,
+        [250, 250, 0],
+        200,
+    );
     let mut s = Sessao::nova(s.base().clone(), doc, Historico::novo(), 350);
     let antes = s.compor();
     let doc_antes = s.documento().clone();
@@ -378,7 +425,11 @@ fn camada_nova_no_meio_do_conjunto_entra_nele() {
     s.nova_camada();
     assert_eq!(s.ativa(), 2);
     assert!(s.documento().camadas[2].recortada);
-    assert_eq!(s.documento().base_do_recorte(3), Some(1), "a azul segue na base");
+    assert_eq!(
+        s.documento().base_do_recorte(3),
+        Some(1),
+        "a azul segue na base"
+    );
 }
 
 #[test]
@@ -404,7 +455,12 @@ fn mover_leva_o_conjunto_inteiro() {
     let foto_antes = s.compor();
     // A base sobe com a azul por cima da nova.
     assert!(s.mover_camada(1));
-    let nomes: Vec<_> = s.documento().camadas.iter().map(|c| c.nome.clone()).collect();
+    let nomes: Vec<_> = s
+        .documento()
+        .camadas
+        .iter()
+        .map(|c| c.nome.clone())
+        .collect();
     assert_eq!(nomes[2..], ["Base".to_string(), "Cima".to_string()]);
     assert_eq!(s.ativa(), 2);
     assert!(s.documento().camadas[3].recortada);
@@ -443,7 +499,9 @@ fn o_recorte_grava_e_reabre_no_formato_8() {
     let base = s.base().clone();
     s.criar_mascara_de_corte(2);
     let (doc, hist) = s.instantaneo();
-    projeto(dir.path()).salvar("e1", &base, &doc, &hist, 1).unwrap();
+    projeto(dir.path())
+        .salvar("e1", &base, &doc, &hist, 1)
+        .unwrap();
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("e1/projeto.json")).unwrap())
             .unwrap();
@@ -512,7 +570,10 @@ fn a_grade_parada_e_a_identidade_e_o_ctrl_t_vira_malha_exata() {
     for (u, v) in [(0.0, 0.0), (0.25, 0.8), (1.0, 0.5)] {
         let (x, y) = mt.ponto(u, v);
         let (ex, ey) = t.aplicar(&caixa, 100.0 + 300.0 * u, 50.0 + 120.0 * v);
-        assert!((x - ex).abs() < 1e-2 && (y - ey).abs() < 1e-2, "afim é exata");
+        assert!(
+            (x - ex).abs() < 1e-2 && (y - ey).abs() < 1e-2,
+            "afim é exata"
+        );
     }
 }
 
@@ -530,7 +591,10 @@ fn malha_parada_e_deslocada_reproduzem_o_conteudo_com_alfa() {
     let dd = deformar::desenhar(&conteudo, &desloc, 700, 520);
     for y in 140..270 {
         for x in 190..330 {
-            assert!(max_dif(d.pixel(x, y), c.pixel(x, y)) <= 1, "identidade em ({x}, {y})");
+            assert!(
+                max_dif(d.pixel(x, y), c.pixel(x, y)) <= 1,
+                "identidade em ({x}, {y})"
+            );
             assert!(
                 max_dif(dd.pixel(x + 37, y - 20), c.pixel(x, y)) <= 1,
                 "deslocada em ({x}, {y})"
@@ -563,7 +627,10 @@ fn levantar_a_mandibula_deforma_sem_buracos_e_so_dentro_da_caixa() {
                 continue;
             }
             let (x, y) = m.ponto(u, v);
-            assert!(d.pixel(x as u32, y as u32)[3] >= 250, "buraco em ({x}, {y})");
+            assert!(
+                d.pixel(x as u32, y as u32)[3] >= 250,
+                "buraco em ({x}, {y})"
+            );
             opacos += 1;
         }
     }
@@ -571,7 +638,10 @@ fn levantar_a_mandibula_deforma_sem_buracos_e_so_dentro_da_caixa() {
     // O meio de baixo subiu; os cantos de cima ficaram.
     let (_, y_meio) = m.ponto(0.5, 1.0);
     assert!(y_meio < cy + a - 7.0, "¾ dos 10 px da borda");
-    assert!(max_dif(d.pixel(201, 151), c.pixel(201, 151)) <= 2, "canto de cima parado");
+    assert!(
+        max_dif(d.pixel(201, 151), c.pixel(201, 151)) <= 2,
+        "canto de cima parado"
+    );
     // Nada fora da caixa da malha.
     assert_eq!(d.pixel(100, 100)[3], 0);
     assert_eq!(d.pixel(400, 300)[3], 0);
@@ -585,7 +655,9 @@ fn malha_dobrada_degenerada_ou_absurda_nao_quebra() {
     // Dobra: o canto de cima à esquerda passa do de baixo à direita.
     m.mover_ponto(0, 0, 300.0, 250.0);
     let d = deformar::desenhar(&conteudo, &m, 700, 520);
-    assert!(d.todos().all(|(_, t)| t.len() == crate::tiles::BYTES_DO_TILE));
+    assert!(d
+        .todos()
+        .all(|(_, t)| t.len() == crate::tiles::BYTES_DO_TILE));
     // Tudo num ponto só: nada a desenhar.
     let mut ponto = m;
     for p in ponto.pontos.iter_mut().flatten() {
@@ -609,8 +681,14 @@ fn puxar_por_dentro_leva_o_ponto_agarrado() {
     let antes = m.ponto(0.5, 0.8);
     m.puxar(0.5, 0.8, 0.0, -30.0);
     let depois = m.ponto(0.5, 0.8);
-    assert!((depois.1 - (antes.1 - 30.0)).abs() < 1e-2, "o ponto agarrado anda o arrasto");
-    assert!((m.ponto(0.0, 0.0).1).abs() < 1.0, "o canto longe quase não anda");
+    assert!(
+        (depois.1 - (antes.1 - 30.0)).abs() < 1e-2,
+        "o ponto agarrado anda o arrasto"
+    );
+    assert!(
+        (m.ponto(0.0, 0.0).1).abs() < 1.0,
+        "o canto longe quase não anda"
+    );
     let (u, v) = m.onde(depois.0, depois.1).unwrap();
     assert!((u - 0.5).abs() < 0.02 && (v - 0.8).abs() < 0.02);
     assert_eq!(m.pegar(0.4, 0.3, 5.0), Some(deformar::Pega::Ponto(0, 0)));
@@ -681,7 +759,11 @@ fn do_ctrl_t_ao_deformar_e_de_volta_sem_mexer() {
     assert!(s.comecar_a_deformar());
     let (_, m) = s.malha().unwrap();
     assert_eq!(m.pontos[0][0], (caixa.x as f32 + 12.0, caixa.y as f32));
-    assert_eq!(s.documento().camadas[2].pixels, movido, "a passagem não muda pixel");
+    assert_eq!(
+        s.documento().camadas[2].pixels,
+        movido,
+        "a passagem não muda pixel"
+    );
     assert!(s.malha_intocada());
     assert!(s.voltar_a_transformacao_livre());
     let mut m2 = m;
@@ -733,7 +815,9 @@ fn deformado_grava_reabre_e_desfaz() {
     s.definir_malha(m);
     s.aplicar_transformacao();
     let (doc, hist) = s.instantaneo();
-    projeto(dir.path()).salvar("e1", &base, &doc, &hist, 1).unwrap();
+    projeto(dir.path())
+        .salvar("e1", &base, &doc, &hist, 1)
+        .unwrap();
     projeto(dir.path()).coletar(1).unwrap();
     let aberto = projeto(dir.path()).abrir(&base).unwrap().unwrap();
     assert_eq!(aberto.documento, doc);
@@ -742,4 +826,107 @@ fn deformado_grava_reabre_e_desfaz() {
     assert!(s2.desfazer());
     assert!(s.desfazer());
     assert_eq!(s2.documento(), s.documento());
+}
+
+// ------------------------------------------------ pincel de recuperação
+
+use crate::pincel::Ferramenta;
+
+/// "Pele" com poros (textura de ±12): clara (175) à esquerda de x = 350 e
+/// mais escura (115) à direita.
+fn pele() -> Sessao {
+    let base = Arc::new(RgbImage::from_fn(700, 520, |x, y| {
+        let poro = if (x / 3 + y / 3) % 2 == 0 { 12i32 } else { -12 };
+        let tom = if x < 350 { 175 } else { 115 };
+        let v = |d: i32| (tom + d + poro).clamp(0, 255) as u8;
+        image::Rgb([v(20), v(0), v(-15)])
+    }));
+    let doc = Documento::novo(BaseRef::da_imagem(&base));
+    let mut s = Sessao::nova(base, doc, Historico::novo(), 350);
+    s.pincel.suavizacao = 0.0;
+    s
+}
+
+fn media_e_desvio(img: &RgbImage, x0: u32, y0: u32, lado: u32) -> (f32, f32) {
+    let v: Vec<f32> = (y0..y0 + lado)
+        .flat_map(|y| (x0..x0 + lado).map(move |x| (x, y)))
+        .map(|(x, y)| img.get_pixel(x, y).0[1] as f32)
+        .collect();
+    let m = v.iter().sum::<f32>() / v.len() as f32;
+    let d = (v.iter().map(|a| (a - m).powi(2)).sum::<f32>() / v.len() as f32).sqrt();
+    (m, d)
+}
+
+fn pincelada(s: &mut Sessao, ferramenta: Ferramenta) -> RgbImage {
+    s.pincel.ferramenta = ferramenta;
+    s.pincel.raio = 25.0;
+    s.pincel.dureza = 0.6;
+    s.definir_origem(150.0, 200.0); // pele clara
+    assert!(s.apertar(500.0, 200.0)); // pele escura
+    for k in 1..=40 {
+        s.arrastar(500.0, 200.0 + k as f32 * 2.0);
+    }
+    assert!(s.soltar());
+    s.compor()
+}
+
+#[test]
+fn a_recuperacao_leva_a_textura_e_adapta_a_luz_ao_destino() {
+    let mut carimbo = pele();
+    carimbo.nova_camada();
+    let clonado = pincelada(&mut carimbo, Ferramenta::Carimbo);
+    let mut s = pele();
+    s.nova_camada();
+    let curado = pincelada(&mut s, Ferramenta::Recuperacao);
+    let (m_carimbo, _) = media_e_desvio(&clonado, 490, 230, 20);
+    let (m_curado, d_curado) = media_e_desvio(&curado, 490, 230, 20);
+    let (m_destino, d_destino) = media_e_desvio(s.base(), 490, 230, 20);
+    assert!(
+        (m_carimbo - 175.0).abs() < 6.0,
+        "o carimbo traz a luz da origem: {m_carimbo}"
+    );
+    assert!(
+        (m_curado - m_destino).abs() < 8.0,
+        "a recuperação, a do destino: {m_curado} × {m_destino}"
+    );
+    assert!(
+        d_curado > 0.6 * d_destino,
+        "a textura vem junto: {d_curado} × {d_destino}"
+    );
+    // Só a camada de cima mudou; a base e a fotografia não.
+    assert!(s.documento().camadas[0].pixels.vazia());
+    assert!(!s.documento().camadas[1].pixels.vazia());
+    assert_eq!(s.historico().passos().len(), 2, "nova camada + um traço");
+    assert!(s.desfazer());
+    assert!(s.documento().camadas[1].pixels.vazia());
+}
+
+#[test]
+fn a_recuperacao_respeita_a_selecao_e_a_borda_some() {
+    let mut s = pele();
+    s.nova_camada();
+    s.selecionar(
+        &Forma::Retangulo(Retangulo::novo(480, 180, 60, 60)),
+        Operacao::Nova,
+    );
+    let curado = pincelada(&mut s, Ferramenta::Recuperacao);
+    let base = s.base().clone();
+    assert_eq!(
+        curado.get_pixel(500, 260),
+        base.get_pixel(500, 260),
+        "fora da seleção"
+    );
+    assert_ne!(curado.get_pixel(500, 210), base.get_pixel(500, 210));
+    // Sem emenda: na borda da seleção, a média de um lado e do outro casa.
+    let (dentro, _) = media_e_desvio(&curado, 500, 232, 6);
+    let (fora, _) = media_e_desvio(&curado, 500, 242, 6);
+    assert!((dentro - fora).abs() < 10.0, "{dentro} × {fora}");
+}
+
+#[test]
+fn a_recuperacao_sem_origem_nao_pinta() {
+    let mut s = pele();
+    s.nova_camada();
+    s.pincel.ferramenta = Ferramenta::Recuperacao;
+    assert!(!s.apertar(500.0, 200.0), "⌥ + clique na origem antes");
 }

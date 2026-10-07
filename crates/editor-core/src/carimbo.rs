@@ -166,17 +166,38 @@ impl Fonte {
     /// A cor que vai para `(x, y)` com o alfa da origem (255 na foto
     /// composta; o da camada em "Camada atual"); `None` fora da foto.
     pub fn cor_com_alfa(&mut self, x: u32, y: u32) -> Option<[u8; 4]> {
+        let (ox, oy) = (
+            x as i64 + self.deslocamento.0,
+            y as i64 + self.deslocamento.1,
+        );
+        self.ler(ox, oy)
+    }
+
+    /// A mesma amostra em `(x, y)`, **sem** o deslocamento — o destino da
+    /// recuperação (a foto no lugar, do instantâneo do começo do traço).
+    pub fn no_lugar(&mut self, x: u32, y: u32) -> Option<[u8; 4]> {
+        self.ler(x as i64, y as i64)
+    }
+
+    fn ler(&mut self, ox: i64, oy: i64) -> Option<[u8; 4]> {
         if let Some(camada) = &self.so_a_camada {
-            let (ox, oy) = (
-                x as i64 + self.deslocamento.0,
-                y as i64 + self.deslocamento.1,
-            );
             if ox < 0 || oy < 0 || ox >= camada.largura() as i64 || oy >= camada.altura() as i64 {
                 return None;
             }
             return Some(camada.pixel(ox as u32, oy as u32));
         }
-        self.cor(x, y).map(|[r, g, b]| [r, g, b, 255])
+        let (largura, altura) = (self.base.width() as i64, self.base.height() as i64);
+        if ox < 0 || oy < 0 || ox >= largura || oy >= altura {
+            return None;
+        }
+        let (ox, oy) = (ox as u32, oy as u32);
+        let posicao = crate::tiles::tile_de(ox, oy);
+        let tile = self.tiles.entry(posicao).or_insert_with(|| {
+            let ret: Retangulo = retangulo_do_tile(posicao, self.base.width(), self.base.height());
+            composicao::compor_recorte(&self.base, &self.doc, &ret)
+        });
+        let [r, g, b] = tile.get_pixel(ox % LADO_DO_TILE, oy % LADO_DO_TILE).0;
+        Some([r, g, b, 255])
     }
 
     /// A região da origem (pixels da foto) em RGBA — a prévia da origem que a
