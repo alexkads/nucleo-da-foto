@@ -536,6 +536,33 @@ impl Historico {
         self.respeitar_o_teto();
     }
 
+    /// `extra` (já aplicado) passa a fazer parte do último passo — um gesto que
+    /// termina mexendo em mais uma coisa (o preenchimento que desmarca ao
+    /// aplicar). O passo junto leva o `nome` dado. Sem último passo à mão (nada
+    /// feito, ou algo para refazer), `extra` vira um passo próprio.
+    pub fn juntar_ao_ultimo(&mut self, extra: Comando, nome: &str) {
+        if self.posicao == 0 || self.posicao != self.passos.len() {
+            self.registrar(extra);
+            return;
+        }
+        let ultimo = self.passos.pop().expect("posição > 0");
+        let mut passos = match ultimo {
+            Comando::Varios { passos, .. } => passos,
+            outro => vec![outro],
+        };
+        passos.push(extra);
+        self.passos.push(Comando::Varios {
+            nome: nome.to_string(),
+            passos,
+        });
+        if self.salvo_em == Some(self.posicao) {
+            // O salvo era o estado depois do último passo, que agora inclui
+            // mais uma coisa — já não é o mesmo.
+            self.salvo_em = None;
+        }
+        self.respeitar_o_teto();
+    }
+
     fn respeitar_o_teto(&mut self) {
         let mut total: usize = self.passos.iter().map(Comando::bytes).sum();
         let mut tirar = 0;

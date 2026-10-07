@@ -1140,6 +1140,29 @@ impl Sessao {
         self.trocar_selecao(Some(tudo), "Selecionar tudo");
     }
 
+    /// Desmarca **dentro do último passo** (o preenchimento por conteúdo
+    /// aplicado): um desfazer devolve o que ele fez e a seleção juntos.
+    pub fn desmarcar_junto_do_ultimo(&mut self) {
+        let Some(antes) = self.selecao.take() else {
+            return;
+        };
+        let nome = self
+            .hist
+            .a_desfazer()
+            .map(|p| p.descricao(&self.doc))
+            .unwrap_or_else(|| "Desmarcar".into());
+        self.hist.juntar_ao_ultimo(
+            Comando::Selecao {
+                nome: "Desmarcar".into(),
+                antes: Some(antes),
+                depois: None,
+            },
+            &nome,
+        );
+        self.versao += 1;
+        self.versao_da_selecao += 1;
+    }
+
     /// ⌘D.
     pub fn desmarcar(&mut self) {
         self.fechar_o_que_esta_aberto();
