@@ -431,32 +431,28 @@ pub fn lata_de_tinta(
 /// inteira, para no máximo dois tiles de destino. Uma camada cheia de 24 MP
 /// são ~96 MB de cópia — dá para refazer a cada movimento do ponteiro.
 pub fn deslocada(camada: &CamadaDePixels, dx: i64, dy: i64) -> CamadaDePixels {
-    let (largura, altura) = (camada.largura() as i64, camada.altura() as i64);
+    // 🔑 Nada se perde fora da foto (etapa 14): o que sai vira tile de fora, e
+    // volta inteiro quando anda de novo para dentro.
     let mut saida = CamadaDePixels::nova(camada.largura(), camada.altura());
     let lado = LADO_DO_TILE as i64;
-    for (posicao, tile) in camada.existentes() {
-        let (tx, ty) = (posicao.0 as i64 * lado, posicao.1 as i64 * lado);
+    for (posicao, tile) in camada.todos() {
+        let (tx, ty) = crate::tiles::origem_do_tile(*posicao);
         for ly in 0..lado {
             let y = ty + ly + dy;
-            if y < 0 || y >= altura || ty + ly >= altura {
-                continue;
-            }
-            // O trecho da linha que cai dentro da foto.
-            let x0 = (tx + dx).max(0);
-            let x1 = (tx + lado + dx).min(largura).min(largura + dx);
+            let (x0, x1) = (tx + dx, tx + lado + dx);
             let mut x = x0;
             while x < x1 {
-                let destino = ((x / lado) as u32, (y / lado) as u32);
-                let fim = ((x / lado + 1) * lado).min(x1);
+                let destino = (x.div_euclid(lado) as i32, y.div_euclid(lado) as i32);
+                let fim = ((x.div_euclid(lado) + 1) * lado).min(x1);
                 let n = (fim - x) as usize * 4;
                 let de = indice((x - dx - tx) as u32, ly as u32);
-                let para = indice((x % lado) as u32, (y % lado) as u32);
+                let para = indice(x.rem_euclid(lado) as u32, y.rem_euclid(lado) as u32);
                 saida.tile_mut(destino)[para..para + n].copy_from_slice(&tile[de..de + n]);
                 x = fim;
             }
         }
     }
-    let posicoes: Vec<Posicao> = saida.existentes().map(|(p, _)| *p).collect();
+    let posicoes: Vec<Posicao> = saida.todos().map(|(p, _)| *p).collect();
     for p in posicoes {
         saida.enxugar(p);
     }
@@ -465,9 +461,10 @@ pub fn deslocada(camada: &CamadaDePixels, dx: i64, dy: i64) -> CamadaDePixels {
 
 /// O passo do desfazer entre duas versões de uma camada: os tiles que mudaram.
 pub fn diferenca(antes: &CamadaDePixels, depois: &CamadaDePixels) -> Option<Mudanca> {
+    // Com os tiles de fora da foto: o desfazer do Mover devolve o que saiu.
     let posicoes: std::collections::BTreeSet<Posicao> = antes
-        .existentes()
-        .chain(depois.existentes())
+        .todos()
+        .chain(depois.todos())
         .map(|(p, _)| *p)
         .collect();
     let mut m = Mudanca {
@@ -628,17 +625,21 @@ mod testes {
     }
 
     #[test]
-    fn deslocar_leva_cada_pixel_e_perde_o_que_sai() {
+    fn deslocar_leva_cada_pixel_e_guarda_o_que_sai() {
         let mut c = CamadaDePixels::nova(600, 400);
         c.tile_mut((0, 0))[indice(10, 20)..indice(10, 20) + 4].copy_from_slice(&[1, 2, 3, 255]);
         c.tile_mut((1, 1))[indice(250, 0)..indice(250, 0) + 4].copy_from_slice(&[4, 5, 6, 255]);
         let d = deslocada(&c, 300, -10);
         assert_eq!(d.pixel(310, 10), [1, 2, 3, 255]);
         assert_eq!(d.pixel(10, 20)[3], 0);
-        // (506, 256) + (300, −10) = (806, 246): fora da foto de 600.
-        assert_eq!(d.quantos(), 1);
+        // (506, 256) + (300, −10) = (806, 246): fora da foto de 600 — não
+        // aparece, mas fica guardado (etapa 14).
+        assert_eq!(d.existentes().count(), 1);
+        assert_eq!(d.quantos(), 2);
+        assert_eq!(d.pixel_em(806, 246), [4, 5, 6, 255]);
         let volta = deslocada(&d, -300, 10);
         assert_eq!(volta.pixel(10, 20), [1, 2, 3, 255]);
+        assert_eq!(volta.pixel(506, 256), [4, 5, 6, 255], "voltou inteiro");
         let m = diferenca(&c, &d).unwrap();
         assert!(m.antes.len() >= 2);
         assert!(diferenca(&c, &c.clone()).is_none());

@@ -265,7 +265,7 @@ fn o_recorte_atomico_e_a_selecao_gravam_e_reabrem() {
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("e1/projeto.json")).unwrap())
             .unwrap();
-    assert_eq!(json["formato"], 6);
+    assert_eq!(json["formato"], crate::projeto::FORMATO);
     // A coleta não pode apagar os tiles que só o passo composto cita.
     p.coletar(1).unwrap();
 

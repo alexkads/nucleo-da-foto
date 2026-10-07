@@ -507,7 +507,10 @@ impl Traco {
                 continue;
             }
             let tile = camada.tile_mut(posicao);
-            let (tx0, ty0) = (posicao.0 * LADO_DO_TILE, posicao.1 * LADO_DO_TILE);
+            let (tx0, ty0) = (
+                posicao.0 as u32 * LADO_DO_TILE,
+                posicao.1 as u32 * LADO_DO_TILE,
+            );
             let (px0, px1) = (x0.max(tx0), x1.min(tx0 + LADO_DO_TILE));
             let (py0, py1) = (y0.max(ty0), y1.min(ty0 + LADO_DO_TILE));
             for py in py0..py1 {

@@ -37,6 +37,8 @@ mod testes_das_ferramentas_de_selecao;
 mod testes_do_carimbo;
 #[cfg(test)]
 mod testes_dos_controles;
+#[cfg(test)]
+mod testes_fora_da_foto;
 
 pub use ajuste::Ajuste;
 pub use carimbo::AmostraDoCarimbo;
@@ -49,4 +51,4 @@ pub use retangulo::Retangulo;
 pub use selecao::{Acabamento, Amostra, Estilo, Forma, Molde, Operacao, Selecao};
 pub use sessao::{AmostraDaVarinha, OpcoesDaVarinha, OpcoesDoCarimbo, Sessao, VarinhaRecusada};
 pub use tiles::{CamadaDePixels, LADO_DO_TILE};
-pub use transformar::Transformacao;
+pub use transformar::{Caixa, Transformacao};

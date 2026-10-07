@@ -914,11 +914,15 @@ impl Sessao {
         };
         let mudanca = operacoes::diferenca(&original, self.doc.camadas[camada].alvo(na_mascara));
         match mudanca {
+            // "Mover" no Histórico, e não "Pincel" (o nome de um traço).
             Some(m) => {
-                self.hist.registrar(Comando::Traco {
-                    camada,
-                    na_mascara,
-                    mudanca: m,
+                self.hist.registrar(Comando::Varios {
+                    nome: "Mover".into(),
+                    passos: vec![Comando::Traco {
+                        camada,
+                        na_mascara,
+                        mudanca: m,
+                    }],
                 });
                 true
             }
@@ -957,7 +961,9 @@ impl Sessao {
             }
             None => fundo = CamadaDePixels::nova(original.largura(), original.altura()),
         }
-        let area = conteudo.caixa;
+        let area = conteudo
+            .caixa
+            .na_foto(original.largura(), original.altura());
         self.flutuante = Some(Flutuante {
             camada,
             na_mascara,
@@ -1000,9 +1006,9 @@ impl Sessao {
     }
 
     /// A caixa do conteúdo e a transformação de agora — o que a tela desenha.
-    pub fn transformacao(&self) -> Option<(Retangulo, Transformacao)> {
+    pub fn transformacao(&self) -> Option<(transformar::Caixa, Transformacao)> {
         if let Some(s) = &self.selecao_solta {
-            return Some((s.molde.caixa(), s.t));
+            return Some((s.molde.caixa().into(), s.t));
         }
         self.flutuante.as_ref().map(|f| (f.conteudo.caixa, f.t))
     }
@@ -1015,7 +1021,7 @@ impl Sessao {
                 return;
             }
             solta.t = t;
-            let caixa = solta.molde.caixa();
+            let caixa: transformar::Caixa = solta.molde.caixa().into();
             let (l, a) = (self.doc.largura(), self.doc.altura());
             let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
             for (x, y) in t.cantos(&caixa) {
@@ -1060,7 +1066,7 @@ impl Sessao {
                 a.uniao(&crate::tiles::retangulo_do_tile(*p, largura, altura))
             });
         let sujo = f.area.uniao(&area_nova);
-        f.area = area_nova.uniao(&f.conteudo.caixa);
+        f.area = area_nova.uniao(&f.conteudo.caixa.na_foto(largura, altura));
         let (camada, na_mascara) = (f.camada, f.na_mascara);
         *self.doc.camadas[camada].alvo_mut(na_mascara) = nova;
         self.refazer_a_vista(&sujo);

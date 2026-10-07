@@ -4,6 +4,13 @@
 //! transparente. Um retoque pequeno numa foto de 24 MP ocupa alguns tiles, e não
 //! os 96 MB de uma camada cheia — na memória, no desfazer e no disco.
 //!
+//! 🔑 **Conteúdo fora da foto** (etapa 14, formato 7): a posição do tile tem
+//! sinal, e a camada guarda tiles à esquerda, acima, à direita e abaixo da
+//! foto — o que o Mover e o ⌘T levam para fora e trazem de volta sem perder.
+//! [`CamadaDePixels::existentes`] só mostra os de dentro (quem compõe, desenha
+//! e seleciona não precisa saber do resto); [`CamadaDePixels::todos`] mostra
+//! todos (quem move, transforma, desfaz e grava).
+//!
 //! 🔑 **Cópia na escrita.** Cada tile é um `Arc`: o desfazer guarda o `Arc` de
 //! antes do traço e a camada escreve numa cópia. Guardar o estado anterior custa
 //! um contador, e não 256 KB.
@@ -23,8 +30,9 @@ pub const BYTES_DO_TILE: usize = (LADO_DO_TILE * LADO_DO_TILE * 4) as usize;
 
 pub type Tile = Arc<Vec<u8>>;
 
-/// Onde um tile fica: coluna e linha, em tiles.
-pub type Posicao = (u32, u32);
+/// Onde um tile fica: coluna e linha, em tiles — negativas, ou além da última,
+/// quando o tile está fora da foto.
+pub type Posicao = (i32, i32);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CamadaDePixels {
@@ -98,16 +106,38 @@ impl CamadaDePixels {
         }
     }
 
-    /// Todos os tiles existentes.
+    /// O tile cai dentro da foto.
+    pub fn dentro(&self, posicao: Posicao) -> bool {
+        posicao.0 >= 0
+            && posicao.1 >= 0
+            && (posicao.0 as u32) < self.colunas()
+            && (posicao.1 as u32) < self.linhas()
+    }
+
+    /// Os tiles existentes **dentro da foto** — o que se vê.
     pub fn existentes(&self) -> impl Iterator<Item = (&Posicao, &Tile)> {
+        let (colunas, linhas) = (self.colunas() as i32, self.linhas() as i32);
+        self.tiles
+            .iter()
+            .filter(move |(p, _)| p.0 >= 0 && p.1 >= 0 && p.0 < colunas && p.1 < linhas)
+    }
+
+    /// Todos os tiles, também os de fora da foto.
+    pub fn todos(&self) -> impl Iterator<Item = (&Posicao, &Tile)> {
         self.tiles.iter()
     }
 
+    /// Há conteúdo fora da foto.
+    pub fn tem_fora(&self) -> bool {
+        self.tiles.keys().any(|p| !self.dentro(*p))
+    }
+
+    /// Quantos tiles, com os de fora.
     pub fn quantos(&self) -> usize {
         self.tiles.len()
     }
 
-    /// Nenhum pixel pintado.
+    /// Nenhum pixel pintado (dentro ou fora da foto).
     pub fn vazia(&self) -> bool {
         self.tiles
             .values()
@@ -116,10 +146,17 @@ impl CamadaDePixels {
 
     /// O pixel RGBA de `(x, y)`, transparente fora dos tiles existentes.
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
-        let posicao = (x / LADO_DO_TILE, y / LADO_DO_TILE);
+        self.pixel_em(x as i64, y as i64)
+    }
+
+    /// O pixel RGBA de `(x, y)` em qualquer lugar, dentro ou fora da foto.
+    pub fn pixel_em(&self, x: i64, y: i64) -> [u8; 4] {
+        let lado = LADO_DO_TILE as i64;
+        let posicao = (x.div_euclid(lado) as i32, y.div_euclid(lado) as i32);
+        let (x, y) = (x.rem_euclid(lado) as u32, y.rem_euclid(lado) as u32);
         match self.tiles.get(&posicao) {
             Some(tile) => {
-                let i = indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
+                let i = indice(x, y);
                 [tile[i], tile[i + 1], tile[i + 2], tile[i + 3]]
             }
             None => [0; 4],
@@ -137,7 +174,7 @@ impl CamadaDePixels {
         let mut posicoes = Vec::new();
         for l in l0..=l1 {
             for c in c0..=c1 {
-                posicoes.push((c, l));
+                posicoes.push((c as i32, l as i32));
             }
         }
         posicoes
@@ -156,15 +193,29 @@ pub fn indice(x: u32, y: u32) -> usize {
 }
 
 /// O retângulo da foto que um tile ocupa (o último de cada linha/coluna é
-/// cortado pela borda).
+/// cortado pela borda; o de fora da foto é vazio).
 pub fn retangulo_do_tile(posicao: Posicao, largura: u32, altura: u32) -> Retangulo {
+    if posicao.0 < 0 || posicao.1 < 0 {
+        return Retangulo::default();
+    }
     Retangulo::novo(
-        posicao.0 * LADO_DO_TILE,
-        posicao.1 * LADO_DO_TILE,
+        posicao.0 as u32 * LADO_DO_TILE,
+        posicao.1 as u32 * LADO_DO_TILE,
         LADO_DO_TILE,
         LADO_DO_TILE,
     )
     .limitado(largura, altura)
+}
+
+/// O tile do pixel `(x, y)` da foto.
+pub fn tile_de(x: u32, y: u32) -> Posicao {
+    ((x / LADO_DO_TILE) as i32, (y / LADO_DO_TILE) as i32)
+}
+
+/// O canto de cima à esquerda de um tile, em pixels (com sinal).
+pub fn origem_do_tile(posicao: Posicao) -> (i64, i64) {
+    let lado = LADO_DO_TILE as i64;
+    (posicao.0 as i64 * lado, posicao.1 as i64 * lado)
 }
 
 #[cfg(test)]
@@ -212,5 +263,21 @@ mod testes {
         assert!(camada
             .tiles_do_retangulo(&Retangulo::novo(700, 0, 5, 5))
             .is_empty());
+    }
+
+    #[test]
+    fn o_tile_de_fora_existe_mas_nao_aparece() {
+        let mut camada = CamadaDePixels::nova(600, 300);
+        camada.tile_mut((-1, 0))[3] = 255;
+        camada.tile_mut((3, 0))[3] = 255;
+        camada.tile_mut((0, 0))[3] = 255;
+        assert_eq!(camada.existentes().count(), 1);
+        assert_eq!(camada.todos().count(), 3);
+        assert!(camada.tem_fora());
+        assert_eq!(camada.pixel_em(-256, 0)[3], 255);
+        assert_eq!(camada.pixel_em(-1, 0)[3], 0);
+        assert!(!camada.vazia());
+        assert!(retangulo_do_tile((-1, 0), 600, 300).vazio());
+        assert!(retangulo_do_tile((3, 0), 600, 300).vazio());
     }
 }

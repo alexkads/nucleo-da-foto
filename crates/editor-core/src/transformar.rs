@@ -19,12 +19,64 @@
 use crate::mesclagem::{mesclar_em_camada, Modo};
 use crate::retangulo::Retangulo;
 use crate::selecao::Selecao;
-use crate::tiles::{indice, CamadaDePixels, LADO_DO_TILE};
+use crate::tiles::{indice, origem_do_tile, CamadaDePixels, LADO_DO_TILE};
+
+/// A caixa do conteúdo, em pixels da foto — pode começar antes da foto (o
+/// conteúdo levado para fora, etapa 14), por isso com sinal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Caixa {
+    pub x: i32,
+    pub y: i32,
+    pub largura: u32,
+    pub altura: u32,
+}
+
+impl Caixa {
+    pub fn nova(x: i32, y: i32, largura: u32, altura: u32) -> Self {
+        Self {
+            x,
+            y,
+            largura,
+            altura,
+        }
+    }
+
+    pub fn direita(&self) -> i32 {
+        self.x + self.largura as i32
+    }
+
+    pub fn baixo(&self) -> i32 {
+        self.y + self.altura as i32
+    }
+
+    pub fn vazia(&self) -> bool {
+        self.largura == 0 || self.altura == 0
+    }
+
+    /// A parte dentro da foto `largura × altura`.
+    pub fn na_foto(&self, largura: u32, altura: u32) -> Retangulo {
+        let x0 = self.x.clamp(0, largura as i32) as u32;
+        let y0 = self.y.clamp(0, altura as i32) as u32;
+        let x1 = self.direita().clamp(0, largura as i32) as u32;
+        let y1 = self.baixo().clamp(0, altura as i32) as u32;
+        Retangulo::novo(x0, y0, x1 - x0, y1 - y0)
+    }
+}
+
+impl From<Retangulo> for Caixa {
+    fn from(r: Retangulo) -> Self {
+        Self::nova(r.x as i32, r.y as i32, r.largura, r.altura)
+    }
+}
+
+/// Quanto o ⌘T guarda além da borda da foto, em fração do maior lado: ampliar
+/// um conteúdo 100× não pode alocar uma camada do tamanho de um prédio.
+const MARGEM_FORA_DA_FOTO: f32 = 1.0;
 
 /// O conteúdo tirado da camada: RGBA de alfa reto, do tamanho da caixa.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Conteudo {
-    pub caixa: Retangulo,
+    pub caixa: Caixa,
     rgba: Vec<u8>,
 }
 
@@ -32,18 +84,21 @@ impl Conteudo {
     /// O que a camada tem (vezes a seleção, se houver). `None` quando não
     /// sobra pixel nenhum.
     pub fn da_camada(camada: &CamadaDePixels, selecao: Option<&Selecao>) -> Option<Self> {
-        // A caixa justa: só os pixels com alfa.
-        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
-        let valor = |x: u32, y: u32| selecao.map_or(255, |s| s.valor(x, y));
-        for (posicao, tile) in camada.existentes() {
-            let (tx, ty) = (posicao.0 * LADO_DO_TILE, posicao.1 * LADO_DO_TILE);
-            for ly in 0..LADO_DO_TILE {
-                for lx in 0..LADO_DO_TILE {
+        // A caixa justa: só os pixels com alfa — também os de fora da foto
+        // (sem seleção; a seleção só existe dentro dela).
+        let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        let valor = |x: i64, y: i64| match selecao {
+            None => 255,
+            Some(_) if x < 0 || y < 0 => 0,
+            Some(s) => s.valor(x as u32, y as u32),
+        };
+        let lado = LADO_DO_TILE as i64;
+        for (posicao, tile) in camada.todos() {
+            let (tx, ty) = origem_do_tile(*posicao);
+            for ly in 0..lado {
+                for lx in 0..lado {
                     let (x, y) = (tx + lx, ty + ly);
-                    if x >= camada.largura() || y >= camada.altura() {
-                        continue;
-                    }
-                    if tile[indice(lx, ly) + 3] > 0 && valor(x, y) > 0 {
+                    if tile[indice(lx as u32, ly as u32) + 3] > 0 && valor(x, y) > 0 {
                         x0 = x0.min(x);
                         y0 = y0.min(y);
                         x1 = x1.max(x + 1);
@@ -55,11 +110,11 @@ impl Conteudo {
         if x1 <= x0 || y1 <= y0 {
             return None;
         }
-        let caixa = Retangulo::novo(x0, y0, x1 - x0, y1 - y0);
+        let caixa = Caixa::nova(x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32);
         let mut rgba = Vec::with_capacity((caixa.largura * caixa.altura * 4) as usize);
         for y in y0..y1 {
             for x in x0..x1 {
-                let mut p = camada.pixel(x, y);
+                let mut p = camada.pixel_em(x, y);
                 let m = valor(x, y) as u32;
                 p[3] = ((p[3] as u32 * m + 127) / 255) as u8;
                 rgba.extend_from_slice(&p);
@@ -152,7 +207,7 @@ impl Transformacao {
         self.escala_x == 1.0 && self.escala_y == 1.0 && self.angulo == 0.0
     }
 
-    fn centro(caixa: &Retangulo) -> (f32, f32) {
+    fn centro(caixa: &Caixa) -> (f32, f32) {
         (
             caixa.x as f32 + caixa.largura as f32 / 2.0,
             caixa.y as f32 + caixa.altura as f32 / 2.0,
@@ -160,7 +215,7 @@ impl Transformacao {
     }
 
     /// Um ponto da caixa (pixels da foto) para onde ele vai.
-    pub fn aplicar(&self, caixa: &Retangulo, x: f32, y: f32) -> (f32, f32) {
+    pub fn aplicar(&self, caixa: &Caixa, x: f32, y: f32) -> (f32, f32) {
         let (cx, cy) = Self::centro(caixa);
         let (px, py) = ((x - cx) * self.escala_x, (y - cy) * self.escala_y);
         let (s, c) = self.angulo.sin_cos();
@@ -171,7 +226,7 @@ impl Transformacao {
     }
 
     /// De onde, na caixa, vem o ponto `(x, y)` do destino.
-    pub fn inversa(&self, caixa: &Retangulo, x: f32, y: f32) -> (f32, f32) {
+    pub fn inversa(&self, caixa: &Caixa, x: f32, y: f32) -> (f32, f32) {
         let (cx, cy) = Self::centro(caixa);
         let (px, py) = (x - cx - self.dx, y - cy - self.dy);
         let (s, c) = self.angulo.sin_cos();
@@ -186,7 +241,7 @@ impl Transformacao {
     /// partir do canto de cima à esquerda: cantos nos índices pares, meios dos
     /// lados nos ímpares (0 ↖, 1 ↑, 2 ↗, 3 →, 4 ↘, 5 ↓, 6 ↙, 7 ←). A oposta de
     /// `i` é `(i + 4) % 8`.
-    pub fn alcas(caixa: &Retangulo) -> [(f32, f32); 8] {
+    pub fn alcas(caixa: &Caixa) -> [(f32, f32); 8] {
         let (x0, y0) = (caixa.x as f32, caixa.y as f32);
         let (x1, y1) = (caixa.direita() as f32, caixa.baixo() as f32);
         let (xm, ym) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
@@ -205,7 +260,7 @@ impl Transformacao {
     /// A mesma escala e o mesmo giro, com o deslocamento acertado para o ponto
     /// `pivo` (da caixa de origem) ficar onde estava em `antes` — escalar ou
     /// girar em volta da alça oposta ou do ponto de referência.
-    pub fn fixando(mut self, caixa: &Retangulo, pivo: (f32, f32), antes: &Transformacao) -> Self {
+    pub fn fixando(mut self, caixa: &Caixa, pivo: (f32, f32), antes: &Transformacao) -> Self {
         let alvo = antes.aplicar(caixa, pivo.0, pivo.1);
         let agora = self.aplicar(caixa, pivo.0, pivo.1);
         self.dx += alvo.0 - agora.0;
@@ -220,7 +275,7 @@ impl Transformacao {
     /// passa por zero nem vira espelho (mínimo de 1%).
     pub fn pela_alca(
         &self,
-        caixa: &Retangulo,
+        caixa: &Caixa,
         alca: usize,
         ponteiro: (f32, f32),
         ancora: (f32, f32),
@@ -259,7 +314,7 @@ impl Transformacao {
 
     /// Girada de `delta` radianos em volta de `pivo` (ponto da caixa de
     /// origem, o ponto de referência).
-    pub fn girada_em_volta(&self, caixa: &Retangulo, pivo: (f32, f32), delta: f32) -> Self {
+    pub fn girada_em_volta(&self, caixa: &Caixa, pivo: (f32, f32), delta: f32) -> Self {
         let mut nova = *self;
         nova.angulo += delta;
         nova.fixando(caixa, pivo, self)
@@ -267,7 +322,7 @@ impl Transformacao {
 
     /// Os quatro cantos da caixa transformada (sentido do relógio a partir do
     /// de cima à esquerda) — o que a tela desenha com as alças.
-    pub fn cantos(&self, caixa: &Retangulo) -> [(f32, f32); 4] {
+    pub fn cantos(&self, caixa: &Caixa) -> [(f32, f32); 4] {
         let (x0, y0) = (caixa.x as f32, caixa.y as f32);
         let (x1, y1) = (caixa.direita() as f32, caixa.baixo() as f32);
         [
@@ -302,10 +357,13 @@ pub fn desenhar(
         x1 = x1.max(x);
         y1 = y1.max(y);
     }
-    let x0 = (x0.floor() - 1.0).max(0.0) as u32;
-    let y0 = (y0.floor() - 1.0).max(0.0) as u32;
-    let x1 = ((x1.ceil() + 1.0).max(0.0) as u32).min(largura);
-    let y1 = ((y1.ceil() + 1.0).max(0.0) as u32).min(altura);
+    // Sem cortar na borda da foto: o que sai fica como tile de fora (até a
+    // margem), e volta quando a caixa volta.
+    let margem = (largura.max(altura) as f32 * MARGEM_FORA_DA_FOTO).ceil();
+    let x0 = (x0.floor() - 1.0).max(-margem) as i64;
+    let y0 = (y0.floor() - 1.0).max(-margem) as i64;
+    let x1 = (x1.ceil() + 1.0).min(largura as f32 + margem) as i64;
+    let y1 = (y1.ceil() + 1.0).min(altura as f32 + margem) as i64;
     if x1 <= x0 || y1 <= y0 {
         return saida;
     }
@@ -319,10 +377,11 @@ pub fn desenhar(
     let b = (em(0.0, 1.0).0 - c.0, em(0.0, 1.0).1 - c.1);
     let (lc, ac) = (caixa.largura as f32, caixa.altura as f32);
 
-    let faixa = |l0: u32| -> Vec<(crate::tiles::Posicao, Vec<u8>)> {
+    let lado = LADO_DO_TILE as i64;
+    let faixa = |l0: i64| -> Vec<(crate::tiles::Posicao, Vec<u8>)> {
         let mut tiles: std::collections::BTreeMap<crate::tiles::Posicao, Vec<u8>> =
             std::collections::BTreeMap::new();
-        let (ya, yb) = (y0.max(l0 * LADO_DO_TILE), y1.min((l0 + 1) * LADO_DO_TILE));
+        let (ya, yb) = (y0.max(l0 * lado), y1.min((l0 + 1) * lado));
         for y in ya..yb {
             let yc = y as f32 + 0.5;
             let (pu, pv) = (c.0 + b.0 * yc, c.1 + b.1 * yc);
@@ -342,22 +401,22 @@ pub fn desenhar(
             if xb <= xa {
                 continue;
             }
-            for x in (xa.max(x0 as f32) as u32)..(xb.min(x1 as f32) as u32) {
+            for x in (xa.max(x0 as f32) as i64)..(xb.min(x1 as f32) as i64) {
                 let xc = x as f32 + 0.5;
                 let p = conteudo.amostra(pu + a.0 * xc, pv + a.1 * xc);
                 if p[3] == 0 {
                     continue;
                 }
                 let tile = tiles
-                    .entry((x / LADO_DO_TILE, y / LADO_DO_TILE))
+                    .entry((x.div_euclid(lado) as i32, y.div_euclid(lado) as i32))
                     .or_insert_with(|| vec![0; crate::tiles::BYTES_DO_TILE]);
-                let i = indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
+                let i = indice(x.rem_euclid(lado) as u32, y.rem_euclid(lado) as u32);
                 tile[i..i + 4].copy_from_slice(&p);
             }
         }
         tiles.into_iter().collect()
     };
-    let faixas: Vec<u32> = (y0 / LADO_DO_TILE..=(y1 - 1) / LADO_DO_TILE).collect();
+    let faixas: Vec<i64> = (y0.div_euclid(lado)..=(y1 - 1).div_euclid(lado)).collect();
     let resultados: Vec<Vec<_>> = if faixas.len() == 1 {
         vec![faixa(faixas[0])]
     } else {
@@ -386,7 +445,7 @@ pub fn desenhar(
 /// sem seleção).
 pub fn sobre(fundo: &CamadaDePixels, cima: &CamadaDePixels) -> CamadaDePixels {
     let mut saida = fundo.clone();
-    for (posicao, tile) in cima.existentes() {
+    for (posicao, tile) in cima.todos() {
         if fundo.tile(*posicao).is_none() {
             saida.definir(*posicao, Some(tile.clone()));
             continue;
@@ -414,7 +473,7 @@ mod testes {
         for y in 100..140 {
             for x in 200..260 {
                 let i = indice(x % 256, y % 256);
-                c.tile_mut((x / 256, y / 256))[i..i + 4].copy_from_slice(&[
+                c.tile_mut(((x / 256) as i32, (y / 256) as i32))[i..i + 4].copy_from_slice(&[
                     (x - 200) as u8 * 4,
                     (y - 100) as u8 * 6,
                     77,
@@ -429,14 +488,14 @@ mod testes {
     fn o_conteudo_tem_a_caixa_justa_e_respeita_a_selecao() {
         let c = camada_com_quadrado();
         let tudo = Conteudo::da_camada(&c, None).unwrap();
-        assert_eq!(tudo.caixa, Retangulo::novo(200, 100, 60, 40));
+        assert_eq!(tudo.caixa, Caixa::from(Retangulo::novo(200, 100, 60, 40)));
         let s = Selecao::da_forma(
             600,
             400,
             &Forma::Retangulo(Retangulo::novo(230, 0, 100, 400)),
         );
         let metade = Conteudo::da_camada(&c, Some(&s)).unwrap();
-        assert_eq!(metade.caixa, Retangulo::novo(230, 100, 30, 40));
+        assert_eq!(metade.caixa, Caixa::from(Retangulo::novo(230, 100, 30, 40)));
         assert!(Conteudo::da_camada(&CamadaDePixels::nova(10, 10), None).is_none());
     }
 
@@ -459,7 +518,7 @@ mod testes {
 
     #[test]
     fn escala_e_giro_vao_e_voltam() {
-        let caixa = Retangulo::novo(200, 100, 60, 40);
+        let caixa = Caixa::from(Retangulo::novo(200, 100, 60, 40));
         let t = Transformacao {
             dx: 10.0,
             dy: -5.0,
@@ -524,7 +583,7 @@ mod testes {
             }
         }
         assert_eq!(diferentes, 0);
-        let linhas: std::collections::BTreeSet<u32> =
+        let linhas: std::collections::BTreeSet<i32> =
             rapido.existentes().map(|(p, _)| p.1).collect();
         assert!(linhas.len() > 1, "ocupou mais de uma faixa (threads)");
     }
@@ -542,7 +601,7 @@ mod testes {
 
     #[test]
     fn a_alca_escala_com_a_oposta_parada() {
-        let caixa = Retangulo::novo(100, 100, 200, 100);
+        let caixa = Caixa::from(Retangulo::novo(100, 100, 200, 100));
         let t = Transformacao::default();
         let alcas = Transformacao::alcas(&caixa);
         // O canto ↘ (4) puxado até (500, 300) com o ↖ (0) parado, livre.
@@ -574,7 +633,7 @@ mod testes {
 
     #[test]
     fn o_giro_e_a_escala_respeitam_o_ponto_de_referencia() {
-        let caixa = Retangulo::novo(100, 100, 200, 100);
+        let caixa = Caixa::from(Retangulo::novo(100, 100, 200, 100));
         let t = Transformacao::default();
         let referencia = (100.0, 100.0);
         let n = t.girada_em_volta(&caixa, referencia, std::f32::consts::FRAC_PI_2);

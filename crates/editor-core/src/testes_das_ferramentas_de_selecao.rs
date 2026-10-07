@@ -187,7 +187,7 @@ fn transformar_a_selecao_nao_mexe_em_pixel_e_e_um_passo() {
     assert!(s.comecar_a_transformar_a_selecao());
     assert!(s.transformando() && s.transformando_a_selecao());
     let (caixa, _) = s.transformacao().unwrap();
-    assert_eq!(caixa, Retangulo::novo(100, 100, 100, 100));
+    assert_eq!(caixa, crate::transformar::Caixa::nova(100, 100, 100, 100));
     s.definir_transformacao(Transformacao::deslocamento(200.0, 50.0));
     assert_eq!((valor(&s, 350, 200), valor(&s, 150, 150)), (255, 0));
     // Esc: volta a de antes, sem passo.

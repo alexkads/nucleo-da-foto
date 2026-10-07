@@ -54,7 +54,11 @@ use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 ///   A 0.1.108 não saberia desfazê-lo — recusa com o aviso. Os passos de
 ///   seleção, que entraram no desfazer na mesma etapa, **não** são gravados.
 ///   Os formatos 1–5 se leem como estão.
-pub const FORMATO: u32 = 6;
+/// - **7** (etapa 14): tiles fora da foto — coluna e linha com sinal, ou além
+///   da última (o conteúdo que o Mover e o ⌘T levam para fora). A 0.1.111
+///   leria a coluna negativa como erro, e a de além da borda como lixo na
+///   composta — recusa com o aviso. Os formatos 1–6 se leem como estão.
+pub const FORMATO: u32 = 7;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -308,8 +312,9 @@ pub enum PassoSalvo {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TileSalvo {
-    pub c: u32,
-    pub l: u32,
+    /// Com sinal desde o formato 7: o tile pode estar fora da foto.
+    pub c: i32,
+    pub l: i32,
     /// `None` = o tile não existia (transparente).
     pub hash: Option<String>,
 }
@@ -328,7 +333,8 @@ fn salvar_camada(
     gravar_tile: &mut dyn FnMut(&Tile) -> Result<String, ErroDoProjeto>,
 ) -> Result<CamadaSalva, ErroDoProjeto> {
     let mut tiles = BTreeMap::new();
-    for (posicao, tile) in camada.pixels.existentes() {
+    // Também os tiles de fora da foto (formato 7).
+    for (posicao, tile) in camada.pixels.todos() {
         tiles.insert(chave_do_tile(*posicao), gravar_tile(tile)?);
     }
     Ok(CamadaSalva {
@@ -645,7 +651,7 @@ fn salvar_mascara(
     gravar_tile: &mut dyn FnMut(&Tile) -> Result<String, ErroDoProjeto>,
 ) -> Result<MascaraSalva, ErroDoProjeto> {
     let mut tiles = BTreeMap::new();
-    for (posicao, tile) in mascara.pixels.existentes() {
+    for (posicao, tile) in mascara.pixels.todos() {
         tiles.insert(chave_do_tile(*posicao), gravar_tile(tile)?);
     }
     Ok(MascaraSalva {

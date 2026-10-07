@@ -494,7 +494,7 @@ impl Molde {
                         continue;
                     }
                     let tile = tiles
-                        .entry((x / LADO_DO_TILE, y / LADO_DO_TILE))
+                        .entry(crate::tiles::tile_de(x, y))
                         .or_insert_with(|| vec![0; BYTES]);
                     tile[((y % LADO_DO_TILE) * LADO_DO_TILE + x % LADO_DO_TILE) as usize] = valor;
                 }
@@ -892,10 +892,10 @@ impl Selecao {
                 let padrao = self.padrao;
                 let tile = Arc::make_mut(
                     self.tiles
-                        .entry((c, l))
+                        .entry((c as i32, l as i32))
                         .or_insert_with(|| Arc::new(vec![padrao; BYTES])),
                 );
-                let pedaco = retangulo_do_tile((c, l), self.largura, self.altura);
+                let pedaco = retangulo_do_tile((c as i32, l as i32), self.largura, self.altura);
                 let x0 = pedaco.x.max(ret.x);
                 let x1 = pedaco.direita().min(ret.direita());
                 let y0 = pedaco.y.max(ret.y);
@@ -929,7 +929,7 @@ impl Selecao {
         if x >= self.largura || y >= self.altura {
             return 0;
         }
-        match self.tiles.get(&(x / LADO_DO_TILE, y / LADO_DO_TILE)) {
+        match self.tiles.get(&crate::tiles::tile_de(x, y)) {
             Some(t) => t[((y % LADO_DO_TILE) * LADO_DO_TILE + x % LADO_DO_TILE) as usize],
             None => self.padrao,
         }
@@ -1595,7 +1595,7 @@ mod testes {
                 } else {
                     [13, 250, 77, 0]
                 };
-                c.tile_mut((x / LADO_DO_TILE, y / LADO_DO_TILE))[i..i + 4].copy_from_slice(&p);
+                c.tile_mut(crate::tiles::tile_de(x, y))[i..i + 4].copy_from_slice(&p);
             }
         }
         let amostra = Amostra::da_camada(&c, 300, 300);

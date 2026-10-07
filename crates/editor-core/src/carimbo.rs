@@ -123,7 +123,7 @@ impl Fonte {
         if x >= largura || y >= altura {
             return None;
         }
-        let posicao = (x / LADO_DO_TILE, y / LADO_DO_TILE);
+        let posicao = crate::tiles::tile_de(x, y);
         let tile = self.suaves.entry(posicao).or_insert_with(|| {
             // O tile com uma margem do raio, composto e desfocado em duas
             // passadas (linhas, depois colunas).
@@ -206,7 +206,7 @@ impl Fonte {
             return None;
         }
         let (ox, oy) = (ox as u32, oy as u32);
-        let posicao = (ox / LADO_DO_TILE, oy / LADO_DO_TILE);
+        let posicao = crate::tiles::tile_de(ox, oy);
         let tile = self.tiles.entry(posicao).or_insert_with(|| {
             let ret: Retangulo = retangulo_do_tile(posicao, self.base.width(), self.base.height());
             composicao::compor_recorte(&self.base, &self.doc, &ret)
