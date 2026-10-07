@@ -259,6 +259,8 @@ impl Sessao {
             self.ativa = indice;
             self.na_mascara = false;
         }
+        // A camada de ajuste pinta na máscara.
+        self.cores_em_cinza_na_mascara();
     }
 
     /// Escolhe a máscara da camada `indice` para pintar. Falso sem máscara.
@@ -276,7 +278,34 @@ impl Sessao {
             self.ativa = indice;
             self.na_mascara = true;
         }
+        self.cores_em_cinza_na_mascara();
         true
+    }
+
+    /// X: a cor de frente e a de fundo trocam de lugar.
+    pub fn trocar_cores(&mut self) {
+        std::mem::swap(&mut self.pincel.cor, &mut self.pincel.cor_de_fundo);
+    }
+
+    /// D: preto na frente, branco no fundo.
+    pub fn cores_padrao(&mut self) {
+        self.pincel.cor = [0; 3];
+        self.pincel.cor_de_fundo = [255; 3];
+    }
+
+    /// Na máscara só valem cinzas: como o Photoshop, as duas cores viram o
+    /// cinza delas quando o pincel vai para a máscara — o quadrado da cor
+    /// mostra o que vai ser pintado, e não um vermelho que pinta 30% de cinza.
+    fn cores_em_cinza_na_mascara(&mut self) {
+        if !self.na_mascara() {
+            return;
+        }
+        let cinza = |c: [u8; 3]| {
+            let v = ((77 * c[0] as u32 + 150 * c[1] as u32 + 29 * c[2] as u32 + 128) >> 8) as u8;
+            [v; 3]
+        };
+        self.pincel.cor = cinza(self.pincel.cor);
+        self.pincel.cor_de_fundo = cinza(self.pincel.cor_de_fundo);
     }
 
     /// O pincel está pintando na máscara da escolhida. Numa camada de ajuste,
@@ -319,6 +348,7 @@ impl Sessao {
             indice,
             camada: Box::new(camada),
         });
+        self.cores_em_cinza_na_mascara();
     }
 
     /// Um slider do ajuste da escolhida andou: a foto muda na hora, o
@@ -432,6 +462,7 @@ impl Sessao {
             antes: None,
             depois: Some(Box::new(mascara)),
         });
+        self.cores_em_cinza_na_mascara();
         true
     }
 
@@ -1147,7 +1178,20 @@ impl Sessao {
         if self.na_mascara() && self.pincel.ferramenta.le_a_foto() {
             return false;
         }
-        let mut traco = Traco::novo(self.pincel).dentro_de(self.selecao.clone());
+        // Na máscara, a borracha pinta a cor de fundo (branco: revela), como no
+        // Photoshop — e não "volta ao fundo da máscara", que numa máscara que
+        // esconde tudo esconderia de novo.
+        let pincel =
+            if self.na_mascara() && self.pincel.ferramenta == crate::pincel::Ferramenta::Borracha {
+                crate::pincel::Pincel {
+                    ferramenta: crate::pincel::Ferramenta::Pincel,
+                    cor: self.pincel.cor_de_fundo,
+                    ..self.pincel
+                }
+            } else {
+                self.pincel
+            };
+        let mut traco = Traco::novo(pincel).dentro_de(self.selecao.clone());
         if self.pincel.ferramenta.le_a_foto()
             && self.pincel.ferramenta != crate::pincel::Ferramenta::Carimbo
         {

@@ -29,6 +29,9 @@ pub mod tiles;
 pub mod transformar;
 pub mod vista;
 
+#[cfg(test)]
+mod testes_da_mascara;
+
 pub use ajuste::Ajuste;
 pub use contrato::VersaoEditada;
 pub use documento::{BaseRef, Camada, Documento};

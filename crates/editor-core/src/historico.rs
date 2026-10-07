@@ -555,6 +555,7 @@ mod testes {
             dureza: 0.5,
             opacidade: 0.8,
             cor,
+            ..Pincel::default()
         });
         traco.ate(&mut doc.camadas[0].pixels, x, 100.0);
         traco.ate(&mut doc.camadas[0].pixels, x + 200.0, 150.0);

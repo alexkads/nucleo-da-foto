@@ -1284,6 +1284,51 @@ mod testes {
     }
 
     #[test]
+    fn a_mascara_pintada_volta_igual_e_a_imagem_editada_e_a_composicao() {
+        // A camada de cima com a máscara pintada de preto, de cinza e de
+        // branco: a imagem editada que a Revelação lê é a composição, e
+        // reabrir devolve a mesma foto e o mesmo histórico.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = crate::testes_da_mascara::cenario();
+        let base = s.base().clone();
+        s.adicionar_mascara(false);
+        for (cor, y) in [([0u8; 3], 200.0), ([128; 3], 300.0), ([255; 3], 200.0)] {
+            s.pincel.cor = cor;
+            s.pincel.dureza = 1.0;
+            s.apertar(150.0, y);
+            s.arrastar(450.0, y);
+            s.soltar();
+        }
+        let (doc, hist) = s.instantaneo();
+        let composta = composicao::compor(&base, &doc);
+        let p = projeto(dir.path(), Arc::new(DiscoReal));
+        let salvo = p.salvar("e1", &base, &doc, &hist, 1).unwrap();
+        let versao = salvo.versao.expect("com efeito há imagem editada");
+        let lida = ler_png(&std::fs::read(&versao.arquivo).unwrap()).unwrap();
+        assert_eq!(
+            lida.as_raw(),
+            composta.as_raw(),
+            "a imagem editada é a composição"
+        );
+        p.coletar(1).unwrap();
+
+        let aberto = projeto(dir.path(), Arc::new(DiscoReal))
+            .abrir(&base)
+            .unwrap()
+            .unwrap();
+        assert_eq!(aberto.documento, doc);
+        assert_eq!(aberto.historico.passos(), hist.passos());
+        let mut s2 = Sessao::nova(base.clone(), aberto.documento, aberto.historico, 300);
+        assert_eq!(s2.compor().as_raw(), composta.as_raw());
+        // O histórico reaberto desfaz os três traços e a máscara.
+        for _ in 0..4 {
+            assert!(s2.desfazer());
+        }
+        assert!(s2.documento().camadas[1].mascara.is_none());
+        assert_eq!(s2.compor().get_pixel(400, 300).0, [255, 0, 0]);
+    }
+
+    #[test]
     fn o_projeto_do_formato_1_abre_com_o_modo_normal() {
         let dir = tempfile::tempdir().unwrap();
         let base = base();

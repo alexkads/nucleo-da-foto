@@ -127,7 +127,11 @@ pub struct Pincel {
     pub dureza: f32,
     /// `0..=1`.
     pub opacidade: f32,
+    /// A cor de frente — a do pincel.
     pub cor: [u8; 3],
+    /// A cor de fundo do Photoshop: X troca as duas, D volta a preto e
+    /// branco. Na máscara, a borracha pinta com ela.
+    pub cor_de_fundo: [u8; 3],
 }
 
 impl Default for Pincel {
@@ -138,6 +142,7 @@ impl Default for Pincel {
             dureza: 0.8,
             opacidade: 1.0,
             cor: [0, 0, 0],
+            cor_de_fundo: [255, 255, 255],
         }
     }
 }
@@ -431,6 +436,7 @@ mod testes {
             dureza: 1.0,
             opacidade: 1.0,
             cor: [200, 10, 20],
+            ..Pincel::default()
         }
     }
 
@@ -568,6 +574,7 @@ mod testes {
             dureza: 1.0,
             opacidade: 1.0,
             cor: [0, 0, 0],
+            ..Pincel::default()
         };
         let fonte = Fonte::nova(base.clone(), &doc, 0, (100.0, 50.0));
         let mut traco = Traco::novo(p).copiando_de(fonte);
