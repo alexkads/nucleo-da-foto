@@ -17,8 +17,76 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use image::RgbImage;
+
+use crate::documento::Mascara;
 use crate::retangulo::Retangulo;
-use crate::tiles::{retangulo_do_tile, Posicao, LADO_DO_TILE};
+use crate::tiles::{retangulo_do_tile, CamadaDePixels, Posicao, LADO_DO_TILE};
+
+/// A média numa janela de `2r + 1` ao longo das linhas (`horizontal`) ou das
+/// colunas, com a borda repetida. Valores 0..=255 em `u16` (a soma não estoura
+/// no acumulador `u32`).
+fn caixa(d: &mut [u16], l: usize, a: usize, r: usize, horizontal: bool) {
+    let (n, linhas) = if horizontal { (l, a) } else { (a, l) };
+    let indice = |linha: usize, k: usize| {
+        if horizontal {
+            linha * l + k
+        } else {
+            k * l + linha
+        }
+    };
+    let mut copia = vec![0u16; n];
+    let janela = (2 * r + 1) as u32;
+    for linha in 0..linhas {
+        for (k, c) in copia.iter_mut().enumerate() {
+            *c = d[indice(linha, k)];
+        }
+        let em = |k: isize| copia[k.clamp(0, n as isize - 1) as usize] as u32;
+        let mut soma: u32 = (-(r as isize)..=r as isize).map(em).sum();
+        for k in 0..n {
+            d[indice(linha, k)] = ((soma + janela / 2) / janela) as u16;
+            soma += em(k as isize + r as isize + 1);
+            soma -= em(k as isize - r as isize);
+        }
+    }
+}
+
+/// O máximo numa janela de `2r + 1` ao longo das linhas ou das colunas — a
+/// dilatação, separável num quadrado.
+fn maximo(d: &mut [u8], l: usize, a: usize, r: usize, horizontal: bool) {
+    let (n, linhas) = if horizontal { (l, a) } else { (a, l) };
+    let indice = |linha: usize, k: usize| {
+        if horizontal {
+            linha * l + k
+        } else {
+            k * l + linha
+        }
+    };
+    let mut copia = vec![0u8; n];
+    // A fila de índices com valores decrescentes (máximo deslizante).
+    let mut fila: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for linha in 0..linhas {
+        for (k, c) in copia.iter_mut().enumerate() {
+            *c = d[indice(linha, k)];
+        }
+        fila.clear();
+        let mut proximo = 0usize;
+        for k in 0..n {
+            let fim = (k + r).min(n - 1);
+            while proximo <= fim {
+                while fila.back().is_some_and(|&b| copia[b] <= copia[proximo]) {
+                    fila.pop_back();
+                }
+                fila.push_back(proximo);
+                proximo += 1;
+            }
+            while fila.front().is_some_and(|&f| f + r < k) {
+                fila.pop_front();
+            }
+            d[indice(linha, k)] = copia[*fila.front().unwrap_or(&k)];
+        }
+    }
+}
 
 const BYTES: usize = (LADO_DO_TILE * LADO_DO_TILE) as usize;
 
@@ -142,6 +210,184 @@ impl Selecao {
             }
         }
         s.enxugar();
+        s
+    }
+
+    /// A varinha mágica (W): os pixels de `foto` cuja cor difere da de `(x, y)`
+    /// no máximo `tolerancia` em cada canal (32 no Photoshop). Contígua, só a
+    /// área ligada ao ponto; senão, todos os parecidos da foto.
+    pub fn por_cor(foto: &RgbImage, (x, y): (u32, u32), tolerancia: u8, contigua: bool) -> Self {
+        let (largura, altura) = (foto.width(), foto.height());
+        let mut s = Self::vazia(largura, altura);
+        if x >= largura || y >= altura {
+            return s;
+        }
+        let alvo = foto.get_pixel(x, y).0;
+        let tol = tolerancia as i16;
+        let (l, a) = (largura as usize, altura as usize);
+        let bruto = foto.as_raw();
+        let parecido =
+            |i: usize| (0..3).all(|c| (bruto[i * 3 + c] as i16 - alvo[c] as i16).abs() <= tol);
+        let mut marcado = vec![false; l * a];
+        if contigua {
+            // Por linhas, como a lata de tinta.
+            let mut pilha = vec![(x as usize, y as usize)];
+            let pode = |m: &[bool], x: usize, y: usize| !m[y * l + x] && parecido(y * l + x);
+            while let Some((px, py)) = pilha.pop() {
+                if !pode(&marcado, px, py) {
+                    continue;
+                }
+                let mut x0 = px;
+                while x0 > 0 && pode(&marcado, x0 - 1, py) {
+                    x0 -= 1;
+                }
+                let mut x1 = px;
+                while x1 + 1 < l && pode(&marcado, x1 + 1, py) {
+                    x1 += 1;
+                }
+                marcado[py * l + x0..=py * l + x1].fill(true);
+                for ny in [py.wrapping_sub(1), py + 1] {
+                    if ny >= a {
+                        continue;
+                    }
+                    let mut xx = x0;
+                    while xx <= x1 {
+                        if pode(&marcado, xx, ny) {
+                            pilha.push((xx, ny));
+                            while xx <= x1 && pode(&marcado, xx, ny) {
+                                xx += 1;
+                            }
+                        } else {
+                            xx += 1;
+                        }
+                    }
+                }
+            }
+        } else {
+            for (i, m) in marcado.iter_mut().enumerate() {
+                *m = parecido(i);
+            }
+        }
+        let densa: Vec<u8> = marcado.iter().map(|m| if *m { 255 } else { 0 }).collect();
+        s.carregar_densa(&densa);
+        s
+    }
+
+    /// A seleção do alfa de uma camada (⌘ + clique na miniatura): o que está
+    /// pintado fica selecionado, na proporção da opacidade.
+    pub fn do_alfa(camada: &CamadaDePixels) -> Self {
+        let mut s = Self::vazia(camada.largura(), camada.altura());
+        for (posicao, tile) in camada.existentes() {
+            let valores: Vec<u8> = tile.iter().skip(3).step_by(4).copied().collect();
+            s.tiles.insert(*posicao, Arc::new(valores));
+        }
+        s.enxugar();
+        s
+    }
+
+    /// A seleção de uma máscara (⌘ + clique na miniatura dela): o que ela
+    /// revela.
+    pub fn da_mascara(mascara: &Mascara) -> Self {
+        let (largura, altura) = (mascara.pixels.largura(), mascara.pixels.altura());
+        let mut s = Self {
+            padrao: mascara.fundo,
+            ..Self::vazia(largura, altura)
+        };
+        for (posicao, tile) in mascara.pixels.existentes() {
+            let valores: Vec<u8> = tile
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| Mascara::valor_do_pixel(mascara.fundo, *p))
+                .collect();
+            s.tiles.insert(*posicao, Arc::new(valores));
+        }
+        s.enxugar();
+        s
+    }
+
+    /// A máscara inteira, um byte por pixel da foto.
+    fn densa(&self) -> Vec<u8> {
+        let (l, a) = (self.largura as usize, self.altura as usize);
+        let mut d = vec![self.padrao; l * a];
+        for (posicao, tile) in &self.tiles {
+            let r = retangulo_do_tile(*posicao, self.largura, self.altura);
+            for y in 0..r.altura {
+                let de = (y * LADO_DO_TILE) as usize;
+                let para = (r.y + y) as usize * l + r.x as usize;
+                d[para..para + r.largura as usize]
+                    .copy_from_slice(&tile[de..de + r.largura as usize]);
+            }
+        }
+        d
+    }
+
+    /// Troca o conteúdo pelo de uma máscara densa (do tamanho da foto).
+    fn carregar_densa(&mut self, d: &[u8]) {
+        self.padrao = 0;
+        self.tiles.clear();
+        let colunas = self.largura.div_ceil(LADO_DO_TILE);
+        let linhas = self.altura.div_ceil(LADO_DO_TILE);
+        let l = self.largura as usize;
+        for tl in 0..linhas {
+            for tc in 0..colunas {
+                let r = retangulo_do_tile((tc, tl), self.largura, self.altura);
+                let mut tile = vec![0u8; BYTES];
+                let mut algum = false;
+                for y in 0..r.altura {
+                    let de = (r.y + y) as usize * l + r.x as usize;
+                    let linha = &d[de..de + r.largura as usize];
+                    algum |= linha.iter().any(|v| *v != 0);
+                    let para = (y * LADO_DO_TILE) as usize;
+                    tile[para..para + r.largura as usize].copy_from_slice(linha);
+                }
+                if algum {
+                    self.tiles.insert((tc, tl), Arc::new(tile));
+                }
+            }
+        }
+    }
+
+    /// Difusão (⇧F6): a borda vira uma rampa de `raio` pixels — três passadas
+    /// de caixa em cada direção, perto de um desfoque gaussiano.
+    pub fn difusa(&self, raio: u32) -> Selecao {
+        if raio == 0 || self.nada() {
+            return self.clone();
+        }
+        let (l, a) = (self.largura as usize, self.altura as usize);
+        let mut d: Vec<u16> = self.densa().iter().map(|v| *v as u16).collect();
+        let r = (raio as usize).div_ceil(2).max(1);
+        for _ in 0..3 {
+            caixa(&mut d, l, a, r, true);
+            caixa(&mut d, l, a, r, false);
+        }
+        let mut s = Selecao::vazia(self.largura, self.altura);
+        s.carregar_densa(&d.iter().map(|v| *v as u8).collect::<Vec<_>>());
+        s
+    }
+
+    /// Expandir (`px` > 0) ou contrair (`px` < 0) a seleção, em pixels — o
+    /// máximo (ou o mínimo) numa janela quadrada em volta de cada pixel.
+    pub fn expandida(&self, px: i32) -> Selecao {
+        if px == 0 || self.nada() {
+            return self.clone();
+        }
+        let (l, a) = (self.largura as usize, self.altura as usize);
+        let contrair = px < 0;
+        let mut d = self.densa();
+        if contrair {
+            d.iter_mut().for_each(|v| *v = 255 - *v);
+        }
+        let r = px.unsigned_abs() as usize;
+        maximo(&mut d, l, a, r, true);
+        maximo(&mut d, l, a, r, false);
+        if contrair {
+            // A borda da foto não conta: o que encosta nela não recua dela —
+            // o padrão do Photoshop ("aplicar na borda da tela" desligado).
+            d.iter_mut().for_each(|v| *v = 255 - *v);
+        }
+        let mut s = Selecao::vazia(self.largura, self.altura);
+        s.carregar_densa(&d);
         s
     }
 
@@ -496,5 +742,87 @@ mod testes {
         assert!(grossa
             .iter()
             .all(|(x0, y0, x1, y1)| [x0, y0, x1, y1].iter().all(|v| *v % 10 == 0)));
+    }
+
+    /// Uma foto com dois quadrados vermelhos separados num fundo azul.
+    fn dois_quadrados() -> RgbImage {
+        RgbImage::from_fn(600, 300, |x, y| {
+            let dentro = |x0: u32| (x0..x0 + 100).contains(&x) && (100..200).contains(&y);
+            if dentro(50) || dentro(400) {
+                image::Rgb([220, 20, 20])
+            } else {
+                image::Rgb([20, 40, 200])
+            }
+        })
+    }
+
+    #[test]
+    fn a_varinha_pega_a_cor_continua_ou_toda() {
+        let foto = dois_quadrados();
+        let s = Selecao::por_cor(&foto, (100, 150), 32, true);
+        assert_eq!(s.valor(60, 110), 255);
+        assert_eq!(s.valor(450, 150), 0, "o outro quadrado não encosta");
+        assert_eq!(s.valor(10, 10), 0);
+        let todas = Selecao::por_cor(&foto, (100, 150), 32, false);
+        assert_eq!(todas.valor(450, 150), 255, "não contígua pega os dois");
+        // Tolerância 0 num pixel diferente por 1: fica de fora.
+        let mut quase = foto.clone();
+        quase.put_pixel(70, 150, image::Rgb([221, 20, 20]));
+        assert_eq!(
+            Selecao::por_cor(&quase, (100, 150), 0, true).valor(70, 150),
+            0
+        );
+        assert_eq!(
+            Selecao::por_cor(&quase, (100, 150), 1, true).valor(70, 150),
+            255
+        );
+    }
+
+    #[test]
+    fn o_alfa_da_camada_e_a_mascara_viram_selecao() {
+        let mut c = CamadaDePixels::nova(600, 300);
+        c.tile_mut((0, 0))[3] = 255;
+        c.tile_mut((0, 0))[7] = 100;
+        let s = Selecao::do_alfa(&c);
+        assert_eq!((s.valor(0, 0), s.valor(1, 0), s.valor(2, 0)), (255, 100, 0));
+        assert_eq!(s.valor(500, 200), 0);
+
+        let mut m = Mascara::nova(255, 600, 300);
+        m.pixels.tile_mut((1, 0))[..4].copy_from_slice(&[0, 0, 0, 255]);
+        let s = Selecao::da_mascara(&m);
+        assert_eq!(s.valor(256, 0), 0, "o preto não é selecionado");
+        assert_eq!(s.valor(10, 10), 255, "o fundo branco é");
+    }
+
+    #[test]
+    fn a_difusao_faz_rampa_e_expandir_contrair_mexem_na_borda() {
+        let r = Selecao::da_forma(
+            600,
+            300,
+            &Forma::Retangulo(Retangulo::novo(200, 100, 100, 100)),
+        );
+        let d = r.difusa(10);
+        assert!(d.valor(250, 150) > 250, "o meio continua cheio");
+        let borda = d.valor(200, 150);
+        assert!((100..160).contains(&borda), "a borda fica a meio ({borda})");
+        assert!(
+            d.valor(193, 150) > 0 && d.valor(193, 150) < borda,
+            "a rampa passa da borda"
+        );
+        assert_eq!(d.valor(150, 150), 0);
+
+        let e = r.expandida(5);
+        assert_eq!(e.valor(195, 150), 255);
+        assert_eq!(e.valor(194, 150), 0);
+        assert!(!e.limites().vazio());
+        let c = r.expandida(-5);
+        assert_eq!(c.valor(205, 150), 255);
+        assert_eq!(c.valor(204, 150), 0);
+        // Contrair o que encosta na borda da foto não recua dela.
+        let tudo = Selecao::da_forma(600, 300, &Forma::Retangulo(Retangulo::novo(0, 0, 100, 300)));
+        assert_eq!(tudo.expandida(-5).valor(0, 0), 255);
+        assert_eq!(tudo.expandida(-5).valor(95, 0), 0);
+        // Contrair até sumir: nada.
+        assert!(r.expandida(-60).nada());
     }
 }

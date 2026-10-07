@@ -860,9 +860,78 @@ impl Sessao {
     /// Uma forma desenhada entra na seleção. Nova sem nada selecionado no fim
     /// (um clique) desmarca, como no Photoshop.
     pub fn selecionar(&mut self, forma: &Forma, operacao: Operacao) {
-        self.fechar_o_que_esta_aberto();
         let (largura, altura) = (self.doc.largura(), self.doc.altura());
-        let nova = Selecao::da_forma(largura, altura, forma);
+        self.entrar_na_selecao(Selecao::da_forma(largura, altura, forma), operacao);
+    }
+
+    /// A varinha mágica (W) em `(x, y)`: a cor da foto **como ela aparece**
+    /// (todas as camadas — a foto aqui é a base, e não uma camada), com a
+    /// tolerância e o contíguo do Photoshop.
+    pub fn varinha(
+        &mut self,
+        x: f32,
+        y: f32,
+        tolerancia: u8,
+        contigua: bool,
+        operacao: Operacao,
+    ) -> bool {
+        if x < 0.0 || y < 0.0 || x >= self.doc.largura() as f32 || y >= self.doc.altura() as f32 {
+            return false;
+        }
+        self.fechar_o_que_esta_aberto();
+        let foto = self.compor();
+        let nova = Selecao::por_cor(&foto, (x as u32, y as u32), tolerancia, contigua);
+        self.entrar_na_selecao(nova, operacao);
+        true
+    }
+
+    /// ⌘ + clique na miniatura: a seleção do que a camada tem pintado (o
+    /// alfa), ou do que a máscara dela revela. Uma camada de ajuste sem
+    /// máscara não tem o que dar.
+    pub fn selecionar_da_camada(
+        &mut self,
+        indice: usize,
+        da_mascara: bool,
+        operacao: Operacao,
+    ) -> bool {
+        let Some(camada) = self.doc.camadas.get(indice) else {
+            return false;
+        };
+        let nova = match (&camada.mascara, da_mascara || camada.ajuste.is_some()) {
+            (Some(m), true) => Selecao::da_mascara(m),
+            (None, true) if camada.ajuste.is_some() => return false,
+            _ => Selecao::do_alfa(&camada.pixels),
+        };
+        self.entrar_na_selecao(nova, operacao);
+        true
+    }
+
+    /// Difusão (⇧F6) de `raio` pixels. Sem seleção, nada.
+    pub fn difundir_selecao(&mut self, raio: u32) -> bool {
+        self.modificar_selecao(|s| s.difusa(raio))
+    }
+
+    /// Expandir (`px` > 0) ou contrair (`px` < 0) a seleção.
+    pub fn expandir_selecao(&mut self, px: i32) -> bool {
+        self.modificar_selecao(|s| s.expandida(px))
+    }
+
+    fn modificar_selecao(&mut self, mudar: impl FnOnce(&Selecao) -> Selecao) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let Some(atual) = self.selecao.as_deref() else {
+            return false;
+        };
+        let nova = mudar(atual);
+        self.selecao = (!nova.nada()).then(|| Arc::new(nova));
+        self.versao += 1;
+        self.versao_da_selecao += 1;
+        true
+    }
+
+    /// Uma seleção nova entra na de agora conforme a operação. Nova sem nada
+    /// selecionado no fim (um clique) desmarca, como no Photoshop.
+    fn entrar_na_selecao(&mut self, nova: Selecao, operacao: Operacao) {
+        self.fechar_o_que_esta_aberto();
         let resultado = match (operacao, self.selecao.as_deref()) {
             (Operacao::Nova, _) | (_, None) => {
                 if operacao == Operacao::Subtrair {
@@ -2000,5 +2069,42 @@ mod testes {
         s.confirmar_ajuste();
         let exata = Vista::nova(s.base(), s.documento(), 400);
         assert_eq!(s.vista().imagem().as_raw(), exata.imagem().as_raw());
+    }
+
+    #[test]
+    fn a_varinha_le_a_foto_como_aparece_e_o_cmd_clique_le_a_camada() {
+        // A sessão de teste: x%256 no vermelho. Uma camada azul cobrindo um
+        // retângulo vira a "cor" que a varinha pega.
+        let mut s = sessao();
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(100, 100, 200, 100)),
+            Operacao::Nova,
+        );
+        s.pincel.cor = [0, 0, 255];
+        s.preencher_selecao();
+        s.desmarcar();
+        assert!(s.varinha(150.0, 150.0, 32, true, Operacao::Nova));
+        let sel = s.selecao().unwrap();
+        assert_eq!(sel.valor(299, 199), 255);
+        assert_eq!(sel.valor(300, 150), 0);
+        // ⇧: soma a varinha num ponto da base.
+        assert!(s.varinha(5.0, 500.0, 2, true, Operacao::Somar));
+        assert_eq!(s.selecao().unwrap().valor(150, 150), 255);
+        assert_eq!(s.selecao().unwrap().valor(5, 500), 255);
+        // Um clique fora da foto não muda nada.
+        assert!(!s.varinha(-1.0, 5.0, 32, true, Operacao::Nova));
+
+        // ⌘ + clique na miniatura: o alfa da camada.
+        s.desmarcar();
+        assert!(s.selecionar_da_camada(0, false, Operacao::Nova));
+        let sel = s.selecao().unwrap();
+        assert_eq!((sel.valor(150, 150), sel.valor(50, 50)), (255, 0));
+        // ⌥: tira a máscara (que revela tudo) — não sobra nada.
+        s.adicionar_mascara(false);
+        s.selecionar_da_camada(0, true, Operacao::Subtrair);
+        assert!(s.selecao().is_none());
+        // Difusão e expandir sem seleção não fazem nada.
+        assert!(!s.difundir_selecao(5));
+        assert!(!s.expandir_selecao(5));
     }
 }
