@@ -327,3 +327,56 @@ fn ao_ir_para_a_mascara_as_cores_viram_cinza() {
     assert!(s.escolher_mascara(1));
     assert_eq!(s.pincel.cor, [77; 3]);
 }
+
+#[test]
+fn o_preenchimento_entra_numa_camada_nova_num_passo_e_recusa_versao_velha() {
+    let mut s = cenario();
+    let antes = s.compor();
+    let versao = s.versao();
+    let camadas = s.documento().camadas.len();
+    let passos = s.historico().passos().len();
+    // Um remendo verde 20×10 em (300, 300), com borda suave à esquerda.
+    let ret = Retangulo::novo(300, 300, 20, 10);
+    let rgba: Vec<u8> = (0..200).flat_map(|_| [0u8, 200, 0, 255]).collect();
+    let peso = |x: u32, _y: u32| if x < 305 { 128 } else { 255 };
+    s.aplicar_preenchimento(versao, &ret, &rgba, &peso, true)
+        .unwrap();
+    assert_eq!(s.documento().camadas.len(), camadas + 1);
+    assert_eq!(s.historico().passos().len(), passos + 1, "um passo só");
+    let nova = &s.documento().camadas[s.ativa()];
+    assert_eq!(nova.nome, "Preenchimento 1");
+    assert_eq!(nova.pixels.quantos(), 1, "só o tile que o remendo toca");
+    assert_eq!(pixel(&s.compor(), 310, 305), [0, 200, 0]);
+    // Fora do remendo, a foto é exatamente a de antes.
+    for (x, y) in [(299, 305), (320, 305), (310, 299), (310, 310), (10, 10)] {
+        assert_eq!(pixel(&s.compor(), x, y), pixel(&antes, x, y));
+    }
+    // A borda suave mistura.
+    let meio = pixel(&s.compor(), 302, 305);
+    assert!(meio != [0, 200, 0] && meio != pixel(&antes, 302, 305));
+    // Desfazer tira a camada e o remendo juntos.
+    assert!(s.desfazer());
+    assert_eq!(s.documento().camadas.len(), camadas);
+    assert_eq!(s.compor().as_raw(), antes.as_raw());
+    assert!(s.refazer());
+    assert_eq!(pixel(&s.compor(), 310, 305), [0, 200, 0]);
+    // Com o documento mudado depois do instantâneo, recusa.
+    let velha = s.versao();
+    s.desfazer();
+    assert!(s.mudou_desde(velha));
+    assert!(s
+        .aplicar_preenchimento(velha, &ret, &rgba, &peso, true)
+        .is_err());
+    assert_eq!(s.documento().camadas.len(), camadas);
+}
+
+#[test]
+fn o_pincel_da_amostragem_inclui_e_exclui() {
+    let mut a = crate::Selecao::vazia(400, 300);
+    a.pintar_disco(100.0, 100.0, 20.0, true);
+    assert_eq!(a.valor(100, 100), 255);
+    assert_eq!(a.valor(100, 125), 0);
+    a.pintar_disco(100.0, 100.0, 5.0, false);
+    assert_eq!(a.valor(100, 100), 0);
+    assert_eq!(a.valor(100, 115), 255);
+}

@@ -1,0 +1,41 @@
+[package]
+name = "ia-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A IA local do VintageLightbox: modelos ONNX baixados pelo operador, backends (CPU, CoreML, DirectML, CUDA) e sessões reaproveitadas"
+
+# 🧠 A base comum de toda IA que roda no computador do balcão — sem saber para
+# que ela serve. O preenchimento (LaMa) é o primeiro uso; remover fundo,
+# ampliar ou ajustar automático usam o mesmo catálogo de modelos, a mesma
+# escolha de backend e a mesma sessão.
+#
+# Nada daqui fala com a rede além do download explícito de um modelo: fotos,
+# máscaras e resultados nunca saem da máquina.
+
+[features]
+default = ["onnx"]
+# O ONNX Runtime, estático no executável (o `ort` o baixa na compilação).
+onnx = ["dep:ort"]
+# CUDA: não testado (sem NVIDIA aqui); o runtime com CUDA pesa centenas de MB
+# a mais na compilação de cada balcão. Liga-se à mão.
+cuda = ["onnx", "ort/cuda"]
+
+[dependencies]
+sha2 = "0.10"
+ureq = "3"
+directories = "6.0.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-27", "coreml"] }
+
+[target.'cfg(windows)'.dependencies]
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-27", "directml"] }
+
+[target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-27"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

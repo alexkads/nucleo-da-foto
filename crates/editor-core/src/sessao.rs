@@ -641,6 +641,65 @@ impl Sessao {
         composicao::compor_recorte(&self.base, &doc, ret)
     }
 
+    /// O documento (pixels, pilha, máscaras ou seleção) mudou desde a
+    /// `versao` — o remendo calculado sobre ela já não serve.
+    pub fn mudou_desde(&self, versao: u64) -> bool {
+        self.versao != versao
+    }
+
+    /// O Preenchimento sensível ao conteúdo confirmado: o remendo entra numa
+    /// **camada de retoque nova**, logo acima da escolhida — criar a camada e
+    /// pintar o remendo nela são **um** passo do desfazer. Só os tiles que o
+    /// remendo toca existem nela; a visibilidade, a opacidade e a máscara dela
+    /// ficam para ajustar depois. `em_camada_nova = false` cola na escolhida
+    /// (só numa camada de pixels).
+    ///
+    /// 🚨 Recusa se o documento mudou desde `versao` (a do instantâneo de
+    /// onde o remendo saiu): aplicar um remendo calculado sobre outra versão
+    /// em silêncio desalinharia o retoque.
+    pub fn aplicar_preenchimento(
+        &mut self,
+        versao: u64,
+        ret: &Retangulo,
+        rgba: &[u8],
+        peso: &dyn Fn(u32, u32) -> u8,
+        em_camada_nova: bool,
+    ) -> Result<(), &'static str> {
+        if self.mudou_desde(versao) {
+            return Err("A foto mudou enquanto o preenchimento era calculado — refaça a prévia");
+        }
+        self.fechar_o_que_esta_aberto();
+        let ativa = self.ativa();
+        if !em_camada_nova {
+            if self.doc.camadas[ativa].ajuste.is_some() || self.na_mascara() {
+                return Err("O preenchimento vai nos pixels: escolha uma camada de pixels, ou use uma camada nova");
+            }
+            return if self.colar_remendo(ativa, ret, rgba, peso) {
+                Ok(())
+            } else {
+                Err("O remendo não mudou nada")
+            };
+        }
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let prefixo = "Preenchimento ";
+        let maior = self
+            .doc
+            .camadas
+            .iter()
+            .filter_map(|c| c.nome.strip_prefix(prefixo)?.trim().parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+        let mut camada = Camada::nova(&format!("{prefixo}{}", maior + 1), largura, altura);
+        if operacoes::colar(&mut camada.pixels, ret, rgba, peso).is_none() {
+            return Err("O remendo não mudou nada");
+        }
+        self.executar(Comando::CriarCamada {
+            indice: ativa + 1,
+            camada: Box::new(camada),
+        });
+        Ok(())
+    }
+
     /// Cola o remendo na camada `camada` (a que estava escolhida quando ele
     /// foi pedido) — um passo do desfazer. Falso quando não mudou nada, ou a
     /// camada já não existe.

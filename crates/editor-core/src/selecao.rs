@@ -213,6 +213,30 @@ impl Selecao {
         s
     }
 
+    /// O pincel da região de amostragem do preenchimento: um disco de `raio`
+    /// em volta de `(x, y)` vira selecionado (`incluir`) ou não, com um pixel
+    /// de rampa na borda. Devolve o retângulo mexido.
+    pub fn pintar_disco(&mut self, x: f32, y: f32, raio: f32, incluir: bool) -> Retangulo {
+        let r = raio.max(0.5);
+        let caixa = Retangulo::novo(
+            (x - r - 1.0).floor().max(0.0) as u32,
+            (y - r - 1.0).floor().max(0.0) as u32,
+            (2.0 * r + 3.0) as u32,
+            (2.0 * r + 3.0) as u32,
+        )
+        .limitado(self.largura, self.altura);
+        let antes = self.clone();
+        self.pintar(&caixa, |px, py| {
+            let d = (px as f32 + 0.5 - x).hypot(py as f32 + 0.5 - y);
+            let cobertura = (r + 0.5 - d).clamp(0.0, 1.0);
+            let velho = antes.valor(px, py) as f32;
+            let alvo = if incluir { 255.0 } else { 0.0 };
+            (velho + (alvo - velho) * cobertura).round() as u8
+        });
+        self.enxugar();
+        caixa
+    }
+
     /// A varinha mágica (W): os pixels de `foto` cuja cor difere da de `(x, y)`
     /// no máximo `tolerancia` em cada canal (32 no Photoshop). Contígua, só a
     /// área ligada ao ponto; senão, todos os parecidos da foto.
@@ -467,6 +491,32 @@ impl Selecao {
         self.tiles.keys().fold(Retangulo::default(), |a, p| {
             a.uniao(&retangulo_do_tile(*p, self.largura, self.altura))
         })
+    }
+
+    /// A caixa exata do que está selecionado (valor > 0) — a de
+    /// [`Self::limites`] é a dos tiles, de 256 em 256.
+    pub fn caixa_justa(&self) -> Retangulo {
+        if self.padrao > 0 {
+            return Retangulo::inteiro(self.largura, self.altura);
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        for (posicao, tile) in &self.tiles {
+            let r = retangulo_do_tile(*posicao, self.largura, self.altura);
+            for y in 0..r.altura {
+                for x in 0..r.largura {
+                    if tile[(y * LADO_DO_TILE + x) as usize] > 0 {
+                        x0 = x0.min(r.x + x);
+                        y0 = y0.min(r.y + y);
+                        x1 = x1.max(r.x + x + 1);
+                        y1 = y1.max(r.y + y + 1);
+                    }
+                }
+            }
+        }
+        if x1 <= x0 {
+            return Retangulo::default();
+        }
+        Retangulo::novo(x0, y0, x1 - x0, y1 - y0)
     }
 
     /// A seleção andada `(dx, dy)` pixels (o Mover leva a seleção junto). O

@@ -1,0 +1,23 @@
+[package]
+name = "preenchimento"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Os motores do Preenchimento sensível ao conteúdo do editor: PatchMatch e LaMa local"
+
+# 🔑 Os motores do preenchimento do editor. Fora do `editor-core` (que não
+# depende de motor de processamento nenhum) e fora do `revelacao-core` (que
+# compila para wasm). A IA vem do `ia-local`, que é comum a outras tarefas.
+
+[features]
+default = ["lama"]
+lama = ["ia-local/onnx"]
+
+[dependencies]
+revelacao-core = { path = "../revelacao-core" }
+ia-local = { path = "../ia-local", default-features = false }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+ia-local = { path = "../ia-local" }
