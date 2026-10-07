@@ -50,7 +50,11 @@ use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 ///   máscara — recusa com o aviso.
 /// - **5** (etapa 11): a camada de ajuste (`ajuste` na camada salva e o passo
 ///   `ajuste`). A 0.1.102 comporia a camada como vazia — recusa com o aviso.
-pub const FORMATO: u32 = 5;
+/// - **6** (etapa 13): o passo `varios` (camada via recorte num desfazer só).
+///   A 0.1.108 não saberia desfazê-lo — recusa com o aviso. Os passos de
+///   seleção, que entraram no desfazer na mesma etapa, **não** são gravados.
+///   Os formatos 1–5 se leem como estão.
+pub const FORMATO: u32 = 6;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -295,6 +299,11 @@ pub enum PassoSalvo {
         antes: Vec<TileSalvo>,
         depois: Vec<TileSalvo>,
     },
+    /// Formato 6: vários passos que são um gesto só (camada via recorte).
+    Varios {
+        nome: String,
+        passos: Vec<PassoSalvo>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -334,6 +343,296 @@ fn salvar_camada(
             .map(|m| salvar_mascara(m, gravar_tile))
             .transpose()?,
         ajuste: camada.ajuste,
+    })
+}
+
+/// Um passo do histórico para o manifesto, gravando os tiles que ele cita.
+fn salvar_passo(
+    passo: &Comando,
+    gravar_tile: &mut dyn FnMut(&Tile) -> Result<String, ErroDoProjeto>,
+) -> Result<PassoSalvo, ErroDoProjeto> {
+    Ok(match passo {
+        Comando::Ajuste {
+            camada,
+            antes,
+            depois,
+        } => PassoSalvo::Ajuste {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        Comando::Mascara {
+            camada,
+            antes,
+            depois,
+        } => {
+            let mut lado = |m: &Option<Box<Mascara>>| {
+                m.as_deref()
+                    .map(|m| salvar_mascara(m, &mut *gravar_tile))
+                    .transpose()
+            };
+            PassoSalvo::Mascara {
+                camada: *camada,
+                antes: lado(antes)?,
+                depois: lado(depois)?,
+            }
+        }
+        Comando::Traco {
+            camada,
+            na_mascara,
+            mudanca,
+        } => {
+            let mut salvar_lado = |lado: &[(Posicao, Option<Tile>)]| {
+                lado.iter()
+                    .map(|(p, t)| {
+                        Ok(TileSalvo {
+                            c: p.0,
+                            l: p.1,
+                            hash: t.as_ref().map(&mut *gravar_tile).transpose()?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ErroDoProjeto>>()
+            };
+            PassoSalvo::Traco {
+                camada: *camada,
+                na_mascara: *na_mascara,
+                antes: salvar_lado(&mudanca.antes)?,
+                depois: salvar_lado(&mudanca.depois)?,
+            }
+        }
+        Comando::Visibilidade {
+            camada,
+            antes,
+            depois,
+        } => PassoSalvo::Visibilidade {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        Comando::Opacidade {
+            camada,
+            antes,
+            depois,
+        } => PassoSalvo::Opacidade {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        Comando::Modo {
+            camada,
+            antes,
+            depois,
+        } => PassoSalvo::Modo {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        Comando::Renomear {
+            camada,
+            antes,
+            depois,
+        } => PassoSalvo::Renomear {
+            camada: *camada,
+            antes: antes.clone(),
+            depois: depois.clone(),
+        },
+        Comando::CriarCamada { indice, camada } => PassoSalvo::CriarCamada {
+            indice: *indice,
+            camada: salvar_camada(camada, &mut *gravar_tile)?,
+        },
+        Comando::ExcluirCamada { indice, camada } => PassoSalvo::ExcluirCamada {
+            indice: *indice,
+            camada: salvar_camada(camada, &mut *gravar_tile)?,
+        },
+        Comando::MoverCamada { de, para } => PassoSalvo::MoverCamada {
+            de: *de,
+            para: *para,
+        },
+        Comando::Mesclar {
+            indice,
+            de_cima,
+            mudanca,
+        } => {
+            let de_cima = salvar_camada(de_cima, &mut *gravar_tile)?;
+            let mut lado = |l: &[(Posicao, Option<Tile>)]| {
+                l.iter()
+                    .map(|(p, t)| {
+                        Ok(TileSalvo {
+                            c: p.0,
+                            l: p.1,
+                            hash: t.as_ref().map(&mut *gravar_tile).transpose()?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ErroDoProjeto>>()
+            };
+            PassoSalvo::Mesclar {
+                indice: *indice,
+                de_cima,
+                antes: lado(&mudanca.antes)?,
+                depois: lado(&mudanca.depois)?,
+            }
+        }
+        Comando::Varios { nome, passos } => PassoSalvo::Varios {
+            nome: nome.clone(),
+            passos: passos
+                .iter()
+                .map(|p| salvar_passo(p, gravar_tile))
+                .collect::<Result<_, _>>()?,
+        },
+        // `Historico::para_gravar` já tirou os passos de seleção.
+        Comando::Selecao { .. } => {
+            return Err(ErroDoProjeto::Formato(
+                "passo de seleção não vai para o projeto".into(),
+            ))
+        }
+    })
+}
+
+/// Um passo do manifesto de volta ao histórico.
+fn ler_passo(
+    passo: &PassoSalvo,
+    ler_tile: &mut dyn FnMut(&str) -> Result<Tile, ErroDoProjeto>,
+    ler_camada: &dyn Fn(
+        &CamadaSalva,
+        &mut dyn FnMut(&str) -> Result<Tile, ErroDoProjeto>,
+    ) -> Result<Camada, ErroDoProjeto>,
+    ler_mascara: &dyn Fn(
+        &MascaraSalva,
+        &mut dyn FnMut(&str) -> Result<Tile, ErroDoProjeto>,
+    ) -> Result<Mascara, ErroDoProjeto>,
+) -> Result<Comando, ErroDoProjeto> {
+    Ok(match passo {
+        PassoSalvo::Ajuste {
+            camada,
+            antes,
+            depois,
+        } => Comando::Ajuste {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        PassoSalvo::Mascara {
+            camada,
+            antes,
+            depois,
+        } => {
+            let mut lado = |m: &Option<MascaraSalva>| {
+                m.as_ref()
+                    .map(|m| ler_mascara(m, &mut *ler_tile).map(Box::new))
+                    .transpose()
+            };
+            Comando::Mascara {
+                camada: *camada,
+                antes: lado(antes)?,
+                depois: lado(depois)?,
+            }
+        }
+        PassoSalvo::Traco {
+            camada,
+            na_mascara,
+            antes,
+            depois,
+        } => {
+            let mut lado = |v: &[TileSalvo]| {
+                v.iter()
+                    .map(|t| {
+                        Ok((
+                            (t.c, t.l),
+                            t.hash.as_deref().map(&mut *ler_tile).transpose()?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ErroDoProjeto>>()
+            };
+            Comando::Traco {
+                camada: *camada,
+                na_mascara: *na_mascara,
+                mudanca: Mudanca {
+                    antes: lado(antes)?,
+                    depois: lado(depois)?,
+                },
+            }
+        }
+        PassoSalvo::Visibilidade {
+            camada,
+            antes,
+            depois,
+        } => Comando::Visibilidade {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        PassoSalvo::Opacidade {
+            camada,
+            antes,
+            depois,
+        } => Comando::Opacidade {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        PassoSalvo::Modo {
+            camada,
+            antes,
+            depois,
+        } => Comando::Modo {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        PassoSalvo::Renomear {
+            camada,
+            antes,
+            depois,
+        } => Comando::Renomear {
+            camada: *camada,
+            antes: antes.clone(),
+            depois: depois.clone(),
+        },
+        PassoSalvo::CriarCamada { indice, camada } => Comando::CriarCamada {
+            indice: *indice,
+            camada: Box::new(ler_camada(camada, &mut *ler_tile)?),
+        },
+        PassoSalvo::ExcluirCamada { indice, camada } => Comando::ExcluirCamada {
+            indice: *indice,
+            camada: Box::new(ler_camada(camada, &mut *ler_tile)?),
+        },
+        PassoSalvo::MoverCamada { de, para } => Comando::MoverCamada {
+            de: *de,
+            para: *para,
+        },
+        PassoSalvo::Mesclar {
+            indice,
+            de_cima,
+            antes,
+            depois,
+        } => {
+            let de_cima = Box::new(ler_camada(de_cima, &mut *ler_tile)?);
+            let mut lado = |v: &[TileSalvo]| {
+                v.iter()
+                    .map(|t| {
+                        Ok((
+                            (t.c, t.l),
+                            t.hash.as_deref().map(&mut *ler_tile).transpose()?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ErroDoProjeto>>()
+            };
+            Comando::Mesclar {
+                indice: *indice,
+                de_cima,
+                mudanca: Mudanca {
+                    antes: lado(antes)?,
+                    depois: lado(depois)?,
+                },
+            }
+        }
+        PassoSalvo::Varios { nome, passos } => Comando::Varios {
+            nome: nome.clone(),
+            passos: passos
+                .iter()
+                .map(|p| ler_passo(p, &mut *ler_tile, ler_camada, ler_mascara))
+                .collect::<Result<_, _>>()?,
+        },
     })
 }
 
@@ -461,130 +760,12 @@ impl Projeto {
         for camada in &doc.camadas {
             camadas.push(salvar_camada(camada, &mut gravar_tile)?);
         }
-        let mut passos = Vec::with_capacity(hist.passos().len());
-        for passo in hist.passos() {
-            passos.push(match passo {
-                Comando::Ajuste {
-                    camada,
-                    antes,
-                    depois,
-                } => PassoSalvo::Ajuste {
-                    camada: *camada,
-                    antes: *antes,
-                    depois: *depois,
-                },
-                Comando::Mascara {
-                    camada,
-                    antes,
-                    depois,
-                } => {
-                    let mut lado = |m: &Option<Box<Mascara>>| {
-                        m.as_deref()
-                            .map(|m| salvar_mascara(m, &mut gravar_tile))
-                            .transpose()
-                    };
-                    PassoSalvo::Mascara {
-                        camada: *camada,
-                        antes: lado(antes)?,
-                        depois: lado(depois)?,
-                    }
-                }
-                Comando::Traco {
-                    camada,
-                    na_mascara,
-                    mudanca,
-                } => {
-                    let mut salvar_lado = |lado: &[(Posicao, Option<Tile>)]| {
-                        lado.iter()
-                            .map(|(p, t)| {
-                                Ok(TileSalvo {
-                                    c: p.0,
-                                    l: p.1,
-                                    hash: t.as_ref().map(&mut gravar_tile).transpose()?,
-                                })
-                            })
-                            .collect::<Result<Vec<_>, ErroDoProjeto>>()
-                    };
-                    PassoSalvo::Traco {
-                        camada: *camada,
-                        na_mascara: *na_mascara,
-                        antes: salvar_lado(&mudanca.antes)?,
-                        depois: salvar_lado(&mudanca.depois)?,
-                    }
-                }
-                Comando::Visibilidade {
-                    camada,
-                    antes,
-                    depois,
-                } => PassoSalvo::Visibilidade {
-                    camada: *camada,
-                    antes: *antes,
-                    depois: *depois,
-                },
-                Comando::Opacidade {
-                    camada,
-                    antes,
-                    depois,
-                } => PassoSalvo::Opacidade {
-                    camada: *camada,
-                    antes: *antes,
-                    depois: *depois,
-                },
-                Comando::Modo {
-                    camada,
-                    antes,
-                    depois,
-                } => PassoSalvo::Modo {
-                    camada: *camada,
-                    antes: *antes,
-                    depois: *depois,
-                },
-                Comando::Renomear {
-                    camada,
-                    antes,
-                    depois,
-                } => PassoSalvo::Renomear {
-                    camada: *camada,
-                    antes: antes.clone(),
-                    depois: depois.clone(),
-                },
-                Comando::CriarCamada { indice, camada } => PassoSalvo::CriarCamada {
-                    indice: *indice,
-                    camada: salvar_camada(camada, &mut gravar_tile)?,
-                },
-                Comando::ExcluirCamada { indice, camada } => PassoSalvo::ExcluirCamada {
-                    indice: *indice,
-                    camada: salvar_camada(camada, &mut gravar_tile)?,
-                },
-                Comando::MoverCamada { de, para } => PassoSalvo::MoverCamada {
-                    de: *de,
-                    para: *para,
-                },
-                Comando::Mesclar {
-                    indice,
-                    de_cima,
-                    mudanca,
-                } => {
-                    let de_cima = salvar_camada(de_cima, &mut gravar_tile)?;
-                    let mut lado = |l: &[(Posicao, Option<Tile>)]| {
-                        l.iter()
-                            .map(|(p, t)| {
-                                Ok(TileSalvo {
-                                    c: p.0,
-                                    l: p.1,
-                                    hash: t.as_ref().map(&mut gravar_tile).transpose()?,
-                                })
-                            })
-                            .collect::<Result<Vec<_>, ErroDoProjeto>>()
-                    };
-                    PassoSalvo::Mesclar {
-                        indice: *indice,
-                        de_cima,
-                        antes: lado(&mudanca.antes)?,
-                        depois: lado(&mudanca.depois)?,
-                    }
-                }
-            });
+        // Os passos só de seleção ficam de fora (a seleção não é salva), e a
+        // posição conta só os que ficaram.
+        let (comandos, posicao) = hist.para_gravar();
+        let mut passos = Vec::with_capacity(comandos.len());
+        for passo in &comandos {
+            passos.push(salvar_passo(passo, &mut gravar_tile)?);
         }
 
         // 2. A imagem editada — só com efeito (C30).
@@ -610,10 +791,7 @@ impl Projeto {
             revisao,
             base: doc.base.clone(),
             camadas,
-            historico: HistoricoSalvo {
-                passos,
-                posicao: hist.posicao(),
-            },
+            historico: HistoricoSalvo { passos, posicao },
             composta,
         };
         let json = serde_json::to_vec_pretty(&manifesto)
@@ -765,132 +943,7 @@ impl Projeto {
         }
         let mut passos = Vec::with_capacity(manifesto.historico.passos.len());
         for passo in &manifesto.historico.passos {
-            passos.push(match passo {
-                PassoSalvo::Ajuste {
-                    camada,
-                    antes,
-                    depois,
-                } => Comando::Ajuste {
-                    camada: *camada,
-                    antes: *antes,
-                    depois: *depois,
-                },
-                PassoSalvo::Mascara {
-                    camada,
-                    antes,
-                    depois,
-                } => {
-                    let mut lado = |m: &Option<MascaraSalva>| {
-                        m.as_ref()
-                            .map(|m| ler_mascara(m, &mut ler_tile).map(Box::new))
-                            .transpose()
-                    };
-                    Comando::Mascara {
-                        camada: *camada,
-                        antes: lado(antes)?,
-                        depois: lado(depois)?,
-                    }
-                }
-                PassoSalvo::Traco {
-                    camada,
-                    na_mascara,
-                    antes,
-                    depois,
-                } => {
-                    let mut lado = |v: &[TileSalvo]| {
-                        v.iter()
-                            .map(|t| {
-                                Ok((
-                                    (t.c, t.l),
-                                    t.hash.as_deref().map(&mut ler_tile).transpose()?,
-                                ))
-                            })
-                            .collect::<Result<Vec<_>, ErroDoProjeto>>()
-                    };
-                    Comando::Traco {
-                        camada: *camada,
-                        na_mascara: *na_mascara,
-                        mudanca: Mudanca {
-                            antes: lado(antes)?,
-                            depois: lado(depois)?,
-                        },
-                    }
-                }
-                PassoSalvo::Visibilidade {
-                    camada,
-                    antes,
-                    depois,
-                } => Comando::Visibilidade {
-                    camada: *camada,
-                    antes: *antes,
-                    depois: *depois,
-                },
-                PassoSalvo::Opacidade {
-                    camada,
-                    antes,
-                    depois,
-                } => Comando::Opacidade {
-                    camada: *camada,
-                    antes: *antes,
-                    depois: *depois,
-                },
-                PassoSalvo::Modo {
-                    camada,
-                    antes,
-                    depois,
-                } => Comando::Modo {
-                    camada: *camada,
-                    antes: *antes,
-                    depois: *depois,
-                },
-                PassoSalvo::Renomear {
-                    camada,
-                    antes,
-                    depois,
-                } => Comando::Renomear {
-                    camada: *camada,
-                    antes: antes.clone(),
-                    depois: depois.clone(),
-                },
-                PassoSalvo::CriarCamada { indice, camada } => Comando::CriarCamada {
-                    indice: *indice,
-                    camada: Box::new(ler_camada(camada, &mut ler_tile)?),
-                },
-                PassoSalvo::ExcluirCamada { indice, camada } => Comando::ExcluirCamada {
-                    indice: *indice,
-                    camada: Box::new(ler_camada(camada, &mut ler_tile)?),
-                },
-                PassoSalvo::MoverCamada { de, para } => Comando::MoverCamada {
-                    de: *de,
-                    para: *para,
-                },
-                PassoSalvo::Mesclar {
-                    indice,
-                    de_cima,
-                    antes,
-                    depois,
-                } => {
-                    let de_cima = Box::new(ler_camada(de_cima, &mut ler_tile)?);
-                    let mut lado = |v: &[TileSalvo]| {
-                        v.iter()
-                            .map(|t| {
-                                Ok((
-                                    (t.c, t.l),
-                                    t.hash.as_deref().map(&mut ler_tile).transpose()?,
-                                ))
-                            })
-                            .collect::<Result<Vec<_>, ErroDoProjeto>>()
-                    };
-                    Comando::Mesclar {
-                        indice: *indice,
-                        de_cima,
-                        mudanca: Mudanca {
-                            antes: lado(antes)?,
-                            depois: lado(depois)?,
-                        },
-                    }
-                }
-            });
+            passos.push(ler_passo(passo, &mut ler_tile, &ler_camada, &ler_mascara)?);
         }
         let posicao = manifesto.historico.posicao;
         Ok(Some(Aberto {
@@ -962,8 +1015,12 @@ impl Projeto {
         for camada in &manifesto.camadas {
             citar(&mut citados, camada);
         }
-        for passo in &manifesto.historico.passos {
+        // 🚨 Os passos de dentro de um `varios` citam tiles também: abertos
+        // numa pilha, senão a coleta apagaria o que o desfazer devolve.
+        let mut pilha: Vec<&PassoSalvo> = manifesto.historico.passos.iter().collect();
+        while let Some(passo) = pilha.pop() {
             match passo {
+                PassoSalvo::Varios { passos, .. } => pilha.extend(passos.iter()),
                 PassoSalvo::Traco { antes, depois, .. } => {
                     citados.extend(antes.iter().chain(depois).filter_map(|t| t.hash.clone()));
                 }
@@ -1317,7 +1374,10 @@ mod testes {
             .unwrap()
             .unwrap();
         assert_eq!(aberto.documento, doc);
-        assert_eq!(aberto.historico.passos(), hist.passos());
+        // O cenário tem passos de seleção (⌘A, ⌘D): eles não vão para o
+        // projeto, e o resto volta igual.
+        assert!(hist.passos().iter().any(Comando::so_selecao));
+        assert_eq!(aberto.historico.passos(), hist.para_gravar().0);
         let mut s2 = Sessao::nova(base.clone(), aberto.documento, aberto.historico, 300);
         assert_eq!(s2.compor().as_raw(), composta.as_raw());
         // O histórico reaberto desfaz os três traços e a máscara.

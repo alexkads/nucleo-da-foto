@@ -8,11 +8,14 @@
 //! gesto": desfazer até o que foi salvo volta a dizer "sem alterações", como em
 //! todo editor.
 
+use std::sync::Arc;
+
 use crate::ajuste::Ajuste;
 use crate::documento::{Camada, Documento, Mascara};
 use crate::mesclagem::Modo;
 use crate::pincel::Mudanca;
 use crate::retangulo::Retangulo;
+use crate::selecao::Selecao;
 use crate::tiles::{retangulo_do_tile, BYTES_DO_TILE};
 
 /// O teto de memória do histórico (tiles guardados), em bytes.
@@ -75,6 +78,19 @@ pub enum Comando {
         de_cima: Box<Camada>,
         mudanca: Mudanca,
     },
+    /// A seleção antes e depois — os passos de seleção do Photoshop
+    /// ("Seleção retangular", "Desmarcar"…). Não muda pixel: a seleção mora
+    /// na sessão, que a troca ao seguir o passo. **Não vai para o projeto**
+    /// (a seleção não é salva; ver [`Comando::sem_selecao`]).
+    Selecao {
+        nome: String,
+        antes: Option<Arc<Selecao>>,
+        depois: Option<Arc<Selecao>>,
+    },
+    /// Vários passos que são um gesto só — a camada via recorte (o pedaço sai
+    /// da origem e entra na camada nova), o Mover que leva a seleção junto.
+    /// Um desfazer volta todos, do último ao primeiro.
+    Varios { nome: String, passos: Vec<Comando> },
 }
 
 impl Comando {
@@ -133,6 +149,7 @@ impl Comando {
             Comando::CriarCamada { camada, .. } => format!("Criar {}", camada.nome),
             Comando::ExcluirCamada { camada, .. } => format!("Excluir {}", camada.nome),
             Comando::Mesclar { de_cima, .. } => format!("Mesclar {} para baixo", de_cima.nome),
+            Comando::Selecao { nome, .. } | Comando::Varios { nome, .. } => nome.clone(),
             Comando::MoverCamada { de, para } => {
                 // O nome é o da camada que andou, esteja ela onde estiver agora.
                 let onde = if doc.camadas.get(*para).is_some() {
@@ -154,6 +171,19 @@ impl Comando {
     pub fn camada_depois(&self, para_frente: bool, quantas: usize) -> Option<usize> {
         let ultima = quantas.checked_sub(1)?;
         let i = match self {
+            Comando::Selecao { .. } => return None,
+            // O último aplicado decide: para a frente é o último da lista; para
+            // trás, o primeiro.
+            Comando::Varios { passos, .. } => {
+                return if para_frente {
+                    passos
+                        .iter()
+                        .rev()
+                        .find_map(|p| p.camada_depois(true, quantas))
+                } else {
+                    passos.iter().find_map(|p| p.camada_depois(false, quantas))
+                };
+            }
             Comando::Traco { camada, .. }
             | Comando::Mascara { camada, .. }
             | Comando::Ajuste { camada, .. }
@@ -208,7 +238,41 @@ impl Comando {
                 de_cima.pixels.bytes()
                     + (conta(&mudanca.antes) + conta(&mudanca.depois)) * BYTES_DO_TILE
             }
+            Comando::Selecao { antes, depois, .. } => {
+                antes.as_ref().map_or(0, |s| s.bytes()) + depois.as_ref().map_or(0, |s| s.bytes())
+            }
+            Comando::Varios { passos, .. } => passos.iter().map(Comando::bytes).sum(),
             _ => 0,
+        }
+    }
+
+    /// O passo só mexe na seleção (nenhum pixel, nenhuma camada).
+    pub fn so_selecao(&self) -> bool {
+        match self {
+            Comando::Selecao { .. } => true,
+            Comando::Varios { passos, .. } => passos.iter().all(Comando::so_selecao),
+            _ => false,
+        }
+    }
+
+    /// O passo sem o que é de seleção — o que vai para o projeto. `None`
+    /// quando não sobra nada.
+    pub fn sem_selecao(&self) -> Option<Comando> {
+        match self {
+            Comando::Selecao { .. } => None,
+            Comando::Varios { nome, passos } => {
+                let mut sobra: Vec<Comando> =
+                    passos.iter().filter_map(Comando::sem_selecao).collect();
+                match sobra.len() {
+                    0 => None,
+                    1 => sobra.pop(),
+                    _ => Some(Comando::Varios {
+                        nome: nome.clone(),
+                        passos: sobra,
+                    }),
+                }
+            }
+            outro => Some(outro.clone()),
         }
     }
 
@@ -217,6 +281,17 @@ impl Comando {
     pub fn aplicar(&self, doc: &mut Documento, para_frente: bool) -> Retangulo {
         let (largura, altura) = (doc.largura(), doc.altura());
         match self {
+            Comando::Selecao { .. } => Retangulo::default(),
+            Comando::Varios { passos, .. } => {
+                let mut sujo = Retangulo::default();
+                let mut um = |p: &Comando| sujo = sujo.uniao(&p.aplicar(doc, para_frente));
+                if para_frente {
+                    passos.iter().for_each(&mut um);
+                } else {
+                    passos.iter().rev().for_each(&mut um);
+                }
+                sujo
+            }
             Comando::Traco {
                 camada,
                 na_mascara,
@@ -514,9 +589,32 @@ impl Historico {
         Some(sujo)
     }
 
-    /// Há alterações que não foram salvas.
+    /// Há alterações que não foram salvas. Passos só de seleção não contam:
+    /// a seleção não é salva, e desmarcar não pede para salvar.
     pub fn alterado(&self) -> bool {
-        self.salvo_em != Some(self.posicao)
+        match self.salvo_em {
+            None => true,
+            Some(s) => {
+                let (a, b) = (s.min(self.posicao), s.max(self.posicao));
+                self.passos[a..b].iter().any(|p| !p.so_selecao())
+            }
+        }
+    }
+
+    /// Os passos e a posição sem o que é só de seleção — o que o projeto
+    /// grava. A posição conta os passos que sobraram antes dela.
+    pub fn para_gravar(&self) -> (Vec<Comando>, usize) {
+        let mut passos = Vec::with_capacity(self.passos.len());
+        let mut posicao = 0;
+        for (i, p) in self.passos.iter().enumerate() {
+            if let Some(p) = p.sem_selecao() {
+                passos.push(p);
+                if i < self.posicao {
+                    posicao += 1;
+                }
+            }
+        }
+        (passos, posicao)
     }
 
     pub fn marcar_salvo(&mut self) {

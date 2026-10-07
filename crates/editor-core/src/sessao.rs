@@ -63,6 +63,9 @@ pub struct Sessao {
     lupa_pedida: Option<(u64, Retangulo)>,
     pedidos: u64,
     pub pincel: Pincel,
+    /// Pontos da tela por pixel da foto, o zoom de agora — a suavização do
+    /// pincel é medida na tela (ver `Traco::com_cordao`). A janela atualiza.
+    pub escala_da_tela: f32,
     ativa: usize,
     /// Pinta na máscara da escolhida, e não nos pixels dela (a miniatura da
     /// máscara clicada, como no Photoshop).
@@ -93,6 +96,11 @@ pub struct Sessao {
     movendo: Option<(usize, bool, crate::tiles::CamadaDePixels)>,
     /// O conteúdo solto da camada (⌘T, ou o Mover com seleção).
     flutuante: Option<Flutuante>,
+    /// A seleção de quando o arrasto do contorno começou (arrastar por dentro
+    /// dela com uma ferramenta de seleção move só o contorno).
+    contorno_movendo: Option<Arc<Selecao>>,
+    /// Onde o último traço terminou — ⇧ + clique liga até ali com uma reta.
+    fim_do_ultimo_traco: Option<(f32, f32)>,
 }
 
 /// O conteúdo de uma camada tirado dela para ser transformado.
@@ -127,6 +135,7 @@ impl Sessao {
             lupa_pedida: None,
             pedidos: 0,
             pincel: Pincel::default(),
+            escala_da_tela: 1.0,
             ativa,
             na_mascara: false,
             traco: None,
@@ -140,6 +149,8 @@ impl Sessao {
             distancia_do_carimbo: None,
             movendo: None,
             flutuante: None,
+            contorno_movendo: None,
+            fim_do_ultimo_traco: None,
         }
     }
 
@@ -250,6 +261,7 @@ impl Sessao {
         self.confirmar_ajuste();
         self.terminar_de_mover();
         self.aplicar_transformacao();
+        self.terminar_de_mover_o_contorno();
     }
 
     /// Escolhe a camada — os pixels dela, e não a máscara.
@@ -414,6 +426,26 @@ impl Sessao {
     /// A escolha vai para onde o passo mexeu — a camada, e a máscara dela
     /// quando o traço foi lá.
     fn seguir_o_passo(&mut self, passo: &Comando, para_frente: bool) {
+        match passo {
+            Comando::Selecao { antes, depois, .. } => {
+                self.selecao = if para_frente { depois } else { antes }.clone();
+                self.versao += 1;
+                self.versao_da_selecao += 1;
+                return;
+            }
+            Comando::Varios { passos, .. } => {
+                if para_frente {
+                    passos.iter().for_each(|p| self.seguir_o_passo(p, true));
+                } else {
+                    passos
+                        .iter()
+                        .rev()
+                        .for_each(|p| self.seguir_o_passo(p, false));
+                }
+                return;
+            }
+            _ => {}
+        }
         if let Some(i) = passo.camada_depois(para_frente, self.doc.camadas.len()) {
             if i != self.ativa {
                 self.na_mascara = false;
@@ -860,6 +892,7 @@ impl Sessao {
         let Some(f) = self.flutuante.take() else {
             return false;
         };
+        let selecao_antes = self.selecao.clone();
         if f.selecao.is_some() {
             self.selecao = if f.t.so_desloca() {
                 f.selecao
@@ -871,17 +904,32 @@ impl Sessao {
             self.versao += 1;
             self.versao_da_selecao += 1;
         }
-        match operacoes::diferenca(&f.original, self.doc.camadas[f.camada].alvo(f.na_mascara)) {
-            Some(m) => {
-                self.hist.registrar(Comando::Traco {
+        // 🔑 Um passo só: os pixels e a seleção que foi junto voltam no mesmo
+        // desfazer.
+        let pixels =
+            operacoes::diferenca(&f.original, self.doc.camadas[f.camada].alvo(f.na_mascara)).map(
+                |m| Comando::Traco {
                     camada: f.camada,
                     na_mascara: f.na_mascara,
                     mudanca: m,
-                });
-                true
-            }
-            None => false,
+                },
+            );
+        let selecao = self.passo_da_selecao(selecao_antes, "Mover seleção");
+        let nome = if f.t.so_desloca() {
+            "Mover"
+        } else {
+            "Transformação livre"
+        };
+        match (pixels, selecao) {
+            (Some(p), None) => self.hist.registrar(p),
+            (Some(p), Some(s)) => self.hist.registrar(Comando::Varios {
+                nome: nome.into(),
+                passos: vec![p, s],
+            }),
+            (None, Some(s)) => self.hist.registrar(s),
+            (None, None) => return false,
         }
+        true
     }
 
     /// Esc: a camada volta a ser o que era.
@@ -926,13 +974,31 @@ impl Sessao {
             original.altura(),
         );
         camada.pixels = pixels;
-        if recortar {
-            let mudanca = operacoes::apagar(&mut self.doc.camadas[origem].pixels, &selecao);
-            self.registrar_mudanca(origem, false, mudanca);
-        }
-        self.executar(Comando::CriarCamada {
+        let criar = Comando::CriarCamada {
             indice: origem + 1,
             camada: Box::new(camada),
+        };
+        if !recortar {
+            self.executar(criar);
+            return true;
+        }
+        // ⇧⌘J é **um** passo, como no Photoshop ("Camada via recorte"): um
+        // desfazer devolve o pedaço à origem e tira a camada nova juntos.
+        let mut fonte = self.doc.camadas[origem].pixels.clone();
+        let passos = match operacoes::apagar(&mut fonte, &selecao) {
+            Some(mudanca) => vec![
+                Comando::Traco {
+                    camada: origem,
+                    na_mascara: false,
+                    mudanca,
+                },
+                criar,
+            ],
+            None => vec![criar],
+        };
+        self.executar(Comando::Varios {
+            nome: "Camada via recorte".into(),
+            passos,
         });
         true
     }
@@ -951,7 +1017,12 @@ impl Sessao {
     /// (um clique) desmarca, como no Photoshop.
     pub fn selecionar(&mut self, forma: &Forma, operacao: Operacao) {
         let (largura, altura) = (self.doc.largura(), self.doc.altura());
-        self.entrar_na_selecao(Selecao::da_forma(largura, altura, forma), operacao);
+        let nome = match forma {
+            Forma::Retangulo(_) => "Seleção retangular",
+            Forma::Elipse(_) => "Seleção elíptica",
+            Forma::Laco(_) => "Laço",
+        };
+        self.entrar_na_selecao(Selecao::da_forma(largura, altura, forma), operacao, nome);
     }
 
     /// A varinha mágica (W) em `(x, y)`: a cor da foto **como ela aparece**
@@ -971,7 +1042,7 @@ impl Sessao {
         self.fechar_o_que_esta_aberto();
         let foto = self.compor();
         let nova = Selecao::por_cor(&foto, (x as u32, y as u32), tolerancia, contigua);
-        self.entrar_na_selecao(nova, operacao);
+        self.entrar_na_selecao(nova, operacao, "Varinha mágica");
         true
     }
 
@@ -992,86 +1063,139 @@ impl Sessao {
             (None, true) if camada.ajuste.is_some() => return false,
             _ => Selecao::do_alfa(&camada.pixels),
         };
-        self.entrar_na_selecao(nova, operacao);
+        self.entrar_na_selecao(nova, operacao, "Carregar seleção");
         true
     }
 
     /// Difusão (⇧F6) de `raio` pixels. Sem seleção, nada.
     pub fn difundir_selecao(&mut self, raio: u32) -> bool {
-        self.modificar_selecao(|s| s.difusa(raio))
+        self.modificar_selecao("Difundir", |s| s.difusa(raio))
     }
 
     /// Expandir (`px` > 0) ou contrair (`px` < 0) a seleção.
     pub fn expandir_selecao(&mut self, px: i32) -> bool {
-        self.modificar_selecao(|s| s.expandida(px))
+        let nome = if px >= 0 { "Expandir" } else { "Contrair" };
+        self.modificar_selecao(nome, |s| s.expandida(px))
     }
 
-    fn modificar_selecao(&mut self, mudar: impl FnOnce(&Selecao) -> Selecao) -> bool {
+    fn modificar_selecao(&mut self, nome: &str, mudar: impl FnOnce(&Selecao) -> Selecao) -> bool {
         self.fechar_o_que_esta_aberto();
         let Some(atual) = self.selecao.as_deref() else {
             return false;
         };
         let nova = mudar(atual);
-        self.selecao = (!nova.nada()).then(|| Arc::new(nova));
-        self.versao += 1;
-        self.versao_da_selecao += 1;
+        self.trocar_selecao(Some(nova), nome);
         true
     }
 
     /// Uma seleção nova entra na de agora conforme a operação. Nova sem nada
-    /// selecionado no fim (um clique) desmarca, como no Photoshop.
-    fn entrar_na_selecao(&mut self, nova: Selecao, operacao: Operacao) {
+    /// selecionado no fim (um clique) desmarca, como no Photoshop; tirar ou
+    /// cruzar sem seleção não deixa nada.
+    fn entrar_na_selecao(&mut self, nova: Selecao, operacao: Operacao, nome: &str) {
         self.fechar_o_que_esta_aberto();
         let resultado = match (operacao, self.selecao.as_deref()) {
-            (Operacao::Nova, _) | (_, None) => {
-                if operacao == Operacao::Subtrair {
-                    None
-                } else {
-                    Some(nova)
-                }
-            }
+            (Operacao::Nova, _) => Some(nova),
+            (Operacao::Subtrair | Operacao::Intersecao, None) => None,
+            (_, None) => Some(nova),
             (_, Some(atual)) => {
                 let mut junta = atual.clone();
                 junta.combinar(&nova, operacao);
                 Some(junta)
             }
         };
-        self.selecao = resultado.filter(|s| !s.nada()).map(Arc::new);
+        self.trocar_selecao(resultado, nome);
+    }
+
+    /// A seleção passa a ser `nova` (vazia = nenhuma), num passo do desfazer
+    /// com o `nome` do Photoshop. Igual à de agora não vira passo.
+    fn trocar_selecao(&mut self, nova: Option<Selecao>, nome: &str) {
+        let depois = nova.filter(|s| !s.nada()).map(Arc::new);
+        if depois == self.selecao {
+            return;
+        }
+        let antes = std::mem::replace(&mut self.selecao, depois.clone());
+        self.hist.registrar(Comando::Selecao {
+            nome: nome.to_string(),
+            antes,
+            depois,
+        });
         self.versao += 1;
         self.versao_da_selecao += 1;
+    }
+
+    /// O passo de seleção de `antes` até a de agora — para juntar a um gesto
+    /// que também mexe em pixel (o Mover que leva a seleção).
+    fn passo_da_selecao(&self, antes: Option<Arc<Selecao>>, nome: &str) -> Option<Comando> {
+        (antes != self.selecao).then(|| Comando::Selecao {
+            nome: nome.to_string(),
+            antes,
+            depois: self.selecao.clone(),
+        })
     }
 
     /// ⌘A.
     pub fn selecionar_tudo(&mut self) {
         self.fechar_o_que_esta_aberto();
-        self.selecao = Some(Arc::new(Selecao::tudo(
-            self.doc.largura(),
-            self.doc.altura(),
-        )));
-        self.versao += 1;
-        self.versao_da_selecao += 1;
+        let tudo = Selecao::tudo(self.doc.largura(), self.doc.altura());
+        self.trocar_selecao(Some(tudo), "Selecionar tudo");
     }
 
     /// ⌘D.
     pub fn desmarcar(&mut self) {
         self.fechar_o_que_esta_aberto();
-        if self.selecao.take().is_some() {
-            self.versao += 1;
-            self.versao_da_selecao += 1;
-        }
+        self.trocar_selecao(None, "Desmarcar");
     }
 
     /// ⇧⌘I. Sem seleção não faz nada (no Photoshop também).
     pub fn inverter_selecao(&mut self) {
         self.fechar_o_que_esta_aberto();
-        if let Some(s) = self.selecao.as_mut() {
-            Arc::make_mut(s).inverter();
-            if s.nada() {
-                self.selecao = None;
-            }
-            self.versao += 1;
-            self.versao_da_selecao += 1;
+        if let Some(atual) = self.selecao.as_deref() {
+            let mut nova = atual.clone();
+            nova.inverter();
+            self.trocar_selecao(Some(nova), "Inverter seleção");
         }
+    }
+
+    // ------------------------------------------------- mover o contorno
+
+    /// Arrastar por dentro da seleção com uma ferramenta de seleção move **só o
+    /// contorno**, sem os pixels (no Photoshop, "Nova seleção" + arrastar
+    /// dentro dela). Falso sem seleção.
+    pub fn comecar_a_mover_o_contorno(&mut self) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let Some(atual) = self.selecao.clone() else {
+            return false;
+        };
+        self.contorno_movendo = Some(atual);
+        true
+    }
+
+    /// O contorno deslocado `(dx, dy)` do começo do arrasto, na hora.
+    pub fn mover_o_contorno_por(&mut self, dx: i64, dy: i64) {
+        let Some(original) = self.contorno_movendo.as_deref() else {
+            return;
+        };
+        self.selecao = Some(Arc::new(original.deslocada(dx, dy)));
+        self.versao += 1;
+        self.versao_da_selecao += 1;
+    }
+
+    /// O arrasto do contorno acabou: um passo "Mover seleção".
+    pub fn terminar_de_mover_o_contorno(&mut self) -> bool {
+        let Some(antes) = self.contorno_movendo.take() else {
+            return false;
+        };
+        match self.passo_da_selecao(Some(antes), "Mover seleção") {
+            Some(passo) => {
+                self.hist.registrar(passo);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn movendo_o_contorno(&self) -> bool {
+        self.contorno_movendo.is_some()
     }
 
     /// Um passo de pixels na camada escolhida, feito de uma vez.
@@ -1226,6 +1350,23 @@ impl Sessao {
     /// pintar quando a camada escolhida está escondida — pintar no que não se
     /// vê é o erro que o Photoshop também recusa.
     pub fn apertar(&mut self, x: f32, y: f32) -> bool {
+        self.comecar_traco(x, y, false)
+    }
+
+    /// ⇧ + clique: o traço começa com uma reta do fim do anterior até
+    /// `(x, y)` ("Any painting tool + Shift-click", na tabela da Adobe). Sem
+    /// traço anterior, é um clique comum. O arrasto que vier depois continua o
+    /// mesmo traço — um passo só do desfazer.
+    pub fn apertar_em_reta(&mut self, x: f32, y: f32) -> bool {
+        self.comecar_traco(x, y, true)
+    }
+
+    /// Onde o último traço terminou.
+    pub fn fim_do_ultimo_traco(&self) -> Option<(f32, f32)> {
+        self.fim_do_ultimo_traco
+    }
+
+    fn comecar_traco(&mut self, x: f32, y: f32, em_reta: bool) -> bool {
         // Um traço que ficou aberto (o ponteiro saiu da janela sem soltar) fecha
         // antes: ele é um passo próprio do desfazer.
         self.fechar_o_que_esta_aberto();
@@ -1250,7 +1391,9 @@ impl Sessao {
             } else {
                 self.pincel
             };
-        let mut traco = Traco::novo(pincel).dentro_de(self.selecao.clone());
+        let mut traco = Traco::novo(pincel)
+            .dentro_de(self.selecao.clone())
+            .com_cordao(self.escala_da_tela);
         if self.pincel.ferramenta.le_a_foto()
             && self.pincel.ferramenta != crate::pincel::Ferramenta::Carimbo
         {
@@ -1277,7 +1420,11 @@ impl Sessao {
             ));
         }
         let na_mascara = self.na_mascara();
-        let sujo = traco.ate(self.doc.camadas[ativa].alvo_mut(na_mascara), x, y);
+        let alvo = self.doc.camadas[ativa].alvo_mut(na_mascara);
+        let sujo = match self.fim_do_ultimo_traco.filter(|_| em_reta) {
+            Some(de) => traco.reta(alvo, de, (x, y)),
+            None => traco.ate(alvo, x, y),
+        };
         self.traco = Some(traco);
         self.refazer_a_vista(&sujo);
         true
@@ -1300,6 +1447,7 @@ impl Sessao {
         let Some(traco) = self.traco.take() else {
             return false;
         };
+        self.fim_do_ultimo_traco = traco.ponta().or(self.fim_do_ultimo_traco);
         let camada = self.ativa();
         let na_mascara = self.na_mascara();
         match traco.terminar(self.doc.camadas[camada].alvo_mut(na_mascara)) {

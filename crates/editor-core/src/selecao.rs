@@ -9,10 +9,12 @@
 //!
 //! As formas viram máscara na hora (rasterizadas): retângulo de borda exata,
 //! elipse com um pixel de anti-aliasing, laço pelo centro de cada pixel (par e
-//! ímpar). Somar (⇧) é o máximo das duas, subtrair (⌥) é `a · (1 − b)`.
+//! ímpar). Somar (⇧) é o máximo das duas, subtrair (⌥) é `a · (1 − b)`, cruzar
+//! (⇧⌥) é o mínimo.
 //!
-//! A seleção **não entra no desfazer** — ela não muda pixel; o que se faz com
-//! ela (apagar, preencher, pintar) entra.
+//! A seleção **entra no desfazer** como no Photoshop (`Comando::Selecao`, desde
+//! a etapa 13), mas **não vai para o projeto**: não muda pixel, e a seleção não
+//! é salva.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -109,6 +111,22 @@ pub enum Operacao {
     Somar,
     /// ⌥ — tira da seleção.
     Subtrair,
+    /// ⇧⌥ — fica só o que está nas duas.
+    Intersecao,
+}
+
+impl Operacao {
+    /// A operação dos modificadores, a mesma em toda ferramenta de seleção e na
+    /// miniatura da camada: ⇧ soma, ⌥ tira, ⇧⌥ cruza (a tabela "Select and move
+    /// objects" da Adobe).
+    pub fn dos_modificadores(shift: bool, alt: bool) -> Self {
+        match (shift, alt) {
+            (true, true) => Operacao::Intersecao,
+            (true, false) => Operacao::Somar,
+            (false, true) => Operacao::Subtrair,
+            (false, false) => Operacao::Nova,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -478,6 +496,11 @@ impl Selecao {
         }
     }
 
+    /// Quanto a seleção ocupa de memória (os tiles alocados).
+    pub fn bytes(&self) -> usize {
+        self.tiles.len() * BYTES
+    }
+
     /// Nenhum pixel selecionado.
     pub fn nada(&self) -> bool {
         self.padrao == 0 && self.tiles.is_empty()
@@ -565,6 +588,7 @@ impl Selecao {
                 Operacao::Nova => b,
                 Operacao::Somar => a.max(b),
                 Operacao::Subtrair => ((a as u32 * (255 - b as u32) + 127) / 255) as u8,
+                Operacao::Intersecao => a.min(b),
             }
         };
         let posicoes: std::collections::BTreeSet<Posicao> = self

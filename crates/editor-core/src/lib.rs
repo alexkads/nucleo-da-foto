@@ -31,6 +31,8 @@ pub mod vista;
 
 #[cfg(test)]
 mod testes_da_mascara;
+#[cfg(test)]
+mod testes_dos_controles;
 
 pub use ajuste::Ajuste;
 pub use contrato::VersaoEditada;
