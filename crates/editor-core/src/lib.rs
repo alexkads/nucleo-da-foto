@@ -12,6 +12,7 @@
 //! que o motor de revelação recebe, e pintar noutro espaço seria uma conversão a
 //! mais entre o editor e a Revelação.
 
+pub mod ajuste;
 pub mod carimbo;
 pub mod composicao;
 pub mod contrato;
@@ -28,6 +29,7 @@ pub mod tiles;
 pub mod transformar;
 pub mod vista;
 
+pub use ajuste::Ajuste;
 pub use contrato::VersaoEditada;
 pub use documento::{BaseRef, Camada, Documento};
 pub use historico::{Comando, Historico};

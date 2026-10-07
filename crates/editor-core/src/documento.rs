@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::ajuste::Ajuste;
 use crate::mesclagem::Modo;
 use crate::retangulo::Retangulo;
 use crate::tiles::{retangulo_do_tile, CamadaDePixels};
@@ -106,6 +107,9 @@ pub struct Camada {
     pub modo: Modo,
     pub pixels: CamadaDePixels,
     pub mascara: Option<Mascara>,
+    /// Uma camada de ajuste: sem pixels, muda a cor do que está abaixo
+    /// (`ajuste.rs`). O pincel pinta na máscara dela.
+    pub ajuste: Option<Ajuste>,
 }
 
 impl Camada {
@@ -118,7 +122,17 @@ impl Camada {
             modo: Modo::Normal,
             pixels: CamadaDePixels::nova(largura, altura),
             mascara: None,
+            ajuste: None,
         }
+    }
+
+    /// Uma camada de ajuste com a máscara branca (revela tudo), como o
+    /// Photoshop a cria.
+    pub fn de_ajuste(nome: &str, ajuste: Ajuste, largura: u32, altura: u32) -> Self {
+        let mut camada = Self::nova(nome, largura, altura);
+        camada.ajuste = Some(ajuste);
+        camada.mascara = Some(Mascara::nova(255, largura, altura));
+        camada
     }
 
     /// A máscara que vale na composição — `None` sem máscara ou com ela
@@ -146,6 +160,14 @@ impl Camada {
     /// foto. Esconder, mexer na opacidade ou trocar de lugar só recompõe aqui.
     pub fn area(&self) -> Retangulo {
         let (largura, altura) = (self.pixels.largura(), self.pixels.altura());
+        if self.ajuste.is_some() {
+            // O ajuste muda a foto inteira — ou só onde a máscara que esconde
+            // tudo foi pintada.
+            return match self.mascara_ativa() {
+                Some(m) if m.fundo == 0 => area_dos_tiles(&m.pixels),
+                _ => Retangulo::inteiro(largura, altura),
+            };
+        }
         self.pixels
             .existentes()
             .fold(Retangulo::default(), |area, (posicao, _)| {
@@ -157,9 +179,21 @@ impl Camada {
     pub fn sem_efeito(&self) -> bool {
         !self.visivel
             || self.opacidade <= 0.0
-            || self.pixels.vazia()
+            || match &self.ajuste {
+                Some(a) => a.neutro(),
+                None => self.pixels.vazia(),
+            }
             || self.mascara.as_ref().is_some_and(Mascara::esconde_tudo)
     }
+}
+
+fn area_dos_tiles(pixels: &CamadaDePixels) -> Retangulo {
+    let (largura, altura) = (pixels.largura(), pixels.altura());
+    pixels
+        .existentes()
+        .fold(Retangulo::default(), |area, (posicao, _)| {
+            area.uniao(&retangulo_do_tile(*posicao, largura, altura))
+        })
 }
 
 /// O nome da camada que nasce com o documento.

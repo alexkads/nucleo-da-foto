@@ -8,6 +8,7 @@
 //! gesto": desfazer até o que foi salvo volta a dizer "sem alterações", como em
 //! todo editor.
 
+use crate::ajuste::Ajuste;
 use crate::documento::{Camada, Documento, Mascara};
 use crate::mesclagem::Modo;
 use crate::pincel::Mudanca;
@@ -32,6 +33,12 @@ pub enum Comando {
         camada: usize,
         antes: Option<Box<Mascara>>,
         depois: Option<Box<Mascara>>,
+    },
+    /// Os parâmetros de uma camada de ajuste — o arrasto inteiro do slider.
+    Ajuste {
+        camada: usize,
+        antes: Ajuste,
+        depois: Ajuste,
     },
     Visibilidade {
         camada: usize,
@@ -106,6 +113,9 @@ impl Comando {
                 };
                 format!("{acao} {}", nome(doc, *camada))
             }
+            Comando::Ajuste { camada, depois, .. } => {
+                format!("{} em {}", depois.nome(), nome(doc, *camada))
+            }
             Comando::Visibilidade { camada, depois, .. } => format!(
                 "{} {}",
                 if *depois { "Mostrar" } else { "Esconder" },
@@ -146,6 +156,7 @@ impl Comando {
         let i = match self {
             Comando::Traco { camada, .. }
             | Comando::Mascara { camada, .. }
+            | Comando::Ajuste { camada, .. }
             | Comando::Visibilidade { camada, .. }
             | Comando::Opacidade { camada, .. }
             | Comando::Modo { camada, .. }
@@ -243,6 +254,13 @@ impl Comando {
                     None => Retangulo::default(),
                 }
             }
+            Comando::Ajuste {
+                camada,
+                antes,
+                depois,
+            } => mexer(doc, *camada, |c| {
+                c.ajuste = Some(if para_frente { *depois } else { *antes })
+            }),
             Comando::Visibilidade {
                 camada,
                 antes,

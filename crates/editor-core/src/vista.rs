@@ -96,6 +96,19 @@ impl Vista {
     /// Refaz a vista onde a foto mudou em `ret` (pixels da foto). O que cai
     /// fora da região da vista não conta.
     pub fn refazer(&mut self, base: &RgbImage, doc: &Documento, ret: &Retangulo) {
+        self.refazer_com(base, doc, ret, false);
+    }
+
+    /// O rascunho do [`Self::refazer`], para o arrasto de um slider que muda
+    /// a foto inteira (as camadas de ajuste): cada pixel da vista vem de **um**
+    /// pixel da foto, no meio da caixa, e não da média dela — compõe uma linha
+    /// da foto por linha da vista. Quem arrasta refaz exato ao soltar, como o
+    /// Lightroom faz com a prévia.
+    pub fn rascunhar(&mut self, base: &RgbImage, doc: &Documento, ret: &Retangulo) {
+        self.refazer_com(base, doc, ret, true);
+    }
+
+    fn refazer_com(&mut self, base: &RgbImage, doc: &Documento, ret: &Retangulo, rascunho: bool) {
         let (largura, altura) = (base.width(), base.height());
         let ret = composicao::interseccao(&ret.limitado(largura, altura), &self.regiao);
         if ret.vazio() {
@@ -127,13 +140,15 @@ impl Vista {
             .map(|a| (a, (a + por_faixa).min(vy1)))
             .collect();
         let feitas: Vec<Vec<u8>> = if faixas.len() == 1 {
-            vec![self.faixa(base, doc, faixas[0], vx0, vx1)]
+            vec![self.faixa(base, doc, faixas[0], vx0, vx1, rascunho)]
         } else {
             let esta = &*self;
             std::thread::scope(|escopo| {
                 let tarefas: Vec<_> = faixas
                     .iter()
-                    .map(|&faixa| escopo.spawn(move || esta.faixa(base, doc, faixa, vx0, vx1)))
+                    .map(|&faixa| {
+                        escopo.spawn(move || esta.faixa(base, doc, faixa, vx0, vx1, rascunho))
+                    })
                     .collect();
                 tarefas
                     .into_iter()
@@ -163,10 +178,27 @@ impl Vista {
         (a, b): (u32, u32),
         vx0: u32,
         vx1: u32,
+        rascunho: bool,
     ) -> Vec<u8> {
         let f = self.fator;
         let (ox, oy) = (self.regiao.x, self.regiao.y);
         let (fim_x, fim_y) = (self.regiao.direita(), self.regiao.baixo());
+        if rascunho && f > 1 {
+            let colunas = (vx1 - vx0) as usize;
+            let mut saida = Vec::with_capacity(colunas * (b - a) as usize * 3);
+            let x0 = ox + vx0 * f;
+            let largura = ((vx1 - vx0) * f).min(fim_x - x0);
+            for vy in a..b {
+                let y = (oy + vy * f + f / 2).min(fim_y - 1);
+                let linha =
+                    composicao::compor_recorte(base, doc, &Retangulo::novo(x0, y, largura, 1));
+                for k in 0..colunas as u32 {
+                    let x = (k * f + f / 2).min(linha.width() - 1);
+                    saida.extend_from_slice(&linha.get_pixel(x, 0).0);
+                }
+            }
+            return saida;
+        }
         let regiao = Retangulo::novo(ox + vx0 * f, oy + a * f, (vx1 - vx0) * f, (b - a) * f)
             .limitado(fim_x, fim_y);
         let composta = composicao::compor_recorte(base, doc, &regiao);

@@ -26,6 +26,7 @@ use image::RgbImage;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::ajuste::Ajuste;
 use crate::composicao;
 use crate::contrato::VersaoEditada;
 use crate::documento::{hex, BaseRef, Camada, Documento, Mascara};
@@ -47,7 +48,9 @@ use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 /// - **4** (etapa 10): a máscara de camada (`mascara` na camada salva, o passo
 ///   `mascara` e o traço com `na_mascara`). A 0.1.101 comporia a camada sem a
 ///   máscara — recusa com o aviso.
-pub const FORMATO: u32 = 4;
+/// - **5** (etapa 11): a camada de ajuste (`ajuste` na camada salva e o passo
+///   `ajuste`). A 0.1.102 comporia a camada como vazia — recusa com o aviso.
+pub const FORMATO: u32 = 5;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -216,6 +219,9 @@ pub struct CamadaSalva {
     /// Ausente até o formato 3, e em camada sem máscara.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mascara: Option<MascaraSalva>,
+    /// Ausente até o formato 4, e em camada de pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ajuste: Option<Ajuste>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -245,6 +251,11 @@ pub enum PassoSalvo {
         camada: usize,
         antes: Option<MascaraSalva>,
         depois: Option<MascaraSalva>,
+    },
+    Ajuste {
+        camada: usize,
+        antes: Ajuste,
+        depois: Ajuste,
     },
     Visibilidade {
         camada: usize,
@@ -322,6 +333,7 @@ fn salvar_camada(
             .as_ref()
             .map(|m| salvar_mascara(m, gravar_tile))
             .transpose()?,
+        ajuste: camada.ajuste,
     })
 }
 
@@ -452,6 +464,15 @@ impl Projeto {
         let mut passos = Vec::with_capacity(hist.passos().len());
         for passo in hist.passos() {
             passos.push(match passo {
+                Comando::Ajuste {
+                    camada,
+                    antes,
+                    depois,
+                } => PassoSalvo::Ajuste {
+                    camada: *camada,
+                    antes: *antes,
+                    depois: *depois,
+                },
                 Comando::Mascara {
                     camada,
                     antes,
@@ -735,6 +756,7 @@ impl Projeto {
                     .as_ref()
                     .map(|m| ler_mascara(m, ler_tile))
                     .transpose()?,
+                ajuste: salva.ajuste,
             })
         };
         let mut camadas = Vec::with_capacity(manifesto.camadas.len());
@@ -744,6 +766,15 @@ impl Projeto {
         let mut passos = Vec::with_capacity(manifesto.historico.passos.len());
         for passo in &manifesto.historico.passos {
             passos.push(match passo {
+                PassoSalvo::Ajuste {
+                    camada,
+                    antes,
+                    depois,
+                } => Comando::Ajuste {
+                    camada: *camada,
+                    antes: *antes,
+                    depois: *depois,
+                },
                 PassoSalvo::Mascara {
                     camada,
                     antes,
@@ -1208,7 +1239,7 @@ mod testes {
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.path().join("e1").join(MANIFESTO)).unwrap())
                 .unwrap();
-        assert_eq!(json["formato"], 4);
+        assert_eq!(json["formato"], FORMATO);
         assert_eq!(json["camadas"][0]["mascara"]["fundo"], 0);
 
         let aberto = p.abrir(&base).unwrap().unwrap();
@@ -1224,6 +1255,32 @@ mod testes {
             "a máscara excluída volta com os tiles"
         );
         assert!(s2.na_mascara());
+    }
+
+    #[test]
+    fn a_camada_de_ajuste_e_o_arrasto_dela_voltam_da_gravacao() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = base();
+        let mut s = sessao_pintada(&base);
+        let antes = s.compor();
+        s.nova_camada_de_ajuste(crate::Ajuste::Inverter);
+        s.mover_ajuste(crate::Ajuste::Inverter);
+        let (doc, hist) = s.instantaneo();
+        let p = projeto(dir.path(), Arc::new(DiscoReal));
+        p.salvar("e1", &base, &doc, &hist, 1).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("e1").join(MANIFESTO)).unwrap())
+                .unwrap();
+        assert_eq!(json["camadas"][1]["ajuste"]["tipo"], "inverter");
+        let aberto = p.abrir(&base).unwrap().unwrap();
+        assert_eq!(aberto.documento, doc);
+        let mut s2 = Sessao::nova(base.clone(), aberto.documento, aberto.historico, 300);
+        assert_eq!(
+            s2.compor().get_pixel(5, 5).0,
+            antes.get_pixel(5, 5).0.map(|v| 255 - v)
+        );
+        assert!(s2.desfazer());
+        assert_eq!(s2.compor().as_raw(), antes.as_raw());
     }
 
     #[test]

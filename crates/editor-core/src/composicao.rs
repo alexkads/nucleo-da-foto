@@ -13,6 +13,7 @@
 
 use image::RgbImage;
 
+use crate::ajuste::{Ajuste, Preparado};
 use crate::documento::{Camada, Documento, Mascara};
 use crate::mesclagem::{mesclar, Modo};
 use crate::retangulo::Retangulo;
@@ -26,7 +27,16 @@ pub fn sobre(baixo: [u8; 3], cima: [u8; 4], opacidade: f32) -> [u8; 3] {
 
 /// Um tile de camada na composição: os pixels, a opacidade (já com a máscara
 /// quando ela é lisa no tile), o modo, e a máscara do tile com o fundo dela.
-type TileNaComposicao<'a> = (&'a [u8], f32, Modo, Option<(&'a [u8], u8)>);
+///
+/// `None` nos pixels = uma camada de ajuste: a cor de cima é a de baixo
+/// ajustada.
+type TileNaComposicao<'a> = (
+    Option<&'a [u8]>,
+    Option<&'a Preparado>,
+    f32,
+    Modo,
+    Option<(&'a [u8], u8)>,
+);
 
 /// A imagem editada em resolução cheia.
 pub fn compor(base: &RgbImage, doc: &Documento) -> RgbImage {
@@ -76,6 +86,11 @@ fn compor_deslocado(
     }
     let destino_em_bytes = largura_do_destino as usize * 3;
     let camadas: Vec<&Camada> = doc.camadas.iter().filter(|c| !c.sem_efeito()).collect();
+    // A conta de cada ajuste, montada uma vez (as tabelas de 256).
+    let preparados: Vec<Option<Preparado>> = camadas
+        .iter()
+        .map(|c| c.ajuste.as_ref().map(Ajuste::preparar))
+        .collect();
     let referencia = CamadaDePixels::nova(largura, altura);
     let fonte = base.as_raw();
     let largura_em_bytes = largura as usize * 3;
@@ -86,14 +101,21 @@ fn compor_deslocado(
         // inteiro vale o fundo — e entra na opacidade de uma vez.
         let tiles: Vec<TileNaComposicao> = camadas
             .iter()
-            .filter_map(|c| {
-                let t = c.pixels.tile(posicao)?.as_slice();
+            .zip(&preparados)
+            .filter_map(|(c, preparado)| {
+                let t = match preparado {
+                    Some(_) => None,
+                    None => Some(c.pixels.tile(posicao)?.as_slice()),
+                };
+                let p = preparado.as_ref();
                 match c.mascara_ativa() {
-                    None => Some((t, c.opacidade, c.modo, None)),
+                    None => Some((t, p, c.opacidade, c.modo, None)),
                     Some(m) => match m.pixels.tile(posicao) {
-                        Some(mt) => Some((t, c.opacidade, c.modo, Some((mt.as_slice(), m.fundo)))),
+                        Some(mt) => {
+                            Some((t, p, c.opacidade, c.modo, Some((mt.as_slice(), m.fundo))))
+                        }
                         None if m.fundo == 0 => None,
-                        None => Some((t, c.opacidade * m.fundo as f32 / 255.0, c.modo, None)),
+                        None => Some((t, p, c.opacidade * m.fundo as f32 / 255.0, c.modo, None)),
                     },
                 }
             })
@@ -112,7 +134,7 @@ fn compor_deslocado(
                 let i = y as usize * largura_em_bytes + x as usize * 3;
                 let mut pixel = [fonte[i], fonte[i + 1], fonte[i + 2]];
                 let j = indice(x % LADO_DO_TILE, ty);
-                for (tile, opacidade, modo, mascara) in &tiles {
+                for (tile, preparado, opacidade, modo, mascara) in &tiles {
                     let opacidade = match mascara {
                         None => *opacidade,
                         Some((m, fundo)) => {
@@ -126,12 +148,15 @@ fn compor_deslocado(
                             *opacidade * v as f32 / 255.0
                         }
                     };
-                    pixel = mesclar(
-                        pixel,
-                        [tile[j], tile[j + 1], tile[j + 2], tile[j + 3]],
-                        opacidade,
-                        *modo,
-                    );
+                    let cima = match (tile, preparado) {
+                        (Some(t), _) => [t[j], t[j + 1], t[j + 2], t[j + 3]],
+                        (None, Some(p)) => {
+                            let [r, g, b] = p.aplicar(pixel);
+                            [r, g, b, 255]
+                        }
+                        (None, None) => continue,
+                    };
+                    pixel = mesclar(pixel, cima, opacidade, *modo);
                 }
                 let d = d_inicio + (x - pedaco.x) as usize * 3;
                 destino[d..d + 3].copy_from_slice(&pixel);

@@ -158,6 +158,48 @@ pub fn mesclar_na_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<
     })
 }
 
+/// ⌘E de uma camada de ajuste: o ajuste entra nos pixels da de baixo, com a
+/// opacidade, o modo e a máscara dele — onde a de baixo é transparente, não há
+/// o que ajustar.
+pub fn ajustar_a_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<Mudanca> {
+    let preparado = cima.ajuste.as_ref()?.preparar();
+    let posicoes: Vec<Posicao> = baixo.existentes().map(|(p, _)| *p).collect();
+    let mascara = cima.mascara_ativa();
+    refazer_tiles(baixo, posicoes, |posicao, velho| {
+        let velho = velho?;
+        let m = mascara.map(|m| (m.pixels.tile(posicao), m.fundo));
+        if let Some((None, 0)) = m {
+            return None;
+        }
+        let mut novo = velho.as_ref().clone();
+        for k in (0..BYTES_DO_TILE).step_by(4) {
+            if novo[k + 3] == 0 {
+                continue;
+            }
+            let opacidade = match m {
+                None => cima.opacidade,
+                Some((None, fundo)) => cima.opacidade * fundo as f32 / 255.0,
+                Some((Some(t), fundo)) => {
+                    let v = Mascara::valor_do_pixel(fundo, [t[k], t[k + 1], t[k + 2], t[k + 3]]);
+                    cima.opacidade * v as f32 / 255.0
+                }
+            };
+            if opacidade <= 0.0 {
+                continue;
+            }
+            let [r, g, b] = preparado.aplicar([novo[k], novo[k + 1], novo[k + 2]]);
+            let cor = crate::mesclagem::mesclar(
+                [novo[k], novo[k + 1], novo[k + 2]],
+                [r, g, b, 255],
+                opacidade,
+                cima.modo,
+            );
+            novo[k..k + 3].copy_from_slice(&cor);
+        }
+        Some(novo)
+    })
+}
+
 /// O degradê (G), de `de` até `ate` em pixels da foto, dentro da seleção (ou
 /// na camada inteira).
 ///

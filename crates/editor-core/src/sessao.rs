@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use image::RgbImage;
 
+use crate::ajuste::Ajuste;
 use crate::composicao;
 use crate::documento::{Camada, Documento, Mascara};
 use crate::historico::{Comando, Historico};
@@ -70,6 +71,11 @@ pub struct Sessao {
     /// A camada e a opacidade dela quando o arrasto do slider começou — o
     /// passo do desfazer é o arrasto inteiro, e não cada valor do caminho.
     opacidade_antes: Option<(usize, f32)>,
+    /// O ajuste da camada quando o arrasto de um slider dele começou.
+    ajuste_antes: Option<(usize, Ajuste)>,
+    /// Onde a vista está em rascunho (o arrasto do ajuste) — refeita exata
+    /// ao soltar.
+    rascunho: Retangulo,
     /// O letreiro. `Arc`: o traço leva uma cópia barata.
     selecao: Option<Arc<Selecao>>,
     /// Sobe a cada mudança de pixel ou de seleção — quem desenha miniaturas e
@@ -125,6 +131,8 @@ impl Sessao {
             na_mascara: false,
             traco: None,
             opacidade_antes: None,
+            ajuste_antes: None,
+            rascunho: Retangulo::default(),
             selecao: None,
             versao: 0,
             versao_da_selecao: 0,
@@ -239,6 +247,7 @@ impl Sessao {
     fn fechar_o_que_esta_aberto(&mut self) {
         self.soltar();
         self.confirmar_opacidade();
+        self.confirmar_ajuste();
         self.terminar_de_mover();
         self.aplicar_transformacao();
     }
@@ -270,9 +279,98 @@ impl Sessao {
         true
     }
 
-    /// O pincel está pintando na máscara da escolhida.
+    /// O pincel está pintando na máscara da escolhida. Numa camada de ajuste,
+    /// sempre: ela não tem pixels.
     pub fn na_mascara(&self) -> bool {
-        self.na_mascara && self.camada_ativa().mascara.is_some()
+        let camada = self.camada_ativa();
+        (self.na_mascara || camada.ajuste.is_some()) && camada.mascara.is_some()
+    }
+
+    /// Há onde pintar na escolhida: visível, e com máscara se for de ajuste.
+    fn pode_pintar(&self) -> bool {
+        let camada = self.camada_ativa();
+        camada.visivel && (camada.ajuste.is_none() || camada.mascara.is_some())
+    }
+
+    // ------------------------------------------------------------ ajuste
+
+    /// Uma camada de ajuste logo acima da escolhida, com a máscara branca —
+    /// ou, com seleção, a máscara dela. "Níveis 1", "Níveis 2"…
+    pub fn nova_camada_de_ajuste(&mut self, ajuste: Ajuste) {
+        self.fechar_o_que_esta_aberto();
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let prefixo = format!("{} ", ajuste.nome());
+        let maior = self
+            .doc
+            .camadas
+            .iter()
+            .filter_map(|c| c.nome.strip_prefix(&prefixo)?.trim().parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+        let mut camada =
+            Camada::de_ajuste(&format!("{prefixo}{}", maior + 1), ajuste, largura, altura);
+        if let Some(selecao) = self.selecao.as_deref() {
+            let mut m = Mascara::nova(0, largura, altura);
+            operacoes::preencher(&mut m.pixels, Some(selecao), [255; 3]);
+            camada.mascara = Some(m);
+        }
+        let indice = (self.ativa() + 1).min(self.doc.camadas.len());
+        self.executar(Comando::CriarCamada {
+            indice,
+            camada: Box::new(camada),
+        });
+    }
+
+    /// Um slider do ajuste da escolhida andou: a foto muda na hora, o
+    /// histórico só no [`Self::confirmar_ajuste`].
+    pub fn mover_ajuste(&mut self, ajuste: Ajuste) {
+        self.soltar();
+        let indice = self.ativa();
+        let Some(atual) = self.doc.camadas[indice].ajuste else {
+            return;
+        };
+        if self.ajuste_antes.is_some_and(|(i, _)| i != indice) {
+            self.confirmar_ajuste();
+        }
+        let ajuste = ajuste.limitado();
+        if std::mem::discriminant(&ajuste) != std::mem::discriminant(&atual) {
+            return;
+        }
+        self.ajuste_antes.get_or_insert((indice, atual));
+        if atual == ajuste {
+            return;
+        }
+        self.doc.camadas[indice].ajuste = Some(ajuste);
+        let area = self.doc.camadas[indice].area();
+        // Em rascunho durante o arrasto: o ajuste muda a foto inteira.
+        self.versao += 1;
+        self.vista.rascunhar(&self.base, &self.doc, &area);
+        if let Some(lupa) = self.lupa.as_mut() {
+            lupa.rascunhar(&self.base, &self.doc, &area);
+        }
+        if let Some((_, desde)) = self.lupa_pedida.as_mut() {
+            *desde = desde.uniao(&area);
+        }
+        self.rascunho = self.rascunho.uniao(&area);
+    }
+
+    /// O arrasto do slider do ajuste acabou.
+    pub fn confirmar_ajuste(&mut self) {
+        let Some((camada, antes)) = self.ajuste_antes.take() else {
+            return;
+        };
+        let rascunho = std::mem::take(&mut self.rascunho);
+        self.refazer_a_vista(&rascunho);
+        let Some(depois) = self.doc.camadas.get(camada).and_then(|c| c.ajuste) else {
+            return;
+        };
+        if antes != depois {
+            self.hist.registrar(Comando::Ajuste {
+                camada,
+                antes,
+                depois,
+            });
+        }
     }
 
     /// Aplica e registra um passo, e leva a escolha para onde ele mexeu.
@@ -538,7 +636,7 @@ impl Sessao {
     pub fn comecar_a_mover(&mut self) -> bool {
         self.fechar_o_que_esta_aberto();
         let ativa = self.ativa();
-        if !self.doc.camadas[ativa].visivel {
+        if !self.pode_pintar() {
             return false;
         }
         if self.selecao.is_some() {
@@ -607,7 +705,7 @@ impl Sessao {
             return true;
         }
         let camada = self.ativa();
-        if !self.doc.camadas[camada].visivel {
+        if !self.pode_pintar() {
             return false;
         }
         let na_mascara = self.na_mascara();
@@ -858,7 +956,7 @@ impl Sessao {
     pub fn preencher_selecao(&mut self) -> bool {
         self.fechar_o_que_esta_aberto();
         let camada = self.ativa();
-        if !self.doc.camadas[camada].visivel {
+        if !self.pode_pintar() {
             return false;
         }
         let selecao = self.selecao.clone();
@@ -878,7 +976,7 @@ impl Sessao {
     pub fn degrade(&mut self, de: (f32, f32), ate: (f32, f32)) -> bool {
         self.fechar_o_que_esta_aberto();
         let camada = self.ativa();
-        if !self.doc.camadas[camada].visivel {
+        if !self.pode_pintar() {
             return false;
         }
         let na_mascara = self.na_mascara();
@@ -908,7 +1006,7 @@ impl Sessao {
     pub fn lata_de_tinta(&mut self, x: f32, y: f32) -> bool {
         self.fechar_o_que_esta_aberto();
         let camada = self.ativa();
-        if !self.doc.camadas[camada].visivel || x < 0.0 || y < 0.0 {
+        if !self.pode_pintar() || x < 0.0 || y < 0.0 {
             return false;
         }
         let na_mascara = self.na_mascara();
@@ -941,9 +1039,17 @@ impl Sessao {
         if !self.doc.camadas[indice].visivel || !self.doc.camadas[indice - 1].visivel {
             return Err("Mostre as duas camadas antes de mesclar");
         }
+        if self.doc.camadas[indice - 1].ajuste.is_some() {
+            return Err("A camada de baixo é de ajuste: não tem pixels para receber");
+        }
         let de_cima = self.doc.camadas[indice].clone();
         let mut abaixo = self.doc.camadas[indice - 1].pixels.clone();
-        let mudanca = operacoes::mesclar_na_de_baixo(&mut abaixo, &de_cima).unwrap_or(Mudanca {
+        let mudanca = if de_cima.ajuste.is_some() {
+            operacoes::ajustar_a_de_baixo(&mut abaixo, &de_cima)
+        } else {
+            operacoes::mesclar_na_de_baixo(&mut abaixo, &de_cima)
+        }
+        .unwrap_or(Mudanca {
             antes: Vec::new(),
             depois: Vec::new(),
         });
@@ -965,7 +1071,7 @@ impl Sessao {
         // antes: ele é um passo próprio do desfazer.
         self.fechar_o_que_esta_aberto();
         let ativa = self.ativa();
-        if !self.doc.camadas[ativa].visivel {
+        if !self.pode_pintar() {
             return false;
         }
         // Na máscara só se pinta cinza: o carimbo, o tom e o foco leem a foto.
@@ -998,7 +1104,8 @@ impl Sessao {
                 distancia,
             ));
         }
-        let sujo = traco.ate(self.doc.camadas[ativa].alvo_mut(self.na_mascara), x, y);
+        let na_mascara = self.na_mascara();
+        let sujo = traco.ate(self.doc.camadas[ativa].alvo_mut(na_mascara), x, y);
         self.traco = Some(traco);
         self.refazer_a_vista(&sujo);
         true
@@ -1007,7 +1114,7 @@ impl Sessao {
     /// O ponteiro andou, apertado.
     pub fn arrastar(&mut self, x: f32, y: f32) {
         let ativa = self.ativa();
-        let na_mascara = self.na_mascara;
+        let na_mascara = self.na_mascara();
         let Some(traco) = self.traco.as_mut() else {
             return;
         };
@@ -1157,6 +1264,7 @@ impl Sessao {
         self.hist.alterado()
             || self.traco.is_some()
             || self.opacidade_antes.is_some()
+            || self.ajuste_antes.is_some()
             || self.movendo.is_some()
             || self.flutuante.is_some()
     }
@@ -1773,5 +1881,124 @@ mod testes {
         );
         assert!(s.apagar_selecao());
         assert_eq!(s.cor_em(350.0, 50.0), Some(base.get_pixel(350, 50).0));
+    }
+
+    #[test]
+    fn a_camada_de_ajuste_muda_o_de_baixo_sem_tocar_em_pixel() {
+        let mut s = sessao();
+        let base = s.base().clone();
+        let niveis = Ajuste::Niveis {
+            preto: 0.0,
+            gama: 1.0,
+            branco: 255.0,
+        };
+        s.nova_camada_de_ajuste(niveis);
+        assert_eq!(s.ativa(), 1);
+        assert_eq!(s.camada_ativa().nome, "Níveis 1");
+        assert!(s.na_mascara(), "o pincel vai para a máscara do ajuste");
+        assert!(s.documento().neutro(), "recém-criado, não muda nada");
+        // O arrasto do slider: a foto muda a cada valor, o desfazer é um passo.
+        let passos = s.historico().passos().len();
+        for branco in [240.0, 200.0, 128.0] {
+            s.mover_ajuste(Ajuste::Niveis {
+                preto: 0.0,
+                gama: 1.0,
+                branco,
+            });
+        }
+        s.confirmar_ajuste();
+        assert_eq!(s.historico().passos().len(), passos + 1);
+        let p = base.get_pixel(100, 100).0;
+        let esperado = p.map(|v| ((v as f32 / 128.0).min(1.0) * 255.0).round() as u8);
+        assert_eq!(s.cor_em(100.0, 100.0), Some(esperado));
+        assert!(
+            s.documento().camadas[1].pixels.vazia(),
+            "nenhum pixel na camada"
+        );
+        // Pintar de preto na máscara tira o ajuste dali.
+        s.pincel.cor = [0; 3];
+        s.pincel.raio = 30.0;
+        s.pincel.dureza = 1.0;
+        assert!(s.apertar(100.0, 100.0));
+        s.soltar();
+        assert_eq!(s.cor_em(100.0, 100.0), Some(p));
+        assert_eq!(s.cor_em(500.0, 400.0).unwrap(), {
+            let q = base.get_pixel(500, 400).0;
+            q.map(|v| ((v as f32 / 128.0).min(1.0) * 255.0).round() as u8)
+        });
+        // Desfazer volta o traço e depois o ajuste inteiro.
+        assert!(s.desfazer());
+        assert!(s.desfazer());
+        assert!(s.documento().neutro());
+        // Esconder a camada tira o efeito.
+        s.refazer();
+        s.alternar_visibilidade();
+        assert_eq!(s.cor_em(100.0, 100.0), Some(p));
+    }
+
+    #[test]
+    fn o_ajuste_com_selecao_e_o_mesclar_para_baixo() {
+        let mut s = vermelha();
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(0, 0, 400, 600)),
+            Operacao::Nova,
+        );
+        s.nova_camada_de_ajuste(Ajuste::Inverter);
+        s.desmarcar();
+        assert_eq!(
+            s.cor_em(10.0, 10.0),
+            Some([0, 255, 255]),
+            "inverteu na seleção"
+        );
+        assert_eq!(s.cor_em(700.0, 10.0), Some([255, 0, 0]), "e só nela");
+        // Sem máscara não há onde pintar.
+        assert!(s.excluir_mascara());
+        assert!(!s.apertar(10.0, 10.0));
+        assert_eq!(
+            s.cor_em(700.0, 10.0),
+            Some([0, 255, 255]),
+            "sem máscara vale tudo"
+        );
+        // ⌘E: o ajuste entra nos pixels da de baixo.
+        s.mesclar_para_baixo().unwrap();
+        assert_eq!(s.documento().camadas.len(), 1);
+        assert_eq!(
+            s.documento().camadas[0].pixels.pixel(10, 10),
+            [0, 255, 255, 255]
+        );
+        assert!(s.desfazer());
+        // Mesclar numa de ajuste é recusado.
+        s.nova_camada_de_ajuste(Ajuste::Inverter);
+        s.nova_camada();
+        assert!(s.mesclar_para_baixo().is_err());
+    }
+
+    #[test]
+    fn o_rascunho_do_arrasto_vira_a_vista_exata_ao_soltar() {
+        let mut s = vermelha();
+        s.nova_camada_de_ajuste(Ajuste::Inverter);
+        s.mover_ajuste(Ajuste::MatizSaturacao {
+            matiz: 0.0,
+            saturacao: 0.0,
+            luminosidade: 0.0,
+        });
+        // Trocar o tipo não vale: o slider é do ajuste que a camada tem.
+        assert_eq!(s.camada_ativa().ajuste, Some(Ajuste::Inverter));
+        s.desfazer();
+        s.nova_camada_de_ajuste(Ajuste::Niveis {
+            preto: 0.0,
+            gama: 1.0,
+            branco: 255.0,
+        });
+        for gama in [1.2, 1.6, 2.0] {
+            s.mover_ajuste(Ajuste::Niveis {
+                preto: 10.0,
+                gama,
+                branco: 240.0,
+            });
+        }
+        s.confirmar_ajuste();
+        let exata = Vista::nova(s.base(), s.documento(), 400);
+        assert_eq!(s.vista().imagem().as_raw(), exata.imagem().as_raw());
     }
 }
