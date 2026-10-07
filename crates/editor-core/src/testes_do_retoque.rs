@@ -458,3 +458,288 @@ fn o_recorte_grava_e_reabre_no_formato_8() {
     assert!(s2.desfazer());
     assert!(!s2.documento().camadas[2].recortada);
 }
+
+// ------------------------------------------------------------- deformar
+
+use crate::deformar::{self, Malha};
+use crate::transformar::{Caixa, Conteudo, Transformacao};
+
+/// Um bloco opaco com textura em (200..320, 150..260), borda difusa de 6 px.
+fn camada_com_bloco() -> CamadaDePixels {
+    let mut c = CamadaDePixels::nova(700, 520);
+    for y in 144..266u32 {
+        for x in 194..326u32 {
+            let dentro = |v: u32, a: u32, b: u32| -> f32 {
+                let d = (v as f32 + 0.5 - a as f32).min(b as f32 - v as f32 - 0.5);
+                ((d + 6.0) / 12.0).clamp(0.0, 1.0)
+            };
+            let a = (dentro(x, 200, 320) * dentro(y, 150, 260) * 255.0).round() as u8;
+            if a == 0 {
+                continue;
+            }
+            let i = crate::tiles::indice(x % 256, y % 256);
+            c.tile_mut(crate::tiles::tile_de(x, y))[i..i + 4].copy_from_slice(&[
+                (x * 3 % 256) as u8,
+                (y * 7 % 256) as u8,
+                ((x ^ y) % 256) as u8,
+                a,
+            ]);
+        }
+    }
+    c
+}
+
+fn max_dif(a: [u8; 4], b: [u8; 4]) -> u8 {
+    (0..4).map(|k| a[k].abs_diff(b[k])).max().unwrap()
+}
+
+#[test]
+fn a_grade_parada_e_a_identidade_e_o_ctrl_t_vira_malha_exata() {
+    let caixa = Caixa::nova(100, 50, 300, 120);
+    let m = Malha::da_caixa(&caixa);
+    for (u, v) in [(0.0, 0.0), (1.0, 1.0), (0.3, 0.71), (0.5, 0.5)] {
+        let (x, y) = m.ponto(u, v);
+        assert!((x - (100.0 + 300.0 * u)).abs() < 1e-3 && (y - (50.0 + 120.0 * v)).abs() < 1e-3);
+    }
+    let t = Transformacao {
+        dx: 13.0,
+        dy: -7.0,
+        escala_x: 1.3,
+        escala_y: 0.8,
+        angulo: 0.4,
+    };
+    let mt = Malha::da_transformacao(&caixa, &t);
+    for (u, v) in [(0.0, 0.0), (0.25, 0.8), (1.0, 0.5)] {
+        let (x, y) = mt.ponto(u, v);
+        let (ex, ey) = t.aplicar(&caixa, 100.0 + 300.0 * u, 50.0 + 120.0 * v);
+        assert!((x - ex).abs() < 1e-2 && (y - ey).abs() < 1e-2, "afim é exata");
+    }
+}
+
+#[test]
+fn malha_parada_e_deslocada_reproduzem_o_conteudo_com_alfa() {
+    let c = camada_com_bloco();
+    let conteudo = Conteudo::da_camada(&c, None).unwrap();
+    let m = Malha::da_caixa(&conteudo.caixa);
+    let d = deformar::desenhar(&conteudo, &m, 700, 520);
+    let mut desloc = m;
+    for p in desloc.pontos.iter_mut().flatten() {
+        p.0 += 37.0;
+        p.1 -= 20.0;
+    }
+    let dd = deformar::desenhar(&conteudo, &desloc, 700, 520);
+    for y in 140..270 {
+        for x in 190..330 {
+            assert!(max_dif(d.pixel(x, y), c.pixel(x, y)) <= 1, "identidade em ({x}, {y})");
+            assert!(
+                max_dif(dd.pixel(x + 37, y - 20), c.pixel(x, y)) <= 1,
+                "deslocada em ({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn levantar_a_mandibula_deforma_sem_buracos_e_so_dentro_da_caixa() {
+    let c = camada_com_bloco();
+    let conteudo = Conteudo::da_camada(&c, None).unwrap();
+    let mut m = Malha::da_caixa(&conteudo.caixa);
+    // Os dois pontos internos de baixo sobem 25 px, e a borda de baixo 10.
+    m.mover_ponto(2, 1, 0.0, -25.0);
+    m.mover_ponto(2, 2, 0.0, -25.0);
+    m.mover_ponto(3, 1, 0.0, -10.0);
+    m.mover_ponto(3, 2, 0.0, -10.0);
+    let d = deformar::desenhar(&conteudo, &m, 700, 520);
+    // Sem buracos: todo ponto do miolo levado pela malha cai num pixel opaco.
+    let (cx, cy) = (conteudo.caixa.x as f32, conteudo.caixa.y as f32);
+    let (l, a) = (conteudo.caixa.largura as f32, conteudo.caixa.altura as f32);
+    let mut opacos = 0;
+    for j in 0..60 {
+        for i in 0..60 {
+            let (u, v) = (0.15 + 0.7 * i as f32 / 59.0, 0.15 + 0.7 * j as f32 / 59.0);
+            // Só onde o original é opaco.
+            let (ox, oy) = (cx + u * l, cy + v * a);
+            if c.pixel(ox as u32, oy as u32)[3] < 255 {
+                continue;
+            }
+            let (x, y) = m.ponto(u, v);
+            assert!(d.pixel(x as u32, y as u32)[3] >= 250, "buraco em ({x}, {y})");
+            opacos += 1;
+        }
+    }
+    assert!(opacos > 1000);
+    // O meio de baixo subiu; os cantos de cima ficaram.
+    let (_, y_meio) = m.ponto(0.5, 1.0);
+    assert!(y_meio < cy + a - 7.0, "¾ dos 10 px da borda");
+    assert!(max_dif(d.pixel(201, 151), c.pixel(201, 151)) <= 2, "canto de cima parado");
+    // Nada fora da caixa da malha.
+    assert_eq!(d.pixel(100, 100)[3], 0);
+    assert_eq!(d.pixel(400, 300)[3], 0);
+}
+
+#[test]
+fn malha_dobrada_degenerada_ou_absurda_nao_quebra() {
+    let c = camada_com_bloco();
+    let conteudo = Conteudo::da_camada(&c, None).unwrap();
+    let mut m = Malha::da_caixa(&conteudo.caixa);
+    // Dobra: o canto de cima à esquerda passa do de baixo à direita.
+    m.mover_ponto(0, 0, 300.0, 250.0);
+    let d = deformar::desenhar(&conteudo, &m, 700, 520);
+    assert!(d.todos().all(|(_, t)| t.len() == crate::tiles::BYTES_DO_TILE));
+    // Tudo num ponto só: nada a desenhar.
+    let mut ponto = m;
+    for p in ponto.pontos.iter_mut().flatten() {
+        *p = (10.0, 10.0);
+    }
+    assert!(deformar::desenhar(&conteudo, &ponto, 700, 520).vazia());
+    // Não finito: recusado.
+    let mut nan = m;
+    nan.pontos[1][1] = (f32::NAN, 0.0);
+    assert!(!nan.valida(700, 520));
+    assert!(deformar::desenhar(&conteudo, &nan, 700, 520).vazia());
+    let mut longe = m;
+    longe.pontos[0][0] = (1e9, 0.0);
+    assert!(!longe.valida(700, 520));
+}
+
+#[test]
+fn puxar_por_dentro_leva_o_ponto_agarrado() {
+    let caixa = Caixa::nova(0, 0, 300, 300);
+    let mut m = Malha::da_caixa(&caixa);
+    let antes = m.ponto(0.5, 0.8);
+    m.puxar(0.5, 0.8, 0.0, -30.0);
+    let depois = m.ponto(0.5, 0.8);
+    assert!((depois.1 - (antes.1 - 30.0)).abs() < 1e-2, "o ponto agarrado anda o arrasto");
+    assert!((m.ponto(0.0, 0.0).1).abs() < 1.0, "o canto longe quase não anda");
+    let (u, v) = m.onde(depois.0, depois.1).unwrap();
+    assert!((u - 0.5).abs() < 0.02 && (v - 0.8).abs() < 0.02);
+    assert_eq!(m.pegar(0.4, 0.3, 5.0), Some(deformar::Pega::Ponto(0, 0)));
+}
+
+/// Fotografia, o trecho via cópia e a cópia dele, a de cima recortada pela de
+/// baixo — o começo do retoque do queixo.
+fn retoque_pronto_para_deformar() -> Sessao {
+    let mut s = com_fotografia();
+    selecao_difusa(&mut s);
+    assert!(s.camada_via_copia(false));
+    assert!(s.camada_via_copia(false));
+    assert!(s.criar_mascara_de_corte(2));
+    assert_eq!(s.ativa(), 2);
+    s
+}
+
+#[test]
+fn deformar_cancelar_redefinir_e_confirmar_num_passo() {
+    let mut s = retoque_pronto_para_deformar();
+    let doc0 = s.documento().clone();
+    let passos0 = s.historico().passos().len();
+    assert!(s.comecar_a_deformar());
+    let (caixa, m0) = s.malha().unwrap();
+    assert_eq!(m0, Malha::da_caixa(&caixa));
+    let mut m = m0;
+    m.mover_ponto(3, 1, 0.0, -18.0);
+    m.mover_ponto(3, 2, 0.0, -18.0);
+    s.definir_malha(m);
+    assert_ne!(s.documento().camadas[2].pixels, doc0.camadas[2].pixels);
+    // Esc devolve tudo.
+    s.cancelar_transformacao();
+    assert_eq!(s.documento(), &doc0);
+    assert_eq!(s.historico().passos().len(), passos0);
+    // Redefinir volta à grade sem confirmar; Enter sem mudança não faz passo.
+    assert!(s.comecar_a_deformar());
+    s.definir_malha(m);
+    s.redefinir_malha();
+    assert_eq!(s.documento(), &doc0);
+    assert!(!s.aplicar_transformacao());
+    assert_eq!(s.historico().passos().len(), passos0);
+    // De novo, e Enter: um passo "Deformar".
+    assert!(s.comecar_a_deformar());
+    s.definir_malha(m);
+    let deformado = s.documento().clone();
+    assert!(s.aplicar_transformacao());
+    assert_eq!(s.historico().passos().len(), passos0 + 1);
+    assert_eq!(
+        s.historico().a_desfazer().unwrap().descricao(s.documento()),
+        "Deformar"
+    );
+    assert!(s.desfazer());
+    assert_eq!(s.documento(), &doc0);
+    assert!(s.refazer());
+    assert_eq!(s.documento(), &deformado);
+    // A recortada não passa da de baixo: fora do trecho a foto é a base.
+    let foto = s.compor();
+    assert_eq!(foto.get_pixel(150, 100), s.base().get_pixel(150, 100));
+}
+
+#[test]
+fn do_ctrl_t_ao_deformar_e_de_volta_sem_mexer() {
+    let mut s = retoque_pronto_para_deformar();
+    assert!(s.comecar_a_transformar());
+    let (caixa, _) = s.transformacao().unwrap();
+    s.definir_transformacao(Transformacao::deslocamento(12.0, 0.0));
+    let movido = s.documento().camadas[2].pixels.clone();
+    assert!(s.comecar_a_deformar());
+    let (_, m) = s.malha().unwrap();
+    assert_eq!(m.pontos[0][0], (caixa.x as f32 + 12.0, caixa.y as f32));
+    assert_eq!(s.documento().camadas[2].pixels, movido, "a passagem não muda pixel");
+    assert!(s.malha_intocada());
+    assert!(s.voltar_a_transformacao_livre());
+    let mut m2 = m;
+    m2.mover_ponto(1, 1, 5.0, 5.0);
+    assert!(s.comecar_a_deformar());
+    s.definir_malha(m2);
+    assert!(!s.voltar_a_transformacao_livre(), "deformada não volta");
+    s.cancelar_transformacao();
+}
+
+#[test]
+fn deformar_para_fora_da_foto_guarda_e_traz_de_volta() {
+    let mut s = retoque_pronto_para_deformar();
+    assert!(s.comecar_a_deformar());
+    let (_, mut m) = s.malha().unwrap();
+    for p in m.pontos.iter_mut().flatten() {
+        p.0 -= 400.0; // o trecho começa em x = 190: sai inteiro pela esquerda
+    }
+    s.definir_malha(m);
+    assert!(s.aplicar_transformacao());
+    let c = &s.documento().camadas[2].pixels;
+    assert!(c.tem_fora());
+    assert_eq!(s.compor().get_pixel(5, 230), s.base().get_pixel(5, 230));
+    // Volta com o Mover, inteiro.
+    assert!(s.comecar_a_mover());
+    s.mover_por(400, 0);
+    assert!(s.terminar_de_mover());
+    let volta = &s.documento().camadas[2].pixels;
+    let copia = &s.documento().camadas[1].pixels;
+    let mut diferentes = 0;
+    for y in 140..320 {
+        for x in 180..440 {
+            if max_dif(volta.pixel(x, y), copia.pixel(x, y)) > 1 {
+                diferentes += 1;
+            }
+        }
+    }
+    assert_eq!(diferentes, 0, "deslocamento inteiro de ida e volta");
+}
+
+#[test]
+fn deformado_grava_reabre_e_desfaz() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = retoque_pronto_para_deformar();
+    let base = s.base().clone();
+    assert!(s.comecar_a_deformar());
+    let (_, mut m) = s.malha().unwrap();
+    m.mover_ponto(3, 1, 0.0, -18.0);
+    s.definir_malha(m);
+    s.aplicar_transformacao();
+    let (doc, hist) = s.instantaneo();
+    projeto(dir.path()).salvar("e1", &base, &doc, &hist, 1).unwrap();
+    projeto(dir.path()).coletar(1).unwrap();
+    let aberto = projeto(dir.path()).abrir(&base).unwrap().unwrap();
+    assert_eq!(aberto.documento, doc);
+    let mut s2 = Sessao::nova(base, aberto.documento, aberto.historico, 350);
+    assert_eq!(s2.compor(), s.compor());
+    assert!(s2.desfazer());
+    assert!(s.desfazer());
+    assert_eq!(s2.documento(), s.documento());
+}

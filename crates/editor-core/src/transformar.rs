@@ -141,7 +141,7 @@ impl Conteudo {
 
     /// Lê bilinear no ponto `(u, v)` em pixels da caixa (o centro do pixel
     /// `(0, 0)` é `(0,5, 0,5)`). Devolve RGBA de alfa reto.
-    fn amostra(&self, u: f32, v: f32) -> [u8; 4] {
+    pub(crate) fn amostra(&self, u: f32, v: f32) -> [u8; 4] {
         let (u, v) = (u - 0.5, v - 0.5);
         let (x0, y0) = (u.floor(), v.floor());
         let (fx, fy) = (u - x0, v - y0);

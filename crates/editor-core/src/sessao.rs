@@ -16,6 +16,7 @@ use image::RgbImage;
 
 use crate::ajuste::Ajuste;
 use crate::composicao;
+use crate::deformar::{self, Malha};
 use crate::documento::{Camada, Documento, Mascara, NOME_DA_FOTOGRAFIA};
 use crate::historico::{Comando, Historico};
 use crate::mesclagem::Modo;
@@ -193,6 +194,9 @@ struct Flutuante {
     /// A seleção de quando começou (o Mover a leva junto).
     selecao: Option<Arc<Selecao>>,
     t: Transformacao,
+    /// No modo Deformar: a malha de agora e a do começo do modo (o
+    /// "Redefinir" volta a ela).
+    malha: Option<(Malha, Malha)>,
     /// Onde a camada mudou até agora (para a vista).
     area: Retangulo,
 }
@@ -1166,6 +1170,7 @@ impl Sessao {
             conteudo,
             selecao,
             t: Transformacao::default(),
+            malha: None,
             area,
         });
         true
@@ -1247,12 +1252,21 @@ impl Sessao {
         let Some(f) = self.flutuante.as_mut() else {
             return;
         };
-        if f.t == t {
+        if f.t == t || f.malha.is_some() {
             return;
         }
         f.t = t;
         let (largura, altura) = (f.original.largura(), f.original.altura());
         let desenhado = transformar::desenhar(&f.conteudo, &t, largura, altura);
+        self.mostrar_desenhado(desenhado);
+    }
+
+    /// A camada do flutuante passa a ser o fundo com `desenhado` por cima.
+    fn mostrar_desenhado(&mut self, desenhado: CamadaDePixels) {
+        let Some(f) = self.flutuante.as_mut() else {
+            return;
+        };
+        let (largura, altura) = (f.original.largura(), f.original.altura());
         let nova = transformar::sobre(&f.fundo, &desenhado);
         let area_nova = desenhado
             .existentes()
@@ -1282,9 +1296,18 @@ impl Sessao {
         let Some(f) = self.flutuante.take() else {
             return false;
         };
+        let deformou = f.malha.is_some();
+        if deformou
+            && operacoes::diferenca(&f.original, self.doc.camadas[f.camada].alvo(f.na_mascara))
+                .is_none()
+        {
+            // Deformar sem mudar nada: nem passo, nem a seleção some.
+            *self.doc.camadas[f.camada].alvo_mut(f.na_mascara) = f.original;
+            return false;
+        }
         let selecao_antes = self.selecao.clone();
         if f.selecao.is_some() {
-            self.selecao = if f.t.so_desloca() {
+            self.selecao = if f.t.so_desloca() && !deformou {
                 f.selecao
                     .as_deref()
                     .map(|s| Arc::new(s.deslocada(f.t.dx.round() as i64, f.t.dy.round() as i64)))
@@ -1305,7 +1328,9 @@ impl Sessao {
                 },
             );
         let selecao = self.passo_da_selecao(selecao_antes, "Mover seleção");
-        let nome = if f.t.so_desloca() {
+        let nome = if deformou {
+            "Deformar"
+        } else if f.t.so_desloca() {
             "Mover"
         } else {
             "Transformação livre"
@@ -1340,6 +1365,100 @@ impl Sessao {
         };
         *self.doc.camadas[f.camada].alvo_mut(f.na_mascara) = f.original;
         self.refazer_a_vista(&f.area);
+    }
+
+    // ------------------------------------------------------------ deformar
+
+    /// "Deformar": a malha de 3 × 3 células sobre o conteúdo solto (começa o
+    /// ⌘T se ele não estava aberto). Vindo do ⌘T, a malha nasce já com a
+    /// transformação livre de agora — nenhum pixel muda na passagem. Falso
+    /// quando não há o que deformar (camada escondida ou vazia) ou no
+    /// "Transformar seleção".
+    pub fn comecar_a_deformar(&mut self) -> bool {
+        if self.selecao_solta.is_some() {
+            return false;
+        }
+        if self.flutuante.is_none() && !self.comecar_a_transformar() {
+            return false;
+        }
+        let Some(f) = self.flutuante.as_mut() else {
+            return false;
+        };
+        if f.malha.is_none() {
+            let m = Malha::da_transformacao(&f.conteudo.caixa, &f.t);
+            f.malha = Some((m, m));
+        }
+        true
+    }
+
+    /// A caixa do conteúdo e a malha de agora, no modo Deformar.
+    pub fn malha(&self) -> Option<(transformar::Caixa, Malha)> {
+        let f = self.flutuante.as_ref()?;
+        f.malha.map(|(m, _)| (f.conteudo.caixa, m))
+    }
+
+    pub fn deformando(&self) -> bool {
+        self.flutuante.as_ref().is_some_and(|f| f.malha.is_some())
+    }
+
+    /// A camada passa a mostrar o conteúdo **original** levado pela malha `m`
+    /// (cada prévia parte do conteúdo de quando o ⌘T começou: não reamostra a
+    /// anterior). Malha inválida (não finita, absurda) é ignorada.
+    pub fn definir_malha(&mut self, m: Malha) {
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let Some(f) = self.flutuante.as_mut() else {
+            return;
+        };
+        let Some((atual, inicial)) = f.malha else {
+            return;
+        };
+        if atual == m || !m.valida(largura, altura) {
+            return;
+        }
+        f.malha = Some((m, inicial));
+        // 🔑 A grade sem deformação devolve a camada **original**, exata: o
+        // conteúdo de borda difusa posto de volta sobre o fundo (que perdeu a
+        // mesma borda) não somaria o alfa de antes.
+        if m.quase_igual(&Malha::da_caixa(&f.conteudo.caixa)) {
+            let sujo = f.area;
+            let (camada, na_mascara) = (f.camada, f.na_mascara);
+            *self.doc.camadas[camada].alvo_mut(na_mascara) = f.original.clone();
+            self.refazer_a_vista(&sujo);
+            return;
+        }
+        let desenhado = deformar::desenhar(&f.conteudo, &m, largura, altura);
+        self.mostrar_desenhado(desenhado);
+    }
+
+    /// "Redefinir": volta à malha do começo do Deformar, sem confirmar.
+    pub fn redefinir_malha(&mut self) {
+        if let Some((_, inicial)) = self.flutuante.as_ref().and_then(|f| f.malha) {
+            self.definir_malha(inicial);
+        }
+    }
+
+    /// Volta do Deformar à transformação livre — só com a malha intocada
+    /// (uma malha deformada não tem caixa afim que a represente).
+    pub fn voltar_a_transformacao_livre(&mut self) -> bool {
+        let Some(f) = self.flutuante.as_mut() else {
+            return false;
+        };
+        match f.malha {
+            Some((atual, inicial)) if atual.quase_igual(&inicial) => {
+                f.malha = None;
+                true
+            }
+            Some(_) => false,
+            None => true,
+        }
+    }
+
+    /// A malha pode voltar à transformação livre (o botão da barra).
+    pub fn malha_intocada(&self) -> bool {
+        self.flutuante
+            .as_ref()
+            .and_then(|f| f.malha)
+            .is_none_or(|(atual, inicial)| atual.quase_igual(&inicial))
     }
 
     pub fn transformando(&self) -> bool {
