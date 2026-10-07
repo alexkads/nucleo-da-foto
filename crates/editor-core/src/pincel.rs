@@ -287,9 +287,8 @@ impl Pincel {
         let raio = self.raio.max(RAIO_MINIMO);
         let dura = self.dureza.clamp(0.0, 1.0);
         let nucleo = dura * raio;
-        let material = if d <= nucleo {
-            1.0
-        } else if raio - nucleo <= 1e-6 {
+        // Até o núcleo (e com a ponta inteira dura, que não tem queda), cheio.
+        let material = if d <= nucleo || raio - nucleo <= 1e-6 {
             1.0
         } else {
             let t = ((d - nucleo) / (raio - nucleo)).clamp(0.0, 1.0);
@@ -812,7 +811,7 @@ mod testes {
             ..base
         };
         let muitas = alfa_depois(as_duas, 40);
-        assert!(muitas <= 128 && muitas >= 124, "perto do teto: {muitas}");
+        assert!((124..=128).contains(&muitas), "perto do teto: {muitas}");
         assert!(alfa_depois(as_duas, 1) < 40);
     }
 

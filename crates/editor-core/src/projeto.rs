@@ -489,6 +489,10 @@ fn salvar_passo(
 }
 
 /// Um passo do manifesto de volta ao histórico.
+///
+/// O tipo dos leitores fica por extenso: um apelido com tempo de vida
+/// explícito (`dyn FnMut … + 'a`) não casa com o dos fechos de quem chama.
+#[allow(clippy::type_complexity)]
 fn ler_passo(
     passo: &PassoSalvo,
     ler_tile: &mut dyn FnMut(&str) -> Result<Tile, ErroDoProjeto>,
