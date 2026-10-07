@@ -58,7 +58,12 @@ use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 ///   da última (o conteúdo que o Mover e o ⌘T levam para fora). A 0.1.111
 ///   leria a coluna negativa como erro, e a de além da borda como lixo na
 ///   composta — recusa com o aviso. Os formatos 1–6 se leem como estão.
-pub const FORMATO: u32 = 7;
+/// - **8** (etapa 15): a máscara de corte (`recortada` na camada salva e o
+///   passo `recorte`). A 0.1.114 comporia a camada recortada solta, por cima
+///   de tudo — recusa com o aviso. A malha do Deformar **não** é gravada (o
+///   resultado vai como pixels, num passo de traço). Os formatos 1–7 se leem
+///   como estão.
+pub const FORMATO: u32 = 8;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -230,6 +235,9 @@ pub struct CamadaSalva {
     /// Ausente até o formato 4, e em camada de pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ajuste: Option<Ajuste>,
+    /// Formato 8: a máscara de corte (ausente = solta).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recortada: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -266,6 +274,12 @@ pub enum PassoSalvo {
         depois: Ajuste,
     },
     Visibilidade {
+        camada: usize,
+        antes: bool,
+        depois: bool,
+    },
+    /// Formato 8: a máscara de corte ligada ou liberada.
+    Recorte {
         camada: usize,
         antes: bool,
         depois: bool,
@@ -349,6 +363,7 @@ fn salvar_camada(
             .map(|m| salvar_mascara(m, gravar_tile))
             .transpose()?,
         ajuste: camada.ajuste,
+        recortada: camada.recortada,
     })
 }
 
@@ -411,6 +426,15 @@ fn salvar_passo(
             antes,
             depois,
         } => PassoSalvo::Visibilidade {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        Comando::Recorte {
+            camada,
+            antes,
+            depois,
+        } => PassoSalvo::Recorte {
             camada: *camada,
             antes: *antes,
             depois: *depois,
@@ -567,6 +591,15 @@ fn ler_passo(
             antes,
             depois,
         } => Comando::Visibilidade {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        PassoSalvo::Recorte {
+            camada,
+            antes,
+            depois,
+        } => Comando::Recorte {
             camada: *camada,
             antes: *antes,
             depois: *depois,
@@ -778,11 +811,14 @@ impl Projeto {
             passos.push(salvar_passo(passo, &mut gravar_tile)?);
         }
 
-        // 2. A imagem editada — só com efeito (C30).
-        let composta = if doc.neutro() {
-            None
-        } else {
-            let imagem = composicao::compor(base, doc);
+        // 2. A imagem editada — só com efeito (C30). 🔑 Uma camada que só
+        // repete a base (a camada da fotografia recém-criada, ou retoques que
+        // se anularam) tem pixels, mas compõe a base byte a byte: também não é
+        // edição, e nenhuma versão é publicada.
+        let imagem = (!doc.neutro())
+            .then(|| composicao::compor(base, doc))
+            .filter(|imagem| imagem.as_raw() != base.as_raw());
+        let composta = if let Some(imagem) = imagem {
             let png = codificar_png(&imagem)?;
             let sha256 = hex(&Sha256::digest(&png));
             let caminho = self.caminho_da_composta(revisao);
@@ -793,6 +829,8 @@ impl Projeto {
                 largura: imagem.width(),
                 altura: imagem.height(),
             })
+        } else {
+            None
         };
 
         // 3. O manifesto, de uma vez.
@@ -945,6 +983,7 @@ impl Projeto {
                     .map(|m| ler_mascara(m, ler_tile))
                     .transpose()?,
                 ajuste: salva.ajuste,
+                recortada: salva.recortada,
             })
         };
         let mut camadas = Vec::with_capacity(manifesto.camadas.len());

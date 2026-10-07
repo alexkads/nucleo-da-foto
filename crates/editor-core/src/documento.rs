@@ -110,6 +110,10 @@ pub struct Camada {
     /// Uma camada de ajuste: sem pixels, muda a cor do que está abaixo
     /// (`ajuste.rs`). O pincel pinta na máscara dela.
     pub ajuste: Option<Ajuste>,
+    /// Máscara de corte (⌥ + clique na divisa, "Criar máscara de corte"): a
+    /// camada só aparece onde a **base do conjunto** — a primeira camada não
+    /// recortada abaixo dela — tem pixels. Ver [`Documento::papeis`].
+    pub recortada: bool,
 }
 
 impl Camada {
@@ -123,6 +127,7 @@ impl Camada {
             pixels: CamadaDePixels::nova(largura, altura),
             mascara: None,
             ajuste: None,
+            recortada: false,
         }
     }
 
@@ -196,8 +201,26 @@ fn area_dos_tiles(pixels: &CamadaDePixels) -> Retangulo {
         })
 }
 
+/// Como uma camada entra na composição.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Papel {
+    /// Não muda nada (escondida, vazia, opacidade 0 — ou recortada por uma
+    /// base sem efeito).
+    Fora,
+    /// Composta sobre o que está embaixo, no modo dela.
+    Solta,
+    /// A base de um conjunto de recorte com pelo menos uma recortada.
+    Base,
+    /// Composta sobre a base, com a transparência dela travada.
+    Recortada,
+}
+
 /// O nome da camada que nasce com o documento.
 pub const NOME_DA_PRIMEIRA: &str = "Pintura";
+
+/// O nome da camada criada da fotografia base ("Criar camada da fotografia
+/// base").
+pub const NOME_DA_FOTOGRAFIA: &str = "Fotografia";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Documento {
@@ -239,6 +262,59 @@ impl Documento {
     /// Nenhuma camada muda a base (C30): a imagem editada seria a base byte a
     /// byte, e não se publica versão.
     pub fn neutro(&self) -> bool {
-        self.camadas.iter().all(Camada::sem_efeito)
+        self.papeis().iter().all(|p| *p == Papel::Fora)
+    }
+
+    /// A base do conjunto de recorte da camada `indice`: a primeira camada
+    /// **não recortada** abaixo dela. `None` quando a camada não é recortada,
+    /// quando não há camada embaixo, ou quando a base é de ajuste (a composição
+    /// ainda não recorta por ela — a camada é composta solta).
+    pub fn base_do_recorte(&self, indice: usize) -> Option<usize> {
+        if !self.camadas.get(indice)?.recortada {
+            return None;
+        }
+        let base = (0..indice).rev().find(|&j| !self.camadas[j].recortada)?;
+        self.camadas[base].ajuste.is_none().then_some(base)
+    }
+
+    /// O papel de cada camada na composição (índices do documento).
+    ///
+    /// 🔑 **Regras da máscara de corte** (as do Photoshop com "Mesclar camadas
+    /// recortadas como grupo", o padrão):
+    /// - a base delimita o conjunto pelo **alfa dela vezes a máscara dela**;
+    /// - base escondida, com opacidade 0 ou vazia esconde o conjunto inteiro;
+    /// - uma recortada escondida (ou vazia) só some ela;
+    /// - a base que não tem nenhuma recortada com efeito é composta solta, pela
+    ///   conta de sempre (byte a byte a mesma de antes do recorte existir);
+    /// - recortada sem base válida é composta solta.
+    pub fn papeis(&self) -> Vec<Papel> {
+        let mut papeis = vec![Papel::Fora; self.camadas.len()];
+        for (i, c) in self.camadas.iter().enumerate() {
+            match self.base_do_recorte(i) {
+                Some(base) => {
+                    if papeis[base] != Papel::Fora && !c.sem_efeito() {
+                        papeis[i] = Papel::Recortada;
+                        papeis[base] = Papel::Base;
+                    }
+                }
+                None if !c.sem_efeito() => papeis[i] = Papel::Solta,
+                None => {}
+            }
+        }
+        papeis
+    }
+
+    /// A última camada do conjunto de recorte que começa na base `indice` (a
+    /// própria base quando nada é recortado nela).
+    pub fn fim_do_conjunto(&self, indice: usize) -> usize {
+        let mut fim = indice;
+        while self
+            .camadas
+            .get(fim + 1)
+            .is_some_and(|c| c.recortada)
+        {
+            fim += 1;
+        }
+        fim
     }
 }

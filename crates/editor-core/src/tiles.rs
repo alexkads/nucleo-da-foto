@@ -51,6 +51,50 @@ impl CamadaDePixels {
         }
     }
 
+    /// A imagem inteira como camada **opaca** — a camada da fotografia base:
+    /// um tile por posição da foto, a parte do tile da borda que passa da foto
+    /// transparente. Faixas de tiles em threads (24 MP são 96 MB de tiles).
+    pub fn da_imagem(imagem: &image::RgbImage) -> Self {
+        let (largura, altura) = imagem.dimensions();
+        let mut camada = Self::nova(largura, altura);
+        let (colunas, linhas) = (camada.colunas(), camada.linhas());
+        let fonte = imagem.as_raw();
+        let faixa = |l: u32| -> Vec<(Posicao, Tile)> {
+            (0..colunas)
+                .map(|c| {
+                    let mut tile = vec![0u8; BYTES_DO_TILE];
+                    let (x0, y0) = (c * LADO_DO_TILE, l * LADO_DO_TILE);
+                    let w = LADO_DO_TILE.min(largura - x0) as usize;
+                    for ly in 0..LADO_DO_TILE.min(altura - y0) {
+                        let inicio = ((y0 + ly) as usize * largura as usize + x0 as usize) * 3;
+                        let linha = &fonte[inicio..inicio + w * 3];
+                        let destino = &mut tile[indice(0, ly)..indice(0, ly) + w * 4];
+                        for (d, o) in destino.chunks_exact_mut(4).zip(linha.chunks_exact(3)) {
+                            d.copy_from_slice(&[o[0], o[1], o[2], 255]);
+                        }
+                    }
+                    ((c as i32, l as i32), Arc::new(tile))
+                })
+                .collect()
+        };
+        let faixas: Vec<Vec<(Posicao, Tile)>> = std::thread::scope(|escopo| {
+            let tarefas: Vec<_> = (0..linhas)
+                .map(|l| {
+                    let faixa = &faixa;
+                    escopo.spawn(move || faixa(l))
+                })
+                .collect();
+            tarefas
+                .into_iter()
+                .map(|t| t.join().unwrap_or_default())
+                .collect()
+        });
+        for (posicao, tile) in faixas.into_iter().flatten() {
+            camada.tiles.insert(posicao, tile);
+        }
+        camada
+    }
+
     pub fn largura(&self) -> u32 {
         self.largura
     }

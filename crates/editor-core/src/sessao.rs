@@ -16,7 +16,7 @@ use image::RgbImage;
 
 use crate::ajuste::Ajuste;
 use crate::composicao;
-use crate::documento::{Camada, Documento, Mascara};
+use crate::documento::{Camada, Documento, Mascara, NOME_DA_FOTOGRAFIA};
 use crate::historico::{Comando, Historico};
 use crate::mesclagem::Modo;
 use crate::operacoes;
@@ -623,10 +623,59 @@ impl Sessao {
             self.doc.altura(),
         );
         let indice = (self.ativa() + 1).min(self.doc.camadas.len());
+        self.criar_camada_em(indice, camada);
+    }
+
+    /// Põe `camada` em `indice` num passo. 🔑 Se ela entra **entre camadas
+    /// recortadas**, entra no conjunto (fica recortada também) — senão as
+    /// recortadas de cima passariam a ser recortadas por ela, e a foto mudaria
+    /// sem ninguém pedir. É a regra do Photoshop para camada nova no meio de
+    /// uma máscara de corte.
+    fn criar_camada_em(&mut self, indice: usize, mut camada: Camada) {
+        if self.entra_no_conjunto(indice) {
+            camada.recortada = true;
+        }
         self.executar(Comando::CriarCamada {
             indice,
             camada: Box::new(camada),
         });
+    }
+
+    /// Uma camada posta em `indice` fica embaixo de uma recortada.
+    fn entra_no_conjunto(&self, indice: usize) -> bool {
+        indice > 0 && self.doc.camadas.get(indice).is_some_and(|c| c.recortada)
+    }
+
+    /// "Criar camada da fotografia base": os pixels da base viram uma camada
+    /// opaca **logo acima da base** (embaixo das outras, que continuam por
+    /// cima), e ela passa a ser a escolhida. O bruto e a referência da base não
+    /// mudam — a camada é uma cópia, e o documento continua partindo da base.
+    ///
+    /// `pixels` vem de [`CamadaDePixels::da_imagem`] sobre [`Self::base`],
+    /// montada em segundo plano por quem chama (96 MB numa foto de 24 MP).
+    /// Falso se as dimensões não forem as da base.
+    pub fn criar_camada_da_fotografia(&mut self, pixels: CamadaDePixels) -> bool {
+        self.fechar_o_que_esta_aberto();
+        if (pixels.largura(), pixels.altura()) != (self.doc.largura(), self.doc.altura()) {
+            return false;
+        }
+        let ja_tem = self
+            .doc
+            .camadas
+            .iter()
+            .filter(|c| c.nome == NOME_DA_FOTOGRAFIA || c.nome.starts_with("Fotografia "))
+            .count();
+        let nome = match ja_tem {
+            0 => NOME_DA_FOTOGRAFIA.to_string(),
+            n => format!("{NOME_DA_FOTOGRAFIA} {}", n + 1),
+        };
+        let mut camada = Camada::nova(&nome, pixels.largura(), pixels.altura());
+        camada.pixels = pixels;
+        self.executar(Comando::CriarCamada {
+            indice: 0,
+            camada: Box::new(camada),
+        });
+        true
     }
 
     /// A escolhida, copiada logo acima dela. 🔑 A cópia divide os tiles (`Arc`)
@@ -639,10 +688,7 @@ impl Sessao {
         let mut copia = self.camada_ativa().clone();
         copia.nome = format!("{} cópia", copia.nome);
         let indice = self.ativa() + 1;
-        self.executar(Comando::CriarCamada {
-            indice,
-            camada: Box::new(copia),
-        });
+        self.criar_camada_em(indice, copia);
     }
 
     /// Exclui a escolhida. A última não sai: sem camada não há onde pintar.
@@ -653,23 +699,171 @@ impl Sessao {
         }
         let indice = self.ativa();
         let camada = Box::new(self.doc.camadas[indice].clone());
-        self.executar(Comando::ExcluirCamada { indice, camada });
+        // 🔑 Excluir a base de um conjunto libera as recortadas dela (no mesmo
+        // passo): sem isso elas passariam, caladas, a ser recortadas pela
+        // camada de baixo.
+        let mut passos = self.liberacoes(indice + 1..=self.doc.fim_do_conjunto(indice));
+        if self.doc.camadas[indice].recortada {
+            passos.clear();
+        }
+        passos.push(Comando::ExcluirCamada { indice, camada });
+        self.executar_um_ou_varios("Excluir camada", passos);
         true
     }
 
+    /// Os passos que liberam a máscara de corte das camadas `indices` que
+    /// estão recortadas.
+    fn liberacoes(&self, indices: std::ops::RangeInclusive<usize>) -> Vec<Comando> {
+        indices
+            .filter(|&i| self.doc.camadas.get(i).is_some_and(|c| c.recortada))
+            .map(|camada| Comando::Recorte {
+                camada,
+                antes: true,
+                depois: false,
+            })
+            .collect()
+    }
+
+    /// Um passo só, ou um [`Comando::Varios`] com o `nome` quando são vários.
+    fn executar_um_ou_varios(&mut self, nome: &str, mut passos: Vec<Comando>) {
+        match passos.len() {
+            0 => {}
+            1 => self.executar(passos.remove(0)),
+            _ => self.executar(Comando::Varios {
+                nome: nome.into(),
+                passos,
+            }),
+        }
+    }
+
     /// Sobe (`1`) ou desce (`-1`) a escolhida uma posição na pilha.
+    ///
+    /// 🔑 **Com máscara de corte, o conjunto anda inteiro**: a base leva as
+    /// recortadas dela, e uma camada solta pula o conjunto vizinho inteiro (em
+    /// vez de cair no meio dele e virar a base de alguém). A recortada anda
+    /// dentro do conjunto; passando da ponta, sai dele — em cima é liberada no
+    /// lugar, embaixo vai para baixo da base e é liberada. Um passo só.
     pub fn mover_camada(&mut self, direcao: i32) -> bool {
         self.fechar_o_que_esta_aberto();
         let de = self.ativa();
-        let para = de as i64 + direcao.signum() as i64;
-        if direcao == 0 || para < 0 || para >= self.doc.camadas.len() as i64 {
+        let quantas = self.doc.camadas.len();
+        if direcao == 0 || quantas < 2 {
             return false;
         }
-        self.executar(Comando::MoverCamada {
-            de,
-            para: para as usize,
+        let recortada = self.doc.camadas[de].recortada;
+        let mut passos = Vec::new();
+        if direcao > 0 {
+            if de + 1 >= quantas {
+                return false;
+            }
+            if recortada {
+                if self.doc.camadas[de + 1].recortada {
+                    passos.push(Comando::MoverCamada { de, para: de + 1 });
+                } else {
+                    passos.extend(self.liberacoes(de..=de));
+                }
+            } else {
+                // A unidade [de, fim] passa para cima da unidade seguinte.
+                let fim = self.doc.fim_do_conjunto(de);
+                if fim + 1 >= quantas {
+                    return false;
+                }
+                let topo = self.doc.fim_do_conjunto(fim + 1);
+                for k in 0..=(fim - de) {
+                    passos.push(Comando::MoverCamada {
+                        de: fim - k,
+                        para: topo - k,
+                    });
+                }
+            }
+        } else {
+            if de == 0 {
+                return false;
+            }
+            if recortada {
+                passos.push(Comando::MoverCamada { de, para: de - 1 });
+                if !self.doc.camadas[de - 1].recortada {
+                    // Passou para baixo da base: sai do conjunto.
+                    passos.insert(0, self.liberacoes(de..=de).remove(0));
+                }
+            } else {
+                // A unidade [de, fim] passa para baixo da unidade de baixo.
+                let fim = self.doc.fim_do_conjunto(de);
+                let base_de_baixo = (0..de)
+                    .rev()
+                    .find(|&j| !self.doc.camadas[j].recortada)
+                    .unwrap_or(0);
+                for _ in de..=fim {
+                    passos.push(Comando::MoverCamada {
+                        de: fim,
+                        para: base_de_baixo,
+                    });
+                }
+            }
+        }
+        if passos.is_empty() {
+            return false;
+        }
+        self.executar_um_ou_varios("Mover camada", passos);
+        true
+    }
+
+    // ---------------------------------------------------- máscara de corte
+
+    /// A camada `indice` pode ser recortada: não é a de baixo de todas, ainda
+    /// não está recortada, e a base que ela teria é de pixels (a composição
+    /// ainda não recorta por camada de ajuste).
+    pub fn pode_recortar(&self, indice: usize) -> bool {
+        let Some(c) = self.doc.camadas.get(indice) else {
+            return false;
+        };
+        if indice == 0 || c.recortada {
+            return false;
+        }
+        (0..indice)
+            .rev()
+            .find(|&j| !self.doc.camadas[j].recortada)
+            .is_some_and(|j| self.doc.camadas[j].ajuste.is_none())
+    }
+
+    /// "Criar máscara de corte" (⌥⌘G no Photoshop): a camada `indice` passa a
+    /// aparecer só onde a base de baixo tem pixels. Um passo.
+    pub fn criar_mascara_de_corte(&mut self, indice: usize) -> bool {
+        self.fechar_o_que_esta_aberto();
+        if !self.pode_recortar(indice) {
+            return false;
+        }
+        self.executar(Comando::Recorte {
+            camada: indice,
+            antes: false,
+            depois: true,
         });
         true
+    }
+
+    /// "Liberar máscara de corte": a camada `indice` e as recortadas acima
+    /// dela voltam a ser soltas (as de cima não passam a ser recortadas por
+    /// ela). Um passo.
+    pub fn liberar_mascara_de_corte(&mut self, indice: usize) -> bool {
+        self.fechar_o_que_esta_aberto();
+        if !self.doc.camadas.get(indice).is_some_and(|c| c.recortada) {
+            return false;
+        }
+        let fim = self.doc.fim_do_conjunto(indice);
+        let mut passos = self.liberacoes(indice..=fim);
+        // A escolhida volta a ser a que recebeu o gesto.
+        passos.reverse();
+        self.executar_um_ou_varios("Liberar máscara de corte", passos);
+        true
+    }
+
+    /// ⌥ + clique na divisa entre `indice − 1` e `indice`: cria ou libera.
+    pub fn alternar_mascara_de_corte(&mut self, indice: usize) -> bool {
+        if self.doc.camadas.get(indice).is_some_and(|c| c.recortada) {
+            self.liberar_mascara_de_corte(indice)
+        } else {
+            self.criar_mascara_de_corte(indice)
+        }
     }
 
     /// Dá outro nome a uma camada. Nome vazio ou igual não vira passo.
@@ -1181,18 +1375,31 @@ impl Sessao {
             original.altura(),
         );
         camada.pixels = pixels;
+        camada.recortada = self.entra_no_conjunto(origem + 1);
         let criar = Comando::CriarCamada {
             indice: origem + 1,
             camada: Box::new(camada),
         };
+        // 🔑 Como no Photoshop, a seleção sai junto (no mesmo passo): um
+        // segundo ⌘J duplica a camada nova **exata**, em vez de multiplicar de
+        // novo a borda difusa pela seleção (α × s × s — a borda ia sumindo sem
+        // ninguém ver). Um desfazer devolve a camada e a seleção.
+        let desmarcar = Comando::Selecao {
+            nome: "Desmarcar".into(),
+            antes: Some(selecao.clone()),
+            depois: None,
+        };
         if !recortar {
-            self.executar(criar);
+            self.executar(Comando::Varios {
+                nome: "Camada via cópia".into(),
+                passos: vec![criar, desmarcar],
+            });
             return true;
         }
         // ⇧⌘J é **um** passo, como no Photoshop ("Camada via recorte"): um
         // desfazer devolve o pedaço à origem e tira a camada nova juntos.
         let mut fonte = self.doc.camadas[origem].pixels.clone();
-        let passos = match operacoes::apagar(&mut fonte, &selecao) {
+        let mut passos = match operacoes::apagar(&mut fonte, &selecao) {
             Some(mudanca) => vec![
                 Comando::Traco {
                     camada: origem,
@@ -1203,6 +1410,7 @@ impl Sessao {
             ],
             None => vec![criar],
         };
+        passos.push(desmarcar);
         self.executar(Comando::Varios {
             nome: "Camada via recorte".into(),
             passos,
@@ -1623,9 +1831,22 @@ impl Sessao {
         if self.doc.camadas[indice - 1].ajuste.is_some() {
             return Err("A camada de baixo é de ajuste: não tem pixels para receber");
         }
+        // A base de um conjunto: ⌘E vira "Mesclar máscara de corte".
+        if !self.doc.camadas[indice].recortada && self.doc.fim_do_conjunto(indice) > indice {
+            return self.mesclar_mascara_de_corte(indice);
+        }
+        let na_base = self.doc.base_do_recorte(indice) == Some(indice - 1);
+        if !na_base && self.doc.camadas[indice - 1].recortada && !self.doc.camadas[indice].recortada
+        {
+            return Err(
+                "A camada de baixo está recortada: libere a máscara de corte antes de mesclar",
+            );
+        }
         let de_cima = self.doc.camadas[indice].clone();
         let mut abaixo = self.doc.camadas[indice - 1].pixels.clone();
-        let mudanca = if de_cima.ajuste.is_some() {
+        let mudanca = if na_base {
+            operacoes::mesclar_recortada_na_base(&mut abaixo, &de_cima)
+        } else if de_cima.ajuste.is_some() {
             operacoes::ajustar_a_de_baixo(&mut abaixo, &de_cima)
         } else {
             operacoes::mesclar_na_de_baixo(&mut abaixo, &de_cima)
@@ -1639,6 +1860,38 @@ impl Sessao {
             de_cima: Box::new(de_cima),
             mudanca,
         });
+        Ok(())
+    }
+
+    /// ⌘E na base de um conjunto de recorte: cada recortada, de baixo para
+    /// cima, entra na base com a transparência travada — a foto não muda.
+    /// Um passo ("Mesclar máscara de corte"); o desfazer devolve as camadas,
+    /// as máscaras e os recortes.
+    fn mesclar_mascara_de_corte(&mut self, base: usize) -> Result<(), &'static str> {
+        let fim = self.doc.fim_do_conjunto(base);
+        if self.doc.camadas[base..=fim].iter().any(|c| !c.visivel) {
+            return Err("Mostre as camadas do conjunto antes de mesclar");
+        }
+        let mut doc = self.doc.clone();
+        let mut passos = Vec::new();
+        for _ in base + 1..=fim {
+            let de_cima = doc.camadas[base + 1].clone();
+            let mut pixels = doc.camadas[base].pixels.clone();
+            let mudanca = operacoes::mesclar_recortada_na_base(&mut pixels, &de_cima).unwrap_or(
+                Mudanca {
+                    antes: Vec::new(),
+                    depois: Vec::new(),
+                },
+            );
+            let passo = Comando::Mesclar {
+                indice: base + 1,
+                de_cima: Box::new(de_cima),
+                mudanca,
+            };
+            passo.aplicar(&mut doc, true);
+            passos.push(passo);
+        }
+        self.executar_um_ou_varios("Mesclar máscara de corte", passos);
         Ok(())
     }
 
@@ -2282,7 +2535,13 @@ mod testes {
         assert_eq!(s.ativa(), 1);
         let nova = &s.documento().camadas[1].pixels;
         assert_eq!((nova.pixel(50, 50)[3], nova.pixel(150, 50)[3]), (255, 0));
+        assert!(s.selecao().is_none(), "a seleção sai com a cópia");
         s.escolher_camada(0);
+        assert!(!s.camada_via_copia(true), "sem seleção não há o que recortar");
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(0, 0, 100, 100)),
+            Operacao::Nova,
+        );
         assert!(s.camada_via_copia(true));
         assert_eq!(
             s.documento().camadas[0].pixels.pixel(50, 50)[3],

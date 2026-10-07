@@ -39,6 +39,8 @@ mod testes_do_carimbo;
 mod testes_dos_controles;
 #[cfg(test)]
 mod testes_fora_da_foto;
+#[cfg(test)]
+mod testes_do_retoque;
 
 pub use ajuste::Ajuste;
 pub use carimbo::AmostraDoCarimbo;

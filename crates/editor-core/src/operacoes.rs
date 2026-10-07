@@ -125,8 +125,11 @@ pub fn preencher(
 /// Mescla `cima` em `baixo` (⌘E), com o modo, a opacidade e a máscara de
 /// `cima` (a máscara é aplicada: o escondido não desce). A de baixo guarda o
 /// modo, a opacidade e a máscara dela, como no Photoshop.
+///
+/// O que a de cima tem **fora da foto** (Mover/⌘T, etapa 14) desce também:
+/// mesclar não perde conteúdo que ainda pode voltar.
 pub fn mesclar_na_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<Mudanca> {
-    let posicoes: Vec<Posicao> = cima.pixels.existentes().map(|(p, _)| *p).collect();
+    let posicoes: Vec<Posicao> = cima.pixels.todos().map(|(p, _)| *p).collect();
     let mascara = cima.mascara_ativa();
     refazer_tiles(baixo, posicoes, |posicao, velho| {
         let de_cima = cima.pixels.tile(posicao)?;
@@ -153,6 +156,61 @@ pub fn mesclar_na_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<
             }
             let b = [novo[k], novo[k + 1], novo[k + 2], novo[k + 3]];
             novo[k..k + 4].copy_from_slice(&mesclar_em_camada(b, c, opacidade, cima.modo));
+        }
+        Some(novo)
+    })
+}
+
+/// ⌘E de uma camada **recortada** na base do conjunto: a recortada se mescla
+/// na cor da base com a transparência dela travada — a cor muda, o alfa da
+/// base fica. É a mesma conta da composição (`composicao.rs`, máscara de
+/// corte), com a opacidade e a máscara da recortada; a base guarda o modo, a
+/// opacidade e a máscara dela. Por isso a foto é a mesma, byte a byte, antes e
+/// depois de mesclar. Vale para recortada de pixels e de ajuste.
+pub fn mesclar_recortada_na_base(base: &mut CamadaDePixels, cima: &Camada) -> Option<Mudanca> {
+    let preparado = cima.ajuste.as_ref().map(|a| a.preparar());
+    let posicoes: Vec<Posicao> = base.todos().map(|(p, _)| *p).collect();
+    let mascara = cima.mascara_ativa();
+    refazer_tiles(base, posicoes, |posicao, velho| {
+        let velho = velho?;
+        let de_cima = match preparado {
+            Some(_) => None,
+            None => Some(cima.pixels.tile(posicao)?),
+        };
+        let m = mascara.map(|m| (m.pixels.tile(posicao), m.fundo));
+        if let Some((None, 0)) = m {
+            return None;
+        }
+        let mut novo = velho.as_ref().clone();
+        for k in (0..BYTES_DO_TILE).step_by(4) {
+            if novo[k + 3] == 0 {
+                continue;
+            }
+            let opacidade = match m {
+                None => cima.opacidade,
+                Some((None, fundo)) => cima.opacidade * fundo as f32 / 255.0,
+                Some((Some(t), fundo)) => {
+                    let v = Mascara::valor_do_pixel(fundo, [t[k], t[k + 1], t[k + 2], t[k + 3]]);
+                    if v == 0 {
+                        continue;
+                    }
+                    cima.opacidade * v as f32 / 255.0
+                }
+            };
+            if opacidade <= 0.0 {
+                continue;
+            }
+            let g = [novo[k], novo[k + 1], novo[k + 2]];
+            let c = match (de_cima, &preparado) {
+                (Some(t), _) => [t[k], t[k + 1], t[k + 2], t[k + 3]],
+                (None, Some(p)) => {
+                    let [r, gg, b] = p.aplicar(g);
+                    [r, gg, b, 255]
+                }
+                (None, None) => continue,
+            };
+            let cor = crate::mesclagem::mesclar(g, c, opacidade, cima.modo);
+            novo[k..k + 3].copy_from_slice(&cor);
         }
         Some(novo)
     })

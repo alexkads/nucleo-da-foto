@@ -48,6 +48,12 @@ pub enum Comando {
         antes: bool,
         depois: bool,
     },
+    /// A máscara de corte da camada ligada (`depois = true`) ou liberada.
+    Recorte {
+        camada: usize,
+        antes: bool,
+        depois: bool,
+    },
     Opacidade {
         camada: usize,
         antes: f32,
@@ -132,6 +138,13 @@ impl Comando {
             Comando::Ajuste { camada, depois, .. } => {
                 format!("{} em {}", depois.nome(), nome(doc, *camada))
             }
+            Comando::Recorte { camada, depois, .. } => {
+                if *depois {
+                    format!("Criar máscara de corte em {}", nome(doc, *camada))
+                } else {
+                    format!("Liberar máscara de corte de {}", nome(doc, *camada))
+                }
+            }
             Comando::Visibilidade { camada, depois, .. } => format!(
                 "{} {}",
                 if *depois { "Mostrar" } else { "Esconder" },
@@ -188,6 +201,7 @@ impl Comando {
             | Comando::Mascara { camada, .. }
             | Comando::Ajuste { camada, .. }
             | Comando::Visibilidade { camada, .. }
+            | Comando::Recorte { camada, .. }
             | Comando::Opacidade { camada, .. }
             | Comando::Modo { camada, .. }
             | Comando::Renomear { camada, .. } => *camada,
@@ -342,6 +356,13 @@ impl Comando {
                 depois,
             } => mexer(doc, *camada, |c| {
                 c.visivel = if para_frente { *depois } else { *antes }
+            }),
+            Comando::Recorte {
+                camada,
+                antes,
+                depois,
+            } => mexer(doc, *camada, |c| {
+                c.recortada = if para_frente { *depois } else { *antes }
             }),
             Comando::Opacidade {
                 camada,
