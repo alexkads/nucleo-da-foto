@@ -19,3 +19,5 @@ pub mod modelos;
 
 #[cfg(feature = "onnx")]
 pub mod execucao;
+#[cfg(feature = "onnx")]
+pub mod runtime;

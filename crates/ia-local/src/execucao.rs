@@ -71,6 +71,12 @@ impl Backend {
 
     /// Está disponível nesta máquina? (A CPU, sempre.)
     pub fn disponivel(self) -> Result<(), String> {
+        if !crate::runtime::presente() {
+            return match self {
+                Backend::Automatico | Backend::Cpu => Ok(()),
+                _ => Err("o ONNX Runtime ainda não foi baixado".into()),
+            };
+        }
         match self {
             Backend::Automatico | Backend::Cpu => Ok(()),
             #[cfg(target_os = "macos")]
@@ -141,6 +147,7 @@ pub fn sessao(
     }
     // Solta a anterior antes de carregar a nova: duas na memória não cabem.
     *cache = None;
+    crate::runtime::garantir().map_err(ErroDeExecucao::Processamento)?;
     let (sessao, backend, aviso) = match carregar(modelo, alvo) {
         Ok(s) => (s, alvo, None),
         Err(motivo) if alvo != Backend::Cpu => {
@@ -268,6 +275,7 @@ pub type Assinatura = (Vec<(String, Vec<i64>)>, Vec<(String, Vec<i64>)>);
 /// A assinatura de um modelo: as entradas e as saídas, `(nome, forma)` (−1
 /// na dimensão livre). Para conferir um arquivo importado sem rodá-lo.
 pub fn assinatura(modelo: &Path) -> Result<Assinatura, String> {
+    crate::runtime::garantir()?;
     let s = Session::builder()
         .map_err(|e| e.to_string())?
         .commit_from_file(modelo)

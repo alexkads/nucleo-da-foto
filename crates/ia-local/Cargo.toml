@@ -31,8 +31,15 @@ serde_json = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-27", "coreml"] }
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(all(windows, target_env = "msvc"))'.dependencies]
 ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-27", "directml"] }
+
+# 🪟 O balcão Windows compila com MSYS2 (`-gnu`, pelo LibRaw), e o `ort` não
+# tem runtime pronto para ele: lá o `onnxruntime.dll` oficial é baixado na
+# primeira vez que a IA roda e carregado pelo caminho (`src/runtime.rs`).
+[target.'cfg(all(windows, target_env = "gnu"))'.dependencies]
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "load-dynamic", "api-27", "directml"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
 ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-27"] }
