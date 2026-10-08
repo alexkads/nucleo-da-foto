@@ -134,7 +134,7 @@ impl Comando {
             } => {
                 let nome = nome(doc, *camada);
                 match (antes.as_deref(), depois.as_deref()) {
-                    (None, Some(m)) if m.fundo == 0 => {
+                    (None, Some(m)) if m.fundo == 0 && m.pixels.vazia() => {
                         format!("Máscara que esconde tudo em {nome}")
                     }
                     (None, _) => format!("Máscara em {nome}"),

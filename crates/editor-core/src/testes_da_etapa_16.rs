@@ -56,6 +56,10 @@ fn quadrado_com_mascara() -> Sessao {
     assert!(s.preencher_selecao());
     s.desmarcar();
     assert!(s.adicionar_mascara(false));
+    assert_eq!(
+        s.historico().a_desfazer().unwrap().descricao(s.documento()),
+        "Máscara em Pintura"
+    );
     retangulo(&mut s, 0, 0, 250, 520);
     s.pincel.cor = [0; 3];
     assert!(s.preencher_selecao(), "preto na máscara");
@@ -193,11 +197,33 @@ fn inverter_a_mascara_troca_o_que_aparece_e_duas_vezes_volta() {
 }
 
 #[test]
+fn a_mascara_que_nasce_da_selecao_nao_se_chama_esconde_tudo() {
+    let mut s = sessao();
+    retangulo(&mut s, 10, 10, 50, 50);
+    assert!(s.adicionar_mascara(false));
+    assert_eq!(
+        s.historico().a_desfazer().unwrap().descricao(s.documento()),
+        "Máscara em Pintura"
+    );
+    assert!(s.desfazer());
+    s.desmarcar();
+    assert!(s.adicionar_mascara(true));
+    assert_eq!(
+        s.historico().a_desfazer().unwrap().descricao(s.documento()),
+        "Máscara que esconde tudo em Pintura"
+    );
+}
+
+#[test]
 fn inverter_uma_camada_de_pixels_faz_o_negativo_na_selecao() {
     let mut s = quadrado_com_mascara();
     s.escolher_camada(0);
     retangulo(&mut s, 100, 100, 100, 300);
     assert!(s.inverter());
+    assert_eq!(
+        s.historico().a_desfazer().unwrap().descricao(s.documento()),
+        "Inverter"
+    );
     let p = &s.documento().camadas[0].pixels;
     let [r, g, b] = VERMELHO;
     assert_eq!(p.pixel(150, 150), [255 - r, 255 - g, 255 - b, 255]);
@@ -693,4 +719,47 @@ fn o_arrasto_ao_vivo_por_varias_linhas_e_um_passo() {
     assert_eq!(s.historico().passos().len(), passos + 1, "um passo só");
     assert!(s.desfazer());
     assert_eq!(s.documento().camadas[3].nome, "Camada 3");
+}
+
+// ------------------------------------------------------------- medidas
+
+/// `cargo test --release -p editor-core medir_a_difusao -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn medir_a_difusao() {
+    use std::time::Instant;
+    let (largura, altura) = (5020, 4016);
+    let base = Arc::new(RgbImage::from_fn(largura, altura, |x, y| {
+        image::Rgb([(x % 251) as u8, (y % 241) as u8, 90])
+    }));
+    let doc = Documento::novo(BaseRef::da_imagem(&base));
+    let mut s = Sessao::nova(base, doc, Historico::novo(), 2048);
+    s.criar_camada_da_fotografia(CamadaDePixels::da_imagem(s.base()));
+    retangulo(&mut s, 1000, 800, 3000, 2400);
+    assert!(s.adicionar_mascara(false), "a máscara nasce da seleção");
+    s.desmarcar();
+    for difusao in [2.0, 10.0, 80.0, 250.0] {
+        let t = Instant::now();
+        s.mover_difusao(difusao);
+        s.confirmar_mascara();
+        eprintln!(
+            "difusão {difusao:>5} px: arrasto + vista exata {:?}",
+            t.elapsed()
+        );
+    }
+    s.pincel.raio = 60.0;
+    s.pincel.cor = [0; 3];
+    let t = Instant::now();
+    assert!(s.apertar(2500.0, 2000.0));
+    for k in 1..=10 {
+        s.arrastar(2500.0 + 20.0 * k as f32, 2000.0);
+    }
+    s.soltar();
+    eprintln!(
+        "traço na máscara com difusão 250 (11 eventos): {:?}",
+        t.elapsed()
+    );
+    let t = Instant::now();
+    let _ = s.compor();
+    eprintln!("imagem editada inteira com difusão 250: {:?}", t.elapsed());
 }

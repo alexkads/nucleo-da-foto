@@ -175,7 +175,7 @@ impl Mascara {
         if self.difusao <= 0.0 || sujo.vazio() {
             return *sujo;
         }
-        let m = (self.difusao.min(DIFUSAO_MAXIMA) * 3.0).ceil() as u32 + 2;
+        let m = MapaDifuso::alcance(self.difusao.min(DIFUSAO_MAXIMA));
         let (largura, altura) = (self.pixels.largura(), self.pixels.altura());
         Retangulo::novo(
             sujo.x.saturating_sub(m),

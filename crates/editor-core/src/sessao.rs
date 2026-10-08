@@ -824,14 +824,16 @@ impl Sessao {
         let Some(mudanca) = mudanca else {
             return false;
         };
-        self.executar_um_ou_varios(
-            "Inverter",
-            vec![Comando::Traco {
+        // "Inverter" no Histórico, e não o nome do traço ("Borracha", porque
+        // o alfa não sobe).
+        self.executar(Comando::Varios {
+            nome: "Inverter".into(),
+            passos: vec![Comando::Traco {
                 camada,
                 na_mascara: false,
                 mudanca,
             }],
-        );
+        });
         true
     }
 

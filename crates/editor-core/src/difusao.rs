@@ -10,7 +10,7 @@
 //!                                                         →  bilinear de volta a pixels da foto
 //! ```
 //!
-//! 🔑 **O bloco `k` cresce com a difusão** (σ/4, no mínimo 1): o desfoque roda
+//! 🔑 **O bloco `k` cresce com a difusão** (σ/2, no mínimo 1): o desfoque roda
 //! numa grade pequena, e uma difusão de 200 px numa foto de 24 MP custa o mesmo
 //! que uma de 4. A gaussiana é lisa; a bilinear de volta não deixa degrau.
 //!
@@ -48,8 +48,16 @@ pub struct MapaDifuso {
 }
 
 impl MapaDifuso {
+    /// Até onde, em pixels da foto, uma mudança num pixel da máscara chega
+    /// no mapa: o bloco dele (e o vizinho, pela bilinear) e as três caixas.
+    pub fn alcance(difusao: f32) -> u32 {
+        let k = Self::lado_do_bloco(difusao);
+        let r = Self::raio_da_caixa(difusao / k as f32) as u32;
+        (3 * r + 2) * k + 2
+    }
+
     fn lado_do_bloco(difusao: f32) -> u32 {
-        ((difusao / 4.0).floor() as u32).max(1)
+        ((difusao / 2.0).floor() as u32).max(1)
     }
 
     /// O raio da caixa que, passada três vezes, dá a gaussiana de `sigma`
@@ -181,6 +189,29 @@ impl MapaDifuso {
         }
         let fazer = |grupo: Vec<(u32, &mut [u8])>| {
             for (by, linha) in grupo {
+                if k == 1 {
+                    // Bloco de um pixel: o valor direto, um tile por vez.
+                    let ty = by / LADO_DO_TILE;
+                    let mut x = bx0;
+                    while x < bx1 {
+                        let tx = x / LADO_DO_TILE;
+                        let fim = ((tx + 1) * LADO_DO_TILE).min(bx1);
+                        match pixels.tile((tx as i32, ty as i32)) {
+                            None => linha[x as usize..fim as usize].fill(fundo),
+                            Some(t) => {
+                                for xx in x..fim {
+                                    let i = indice(xx % LADO_DO_TILE, by % LADO_DO_TILE);
+                                    linha[xx as usize] = crate::documento::Mascara::valor_do_pixel(
+                                        fundo,
+                                        [t[i], t[i + 1], t[i + 2], t[i + 3]],
+                                    );
+                                }
+                            }
+                        }
+                        x = fim;
+                    }
+                    continue;
+                }
                 let (y0, y1) = (by * k, ((by + 1) * k).min(altura));
                 for bx in bx0..bx1 {
                     let (x0, x1) = (bx * k, ((bx + 1) * k).min(largura));
@@ -203,8 +234,16 @@ impl MapaDifuso {
     /// Desfoca `alcance` (em blocos) a partir das médias: três caixas em x,
     /// depois três em y, lendo três raios além de cada lado (o que estiver
     /// dentro da grade — na borda, o valor da borda se estende).
+    ///
+    /// 🔑 **Em inteiros, sem dividir entre as passadas** — a soma é exata, e o
+    /// pedaço refeito dá o mesmo byte que a grade refeita inteira. Com o bloco
+    /// de σ/2, o raio da caixa fica em até 4 (largura 9), e `255 · 9⁶` cabe em
+    /// 32 bits. **Em faixas de linhas, uma por thread**: cada faixa lê três
+    /// raios além dela, como o pedaço.
     fn desfocar(&mut self, alcance: &Retangulo) {
-        let s = 3 * self.raio as u32;
+        let r = self.raio;
+        debug_assert!(r <= 4, "a soma de 32 bits só cabe até o raio 4");
+        let s = 3 * r as u32;
         let entrada = Retangulo::novo(
             alcance.x.saturating_sub(s),
             alcance.y.saturating_sub(s),
@@ -213,42 +252,84 @@ impl MapaDifuso {
         )
         .limitado(self.largura, self.altura);
         let (w, h) = (entrada.largura as usize, entrada.altura as usize);
-        if w == 0 || h == 0 {
+        if w == 0 || h == 0 || alcance.vazio() {
             return;
         }
         let lm = self.largura as usize;
-        // 🔑 Em inteiros, sem dividir entre as passadas: a soma é exata, e o
-        // pedaço refeito dá o mesmo byte que a grade refeita inteira.
-        let mut grade: Vec<u64> = Vec::with_capacity(w * h);
-        for y in entrada.y as usize..entrada.baixo() as usize {
-            let inicio = y * lm + entrada.x as usize;
-            grade.extend(self.media[inicio..inicio + w].iter().map(|v| *v as u64));
+        // As três caixas em x, linha a linha (as linhas não se tocam).
+        let mut grade: Vec<u32> = vec![0; w * h];
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let por = h.div_ceil(threads).max(16);
+        {
+            let media = &self.media;
+            let fazer = |(k, pedaco): (usize, &mut [u32])| {
+                let mut aux = vec![0u32; w];
+                for (j, linha) in pedaco.chunks_mut(w).enumerate() {
+                    let y = entrada.y as usize + k * por + j;
+                    let inicio = y * lm + entrada.x as usize;
+                    for (d, v) in linha.iter_mut().zip(&media[inicio..inicio + w]) {
+                        *d = *v as u32;
+                    }
+                    for _ in 0..3 {
+                        caixa(linha, r, &mut aux);
+                    }
+                }
+            };
+            std::thread::scope(|escopo| {
+                for parte in grade.chunks_mut(por * w).enumerate() {
+                    let fazer = &fazer;
+                    escopo.spawn(move || fazer(parte));
+                }
+            });
         }
-        let r = self.raio;
-        let mut aux = vec![0u64; w.max(h)];
-        for y in 0..h {
-            for _ in 0..3 {
-                caixa(&mut grade[y * w..(y + 1) * w], r, &mut aux);
-            }
-        }
-        let mut coluna = vec![0u64; h];
-        for x in 0..w {
-            for (y, c) in coluna.iter_mut().enumerate() {
-                *c = grade[y * w + x];
-            }
-            for _ in 0..3 {
-                caixa(&mut coluna, r, &mut aux);
-            }
-            for (y, c) in coluna.iter().enumerate() {
-                grade[y * w + x] = *c;
-            }
-        }
-        let divisor = ((2 * r + 1) as u64).pow(6);
-        for y in alcance.y..alcance.baixo() {
-            for x in alcance.x..alcance.direita() {
-                let g = grade[(y - entrada.y) as usize * w + (x - entrada.x) as usize];
-                self.valores[y as usize * lm + x as usize] =
-                    ((g + divisor / 2) / divisor).min(255) as u8;
+        // As três em y, por faixas do alcance: cada uma lê `s` linhas além.
+        let (y0, y1) = (alcance.y as usize, alcance.baixo() as usize);
+        let (x0, x1) = (
+            (alcance.x - entrada.x) as usize,
+            (alcance.direita() - entrada.x) as usize,
+        );
+        let divisor = ((2 * r + 1) as u32).pow(6);
+        let linhas_do_alcance = y1 - y0;
+        let por = linhas_do_alcance.div_ceil(threads).max(16);
+        let grade = &grade;
+        let faixas: Vec<(usize, Vec<u8>)> = std::thread::scope(|escopo| {
+            let tarefas: Vec<_> = (y0..y1)
+                .step_by(por)
+                .map(|a| {
+                    escopo.spawn(move || {
+                        let b = (a + por).min(y1);
+                        // A janela em linhas da entrada, com a folga.
+                        let ja = a.saturating_sub(s as usize).max(entrada.y as usize);
+                        let jb = (b + s as usize).min(entrada.baixo() as usize);
+                        let n = jb - ja;
+                        let mut janela: Vec<u32> = grade
+                            [(ja - entrada.y as usize) * w..(jb - entrada.y as usize) * w]
+                            .to_vec();
+                        let mut saida = vec![0u32; n * w];
+                        for _ in 0..3 {
+                            caixa_vertical(&janela, &mut saida, w, n, r);
+                            std::mem::swap(&mut janela, &mut saida);
+                        }
+                        let mut bytes = Vec::with_capacity((b - a) * (x1 - x0));
+                        for y in a..b {
+                            let linha = &janela[(y - ja) * w..(y - ja + 1) * w];
+                            bytes.extend(
+                                linha[x0..x1]
+                                    .iter()
+                                    .map(|g| ((g + divisor / 2) / divisor).min(255) as u8),
+                            );
+                        }
+                        (a, bytes)
+                    })
+                })
+                .collect();
+            tarefas.into_iter().filter_map(|t| t.join().ok()).collect()
+        });
+        let largura_do_alcance = x1 - x0;
+        for (a, bytes) in faixas {
+            for (k, linha) in bytes.chunks(largura_do_alcance).enumerate() {
+                let inicio = (a + k) * lm + alcance.x as usize;
+                self.valores[inicio..inicio + largura_do_alcance].copy_from_slice(linha);
             }
         }
     }
@@ -319,19 +400,44 @@ fn media_do_bloco(pixels: &CamadaDePixels, fundo: u8, x0: u32, x1: u32, y0: u32,
 
 /// Uma passada da caixa de raio `r` sobre `v` (a soma, sem dividir), com a
 /// borda estendida.
-fn caixa(v: &mut [u64], r: usize, aux: &mut [u64]) {
+fn caixa(v: &mut [u32], r: usize, aux: &mut [u32]) {
     let n = v.len();
     if n == 0 {
         return;
     }
     let ler = |i: isize| v[i.clamp(0, n as isize - 1) as usize];
-    let mut soma: u64 = (-(r as isize)..=r as isize).map(ler).sum();
+    let mut soma: u32 = (-(r as isize)..=r as isize).map(ler).sum();
     for (i, a) in aux.iter_mut().enumerate().take(n) {
         *a = soma;
         let i = i as isize;
         soma = soma + ler(i + r as isize + 1) - ler(i - r as isize);
     }
     v.copy_from_slice(&aux[..n]);
+}
+
+/// A mesma caixa em y, sobre `n` linhas de `w` colunas, linha a linha (a soma
+/// de cada coluna anda junto, sem pular na memória).
+fn caixa_vertical(entrada: &[u32], saida: &mut [u32], w: usize, n: usize, r: usize) {
+    let linha = |y: isize| {
+        let y = y.clamp(0, n as isize - 1) as usize;
+        &entrada[y * w..(y + 1) * w]
+    };
+    let mut soma = vec![0u32; w];
+    for d in -(r as isize)..=r as isize {
+        for (s, v) in soma.iter_mut().zip(linha(d)) {
+            *s += *v;
+        }
+    }
+    for y in 0..n {
+        saida[y * w..(y + 1) * w].copy_from_slice(&soma);
+        let (entra, sai) = (
+            linha(y as isize + r as isize + 1),
+            linha(y as isize - r as isize),
+        );
+        for ((s, e), t) in soma.iter_mut().zip(entra).zip(sai) {
+            *s = *s + *e - *t;
+        }
+    }
 }
 
 /// O lugar do mapa ao lado da máscara: compartilhado pelas cópias dela (a
@@ -412,6 +518,49 @@ mod testes {
             let parcial = guarda.mapa(&pixels, 0, difusao);
             let inteiro = MapaDifuso::novo(&pixels, 0, difusao);
             assert_eq!(parcial.valores, inteiro.valores, "difusão {difusao}");
+        }
+    }
+
+    #[test]
+    fn a_mudanca_num_tile_nao_passa_do_alcance() {
+        let (largura, altura) = (1400, 1000);
+        for difusao in [1.0, 2.0, 3.5, 5.0, 9.0, 20.0, 80.0, 250.0] {
+            let antes = CamadaDePixels::nova(largura, altura);
+            let mut depois = antes.clone();
+            // Um ponto de 12 × 12 dentro de um tile só (um pixel some na média
+            // dos blocos grandes).
+            let (px, py) = (700u32, 500u32);
+            for y in py..py + 12 {
+                for x in px..px + 12 {
+                    let i = indice(x % 256, y % 256);
+                    depois.tile_mut(((x / 256) as i32, (y / 256) as i32))[i..i + 4]
+                        .copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+            let a = MapaDifuso::novo(&antes, 0, difusao);
+            let b = MapaDifuso::novo(&depois, 0, difusao);
+            let alcance = MapaDifuso::alcance(difusao) as i64;
+            // O tile inteiro do pixel conta como mudado (é o que a vista suja).
+            let (tx0, ty0) = ((px / 256 * 256) as i64, (py / 256 * 256) as i64);
+            let mut mudou = false;
+            for y in (0..altura as i64).step_by(3) {
+                for x in (0..largura as i64).step_by(3) {
+                    if a.valor(x, y) != b.valor(x, y) {
+                        mudou = true;
+                        let dx = (tx0 - x).max(x - (tx0 + 255)).max(0);
+                        let dy = (ty0 - y).max(y - (ty0 + 255)).max(0);
+                        assert!(
+                            dx <= alcance && dy <= alcance,
+                            "difusão {difusao}: ({x}, {y}) mudou a {dx}, {dy} do tile (alcance {alcance})"
+                        );
+                    }
+                }
+            }
+            // Com 250 px, um ponto de 12 px se dilui abaixo de meio tom.
+            assert!(
+                mudou || difusao > 80.0,
+                "difusão {difusao}: o ponto aparece no mapa"
+            );
         }
     }
 
