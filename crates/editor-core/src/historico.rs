@@ -275,16 +275,14 @@ impl Comando {
         match self {
             Comando::Selecao { .. } => None,
             Comando::Varios { nome, passos } => {
-                let mut sobra: Vec<Comando> =
-                    passos.iter().filter_map(Comando::sem_selecao).collect();
-                match sobra.len() {
-                    0 => None,
-                    1 => sobra.pop(),
-                    _ => Some(Comando::Varios {
-                        nome: nome.clone(),
-                        passos: sobra,
-                    }),
-                }
+                let sobra: Vec<Comando> = passos.iter().filter_map(Comando::sem_selecao).collect();
+                // Com um passo só, continua `Varios`: o nome do gesto ("Camada
+                // via cópia", "Deformar", "Pincel de recuperação") volta igual
+                // ao reabrir, em vez do nome do passo de dentro ("Pincel").
+                (!sobra.is_empty()).then(|| Comando::Varios {
+                    nome: nome.clone(),
+                    passos: sobra,
+                })
             }
             outro => Some(outro.clone()),
         }

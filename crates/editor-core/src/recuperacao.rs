@@ -13,15 +13,16 @@
 //! ```text
 //! dentro do traço (Ω):   Δh = 0                       (h harmônica)
 //! na borda (∂Ω):         h  = (D̃ + ε) / (S̃ + ε)       (D̃, S̃ = D e S suavizados)
-//! resultado:             R  = (S + ε) · h − ε
+//! resultado:             R  = (S + ε) · h − ε       (ε = 50, h em [¼, 4])
 //! ```
 //!
 //! `h` é o **fator de correção** mais liso que existe (a membrana de menor
 //! energia) que leva a origem à cor do destino na borda. Como ele multiplica
 //! a origem, o contraste da textura acompanha a luz: um poro tirado de uma
 //! pele mais clara fica com a força certa numa pele mais escura — o que uma
-//! correção aditiva não faz. `ε` (10 em 255) evita que o preto da origem vire
-//! divisão por zero e amplifique ruído nas sombras.
+//! correção aditiva não faz. `ε` (50 em 255) puxa a conta para o aditivo nos
+//! escuros — uma origem escura sobre pele clara não explode em brilho — e o
+//! fator fica entre ¼ e 4.
 //!
 //! **Difusão** (1 a 7, o controle da barra — não é a difusão da seleção): o
 //! raio, em pixels, da suavização de `D` e `S` antes de a borda ser medida.
@@ -47,8 +48,17 @@
 /// O maior retângulo (em pixels) que a recuperação resolve num traço.
 pub const LIMITE_DE_PIXELS: usize = 8_000_000;
 
-/// O `ε` da conta multiplicativa, em 0..=255.
-const EPSILON: f32 = 10.0;
+/// O `ε` da conta multiplicativa, em 0..=255. 🔑 Não é só para não dividir
+/// por zero: `R = (S + ε)·h − ε` vai do multiplicativo puro (`ε = 0`) ao aditivo
+/// (`ε → ∞`). Com 10 (a primeira versão), uma origem escura (sobrancelha,
+/// pupila) sobre pele clara dava `h ≈ 7` e um brilho alaranjado no traço
+/// (visto na foto real, 07/out/2026); com 50, a textura de pele em luz
+/// parecida continua multiplicativa e o escuro deixa de explodir.
+const EPSILON: f32 = 50.0;
+
+/// O fator de correção fica em `[1/4, 4]`: uma borda de destino muito
+/// diferente da origem não amplifica a textura sem limite.
+const FATOR_MAXIMO: f32 = 4.0;
 
 /// A cor adaptada de cada pixel livre do retângulo `w × h`.
 ///
@@ -74,7 +84,8 @@ pub fn adaptar(
         .map(|k| {
             let mut f = [1.0; 3];
             for c in 0..3 {
-                f[c] = (d_suave[k][c] + EPSILON) / (s_suave[k][c] + EPSILON);
+                f[c] = ((d_suave[k][c] + EPSILON) / (s_suave[k][c] + EPSILON))
+                    .clamp(1.0 / FATOR_MAXIMO, FATOR_MAXIMO);
             }
             f
         })

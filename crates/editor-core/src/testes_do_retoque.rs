@@ -823,6 +823,19 @@ fn deformado_grava_reabre_e_desfaz() {
     assert_eq!(aberto.documento, doc);
     let mut s2 = Sessao::nova(base, aberto.documento, aberto.historico, 350);
     assert_eq!(s2.compor(), s.compor());
+    let nomes = |s: &Sessao| -> Vec<String> {
+        s.historico()
+            .passos()
+            .iter()
+            .map(|p| p.descricao(s.documento()))
+            .collect()
+    };
+    assert_eq!(
+        nomes(&s2).last().map(String::as_str),
+        Some("Deformar"),
+        "o nome do gesto volta ao reabrir"
+    );
+    assert!(nomes(&s2).iter().any(|n| n == "Camada via cópia"));
     assert!(s2.desfazer());
     assert!(s.desfazer());
     assert_eq!(s2.documento(), s.documento());
@@ -897,6 +910,10 @@ fn a_recuperacao_leva_a_textura_e_adapta_a_luz_ao_destino() {
     assert!(s.documento().camadas[0].pixels.vazia());
     assert!(!s.documento().camadas[1].pixels.vazia());
     assert_eq!(s.historico().passos().len(), 2, "nova camada + um traço");
+    assert_eq!(
+        s.historico().a_desfazer().unwrap().descricao(s.documento()),
+        "Pincel de recuperação"
+    );
     assert!(s.desfazer());
     assert!(s.documento().camadas[1].pixels.vazia());
 }
@@ -929,4 +946,118 @@ fn a_recuperacao_sem_origem_nao_pinta() {
     s.nova_camada();
     s.pincel.ferramenta = Ferramenta::Recuperacao;
     assert!(!s.apertar(500.0, 200.0), "⌥ + clique na origem antes");
+}
+
+/// ⏱️ Medidas (rodar otimizado: `cargo test --release -p editor-core
+/// medir_o_retoque -- --ignored --nocapture`). 5020 × 4016, como a foto do
+/// roteiro no app real.
+#[test]
+#[ignore]
+fn medir_o_retoque() {
+    use std::time::Instant;
+    let base = Arc::new(RgbImage::from_fn(5020, 4016, |x, y| {
+        image::Rgb([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 200) as u8])
+    }));
+    let doc = Documento::novo(BaseRef::da_imagem(&base));
+    let mut s = Sessao::nova(base.clone(), doc, Historico::novo(), 1200);
+    let t = Instant::now();
+    let pixels = CamadaDePixels::da_imagem(&base);
+    eprintln!("camada da fotografia: {:?}", t.elapsed());
+    let t = Instant::now();
+    s.criar_camada_da_fotografia(pixels);
+    eprintln!("inserir (com a vista): {:?}", t.elapsed());
+    s.selecionar(
+        &Forma::Retangulo(Retangulo::novo(3500, 1600, 470, 330)),
+        Operacao::Nova,
+    );
+    s.difundir_selecao(10);
+    s.camada_via_copia(false);
+    s.camada_via_copia(false);
+    s.criar_mascara_de_corte(2);
+    assert!(s.comecar_a_deformar());
+    let (_, m0) = s.malha().unwrap();
+    let mut piores = std::time::Duration::ZERO;
+    for k in 1..=20 {
+        let mut m = m0;
+        m.puxar(0.5, 0.85, 0.0, -(k as f32) * 4.0);
+        let t = Instant::now();
+        s.definir_malha(m);
+        piores = piores.max(t.elapsed());
+    }
+    eprintln!("deformar 470×330, pior arrasto: {piores:?}");
+    let t = Instant::now();
+    s.aplicar_transformacao();
+    eprintln!("aplicar o deformar: {:?}", t.elapsed());
+    s.nova_camada();
+    s.pincel.ferramenta = crate::pincel::Ferramenta::Recuperacao;
+    s.pincel.raio = 30.0;
+    s.definir_origem(3300.0, 1700.0);
+    s.apertar(3600.0, 1800.0);
+    for k in 1..=60 {
+        s.arrastar(3600.0 + k as f32 * 5.0, 1800.0);
+    }
+    let t = Instant::now();
+    s.soltar();
+    eprintln!(
+        "recuperação, traço de 300 × 60 px, no soltar: {:?}",
+        t.elapsed()
+    );
+}
+
+/// 👀 Conferência visual da recuperação numa foto real (`VLB_FOTO_TESTE` e
+/// `VLB_SAIDA_TESTE`): o mesmo traço com o carimbo e com a recuperação, lado a
+/// lado. `cargo test --release -p editor-core olhar_a_recuperacao -- --ignored`.
+#[test]
+#[ignore]
+fn olhar_a_recuperacao() {
+    let (Some(foto), Some(saida)) = (
+        std::env::var_os("VLB_FOTO_TESTE"),
+        std::env::var_os("VLB_SAIDA_TESTE"),
+    ) else {
+        return;
+    };
+    let base = Arc::new(image::open(foto).unwrap().to_rgb8());
+    let tracar = |ferramenta: Ferramenta, difusao: u8, origem: (f32, f32)| {
+        let doc = Documento::novo(BaseRef::da_imagem(&base));
+        let mut s = Sessao::nova(base.clone(), doc, Historico::novo(), 800);
+        s.pincel.suavizacao = 0.0;
+        s.pincel.ferramenta = ferramenta;
+        s.pincel.raio = 14.0;
+        s.pincel.dureza = 0.4;
+        s.pincel.difusao = difusao;
+        // Origem: a bochecha da direita (da foto); destino: a da esquerda,
+        // em outra luz.
+        s.definir_origem(origem.0, origem.1);
+        // O traço sobre a prega do sorriso, à esquerda.
+        s.apertar(3600.0, 1600.0);
+        for k in 1..=12 {
+            s.arrastar(3600.0 + k as f32 * 1.5, 1600.0 + k as f32 * 3.3);
+        }
+        s.soltar();
+        s.compor()
+    };
+    let caixa = (3560u32, 1480u32, 240u32, 200u32);
+    let recorte = |img: &RgbImage| {
+        image::imageops::crop_imm(img, caixa.0, caixa.1, caixa.2, caixa.3).to_image()
+    };
+    let pele = (3770.0, 1545.0);
+    let sobrancelha = (3745.0, 1440.0 + 60.0);
+    let paineis = [
+        recorte(&base),
+        recorte(&tracar(Ferramenta::Carimbo, 5, pele)),
+        recorte(&tracar(Ferramenta::Recuperacao, 2, pele)),
+        recorte(&tracar(Ferramenta::Recuperacao, 5, pele)),
+        recorte(&tracar(Ferramenta::Recuperacao, 5, sobrancelha)),
+    ];
+    let mut lado = RgbImage::new(caixa.2 * 5 + 40, caixa.3);
+    for (k, p) in paineis.iter().enumerate() {
+        image::imageops::replace(&mut lado, p, (k as u32 * (caixa.2 + 10)) as i64, 0);
+    }
+    let lado = image::imageops::resize(
+        &lado,
+        lado.width() * 2,
+        lado.height() * 2,
+        image::imageops::FilterType::Nearest,
+    );
+    lado.save(saida).unwrap();
 }

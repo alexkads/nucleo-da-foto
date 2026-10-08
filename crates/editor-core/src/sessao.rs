@@ -2132,12 +2132,27 @@ impl Sessao {
         if !sujo.vazio() {
             self.refazer_a_vista(&sujo);
         }
+        let ferramenta = traco.pincel().ferramenta;
         match traco.terminar(self.doc.camadas[camada].alvo_mut(na_mascara)) {
             Some(mudanca) => {
-                self.hist.registrar(Comando::Traco {
+                let passo = Comando::Traco {
                     camada,
                     na_mascara,
                     mudanca,
+                };
+                // O Histórico com o nome da ferramenta (o traço sozinho diz
+                // "Pincel" ou "Borracha").
+                let nome = match ferramenta {
+                    crate::pincel::Ferramenta::Recuperacao => Some("Pincel de recuperação"),
+                    crate::pincel::Ferramenta::Carimbo => Some("Carimbo"),
+                    _ => None,
+                };
+                self.hist.registrar(match nome {
+                    Some(nome) => Comando::Varios {
+                        nome: nome.into(),
+                        passos: vec![passo],
+                    },
+                    None => passo,
                 });
                 true
             }
