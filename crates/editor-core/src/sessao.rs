@@ -145,6 +145,15 @@ impl PedidoDeLupa {
 pub struct Sessao {
     base: Arc<RgbImage>,
     doc: Documento,
+    /// O Liquidificar aberto: a camada (e se é a máscara dela) e o campo.
+    liquido: Option<(usize, bool, crate::liquidificar::Liquido)>,
+    /// A força do Liquidificar (a "Pressão" do Photoshop), 0..=1.
+    pub forca_do_liquido: f32,
+    /// O documento como abriu nesta sessão — o "antes" do Antes/Depois.
+    doc_inicial: Documento,
+    /// A tela mostra o `doc_inicial` (o Antes/Depois ligado). Nada no
+    /// documento nem no histórico muda por isso.
+    mostrando_antes: bool,
     hist: Historico,
     vista: Vista,
     /// A vista em resolução maior do pedaço visível, com a foto ampliada.
@@ -251,6 +260,10 @@ impl Sessao {
         let ativa = doc.camadas.len().saturating_sub(1);
         Self {
             base,
+            liquido: None,
+            forca_do_liquido: 0.5,
+            doc_inicial: doc.clone(),
+            mostrando_antes: false,
             doc,
             hist,
             vista,
@@ -306,6 +319,12 @@ impl Sessao {
     }
 
     fn refazer_a_vista(&mut self, sujo: &Retangulo) {
+        // Uma edição com o Antes/Depois ligado volta ao "depois" — senão a
+        // tela mostraria o antes por cima do que acabou de mudar.
+        if self.mostrando_antes {
+            self.mostrar_antes(false);
+            return;
+        }
         self.versao += 1;
         if sujo.vazio() {
             return;
@@ -343,9 +362,55 @@ impl Sessao {
             regiao,
             fator,
             base: self.base.clone(),
-            doc: self.doc.clone(),
+            doc: self.doc_da_tela().clone(),
             exibicao: self.vista.exibicao(),
         }
+    }
+
+    // --------------------------------------------------------- antes/depois
+
+    /// O documento que a tela mostra: o de agora, ou o do começo com o
+    /// Antes/Depois ligado.
+    fn doc_da_tela(&self) -> &Documento {
+        if self.mostrando_antes {
+            &self.doc_inicial
+        } else {
+            &self.doc
+        }
+    }
+
+    /// Antes/Depois: a tela passa a mostrar a foto como ela abriu nesta
+    /// sessão (`sim`) ou a de agora. **Só a tela muda**: o documento, o
+    /// histórico e o "alterado" ficam; uma edição qualquer volta ao "depois".
+    /// Recusado (falso) com uma transformação ou um traço em curso.
+    pub fn mostrar_antes(&mut self, sim: bool) -> bool {
+        if sim == self.mostrando_antes {
+            return true;
+        }
+        if sim
+            && (self.flutuante.is_some()
+                || self.traco.is_some()
+                || self.selecao_solta.is_some()
+                || self.liquido.is_some())
+        {
+            return false;
+        }
+        self.mostrando_antes = sim;
+        self.versao += 1;
+        let tudo = Retangulo::inteiro(self.doc.largura(), self.doc.altura());
+        let doc = if sim { &self.doc_inicial } else { &self.doc };
+        self.vista.refazer(&self.base, doc, &tudo);
+        if let Some(lupa) = self.lupa.as_mut() {
+            lupa.refazer(&self.base, doc, &tudo);
+        }
+        if let Some((_, desde)) = self.lupa_pedida.as_mut() {
+            *desde = tudo;
+        }
+        true
+    }
+
+    pub fn mostrando_antes(&self) -> bool {
+        self.mostrando_antes
     }
 
     /// A lupa montada chegou. Só entra a do último pedido, refeita onde a foto
@@ -353,7 +418,7 @@ impl Sessao {
     pub fn receber_lupa(&mut self, id: u64, mut lupa: Vista) -> bool {
         match self.lupa_pedida {
             Some((pedido, desde)) if pedido == id => {
-                lupa.refazer(&self.base, &self.doc, &desde);
+                lupa.refazer(&self.base, self.doc_da_tela(), &desde);
                 lupa.sujar_tudo();
                 self.lupa = Some(lupa);
                 self.lupa_pedida = None;
@@ -456,6 +521,7 @@ impl Sessao {
         self.terminar_de_mover();
         self.aplicar_transformacao();
         self.terminar_de_mover_o_contorno();
+        self.aplicar_liquidificacao();
     }
 
     /// Escolhe a camada — os pixels dela, e não a máscara.
@@ -618,6 +684,9 @@ impl Sessao {
             return;
         }
         self.doc.camadas[indice].ajuste = Some(ajuste);
+        if self.mostrando_antes {
+            self.mostrar_antes(false);
+        }
         let area = self.doc.camadas[indice].area();
         // Em rascunho durante o arrasto: o ajuste muda a foto inteira.
         self.versao += 1;
@@ -1862,6 +1931,215 @@ impl Sessao {
         };
         let sujo = self.devolver_o_original(&f);
         self.refazer_a_vista(&sujo);
+    }
+
+    // ------------------------------------------------------------- remendo
+
+    /// A ferramenta Remendo (o *Patch* do Photoshop, modo "Origem"): a área
+    /// selecionada é refeita com o que está a `(dx, dy)` dela — a textura de
+    /// lá, com a cor e a luz adaptadas à borda da seleção pela mesma conta do
+    /// Pincel de recuperação (`recuperacao::adaptar`, com a difusão do
+    /// pincel). Lê a foto "atual e abaixo" (o instantâneo de agora) e pinta na
+    /// camada escolhida com a força da seleção — numa camada vazia por cima, o
+    /// retoque fica separado. A seleção fica. Um passo ("Remendo").
+    ///
+    /// Falso sem seleção, na máscara, numa camada escondida ou de ajuste, com
+    /// a origem toda fora da foto, ou com a área maior que
+    /// [`crate::recuperacao::LIMITE_DE_PIXELS`].
+    pub fn remendar(&mut self, dx: f32, dy: f32) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let Some(sel) = self.selecao.clone() else {
+            return false;
+        };
+        if !self.pode_pintar() || self.na_mascara() || self.camada_ativa().ajuste.is_some() {
+            return false;
+        }
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let justa = sel.caixa_justa();
+        if justa.vazio() {
+            return false;
+        }
+        let folga = 2 + 3 * self.pincel.difusao.clamp(1, 7) as u32;
+        let x0 = justa.x.saturating_sub(folga);
+        let y0 = justa.y.saturating_sub(folga);
+        let caixa = Retangulo::novo(
+            x0,
+            y0,
+            (justa.direita() + folga).min(largura) - x0,
+            (justa.baixo() + folga).min(altura) - y0,
+        );
+        let (w, h) = (caixa.largura as usize, caixa.altura as usize);
+        if w * h > crate::recuperacao::LIMITE_DE_PIXELS || w < 3 || h < 3 {
+            return false;
+        }
+        let ativa = self.ativa();
+        let mut fonte = crate::carimbo::Fonte::da_amostra(
+            self.base.clone(),
+            &self.doc,
+            ativa,
+            crate::carimbo::AmostraDoCarimbo::AtualEAbaixo,
+            (dx, dy),
+        );
+        let mut origem = Vec::with_capacity(w * h);
+        let mut destino = Vec::with_capacity(w * h);
+        let mut livre = Vec::with_capacity(w * h);
+        let mut tem_origem = false;
+        for y in caixa.y..caixa.baixo() {
+            for x in caixa.x..caixa.direita() {
+                let d = fonte.no_lugar(x, y).unwrap_or([0; 4]);
+                let d3 = [d[0] as f32, d[1] as f32, d[2] as f32];
+                let o = fonte.cor_com_alfa(x, y);
+                tem_origem |= o.is_some() && sel.valor(x, y) > 0;
+                origem.push(o.map_or(d3, |o| [o[0] as f32, o[1] as f32, o[2] as f32]));
+                destino.push(d3);
+                let beira = x == caixa.x
+                    || y == caixa.y
+                    || x + 1 == caixa.direita()
+                    || y + 1 == caixa.baixo();
+                livre.push(!beira && sel.valor(x, y) > 0 && o.is_some());
+            }
+        }
+        if !tem_origem {
+            return false;
+        }
+        let r = crate::recuperacao::adaptar(&origem, &destino, &livre, w, h, self.pincel.difusao);
+        let antes = self.doc.camadas[ativa].pixels.clone();
+        let mut nova = antes.clone();
+        for y in caixa.y..caixa.baixo() {
+            for x in caixa.x..caixa.direita() {
+                let j = (y - caixa.y) as usize * w + (x - caixa.x) as usize;
+                if !livre[j] {
+                    continue;
+                }
+                let a = sel.valor(x, y) as f32 / 255.0;
+                let cor = r[j].map(|v| v.round() as u8);
+                let posicao = crate::tiles::tile_de(x, y);
+                let i = crate::tiles::indice(
+                    x % crate::tiles::LADO_DO_TILE,
+                    y % crate::tiles::LADO_DO_TILE,
+                );
+                let tile = nova.tile_mut(posicao);
+                let baixo = [tile[i], tile[i + 1], tile[i + 2], tile[i + 3]];
+                let p = crate::mesclagem::mesclar_em_camada(
+                    baixo,
+                    [cor[0], cor[1], cor[2], 255],
+                    a,
+                    Modo::Normal,
+                );
+                tile[i..i + 4].copy_from_slice(&p);
+            }
+        }
+        let Some(mudanca) = operacoes::diferenca(&antes, &nova) else {
+            return false;
+        };
+        self.doc.camadas[ativa].pixels = nova;
+        self.hist.registrar(Comando::Varios {
+            nome: "Remendo".into(),
+            passos: vec![Comando::Traco {
+                camada: ativa,
+                na_mascara: false,
+                mudanca,
+            }],
+        });
+        self.refazer_a_vista(&caixa);
+        true
+    }
+
+    // -------------------------------------------------------- liquidificar
+
+    /// Liquidificar (⇧⌘X): o pincel que empurra os pixels da camada
+    /// escolhida (ou da máscara dela). Falso com a camada escondida ou de
+    /// ajuste sem a máscara escolhida.
+    pub fn comecar_a_liquidificar(&mut self) -> bool {
+        if self.liquido.is_some() {
+            return true;
+        }
+        self.fechar_o_que_esta_aberto();
+        if !self.pode_pintar() || (self.camada_ativa().ajuste.is_some() && !self.na_mascara()) {
+            return false;
+        }
+        let camada = self.ativa();
+        let na_mascara = self.na_mascara();
+        let original = self.doc.camadas[camada].alvo(na_mascara).clone();
+        self.liquido = Some((
+            camada,
+            na_mascara,
+            crate::liquidificar::Liquido::novo(original),
+        ));
+        true
+    }
+
+    pub fn liquidificando(&self) -> bool {
+        self.liquido.is_some()
+    }
+
+    /// Um trecho da pincelada, de `de` até `ate` (pixels da foto), com o
+    /// tamanho e a dureza do pincel e a [`Self::forca_do_liquido`].
+    pub fn liquidificar(&mut self, de: (f32, f32), ate: (f32, f32)) {
+        let (raio, dureza, forca) = (
+            self.pincel.raio,
+            self.pincel.dureza,
+            self.forca_do_liquido.clamp(0.0, 1.0),
+        );
+        let selecao = self.selecao.clone();
+        let Some((camada, na_mascara, liquido)) = self.liquido.as_mut() else {
+            return;
+        };
+        let alvo = self.doc.camadas[*camada].alvo_mut(*na_mascara);
+        let sujo = liquido.empurrar(alvo, de, ate, raio, forca, dureza, selecao.as_deref());
+        self.refazer_a_vista(&sujo);
+    }
+
+    /// "Restaurar tudo": a camada volta à de antes, e o Liquidificar continua
+    /// aberto.
+    pub fn restaurar_liquidificacao(&mut self) {
+        let Some((camada, na_mascara, liquido)) = self.liquido.take() else {
+            return;
+        };
+        let area = liquido.area;
+        let original = liquido.original().clone();
+        *self.doc.camadas[camada].alvo_mut(na_mascara) = original.clone();
+        self.liquido = Some((
+            camada,
+            na_mascara,
+            crate::liquidificar::Liquido::novo(original),
+        ));
+        self.refazer_a_vista(&area);
+    }
+
+    /// Enter: o Liquidificar inteiro vira **um** passo ("Liquidificar"); sem
+    /// mudança, nenhum.
+    pub fn aplicar_liquidificacao(&mut self) -> bool {
+        let Some((camada, na_mascara, liquido)) = self.liquido.take() else {
+            return false;
+        };
+        match operacoes::diferenca(
+            liquido.original(),
+            self.doc.camadas[camada].alvo(na_mascara),
+        ) {
+            Some(mudanca) => {
+                self.hist.registrar(Comando::Varios {
+                    nome: "Liquidificar".into(),
+                    passos: vec![Comando::Traco {
+                        camada,
+                        na_mascara,
+                        mudanca,
+                    }],
+                });
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Esc: a camada volta a ser o que era, sem passo.
+    pub fn cancelar_liquidificacao(&mut self) {
+        let Some((camada, na_mascara, liquido)) = self.liquido.take() else {
+            return;
+        };
+        let area = liquido.area;
+        *self.doc.camadas[camada].alvo_mut(na_mascara) = liquido.original().clone();
+        self.refazer_a_vista(&area);
     }
 
     // ------------------------------------------------------------ deformar

@@ -12,7 +12,7 @@
 //!
 //! ```text
 //! dentro do traço (Ω):   Δh = 0                       (h harmônica)
-//! na borda (∂Ω):         h  = (D̃ + ε) / (S̃ + ε)       (D̃, S̃ = D e S suavizados)
+//! na borda (∂Ω):         h  = (D + ε) / (S + ε)       (suavizado ao longo da borda)
 //! resultado:             R  = (S + ε) · h − ε       (ε = 50, h em [¼, 4])
 //! ```
 //!
@@ -25,10 +25,11 @@
 //! fator fica entre ¼ e 4.
 //!
 //! **Difusão** (1 a 7, o controle da barra — não é a difusão da seleção): o
-//! raio, em pixels, da suavização de `D` e `S` antes de a borda ser medida.
-//! Baixa, a cor casa pixel a pixel com a borda (bom para grão e textura
-//! fina, mas o ruído da borda entra); alta, casa com a média da vizinhança
-//! (transição mais lisa).
+//! quanto o fator da borda é suavizado **ao longo dela** (σ de 0 a 4,8 px),
+//! só com os pixels de fora do traço. Baixa (1), a cor casa pixel a pixel com
+//! a borda (bom para grão e textura fina, mas o ruído da borda entra); alta,
+//! casa com a média de cada trecho da borda (transição mais lisa). O miolo —
+//! o que está sendo tirado — nunca entra na conta.
 //!
 //! A equação é resolvida por **SOR** de grosso a fino (pirâmide de 2×): cada
 //! nível parte da solução do nível de baixo, então regiões largas convergem
@@ -76,20 +77,43 @@ pub fn adaptar(
     difusao: u8,
 ) -> Vec<[f32; 3]> {
     debug_assert_eq!(origem.len(), w * h);
-    let sigma = difusao.clamp(1, 7) as f32;
-    let s_suave = desfocar(origem, w, h, sigma);
-    let d_suave = desfocar(destino, w, h, sigma);
-    // O fator na borda (e em todo pixel fora do traço, que é fixo).
-    let mut fator: Vec<[f32; 3]> = (0..w * h)
-        .map(|k| {
-            let mut f = [1.0; 3];
-            for c in 0..3 {
-                f[c] = ((d_suave[k][c] + EPSILON) / (s_suave[k][c] + EPSILON))
-                    .clamp(1.0 / FATOR_MAXIMO, FATOR_MAXIMO);
+    // O fator exato em cada pixel fixo.
+    let razao = |k: usize| -> [f32; 3] {
+        let mut f = [1.0; 3];
+        for c in 0..3 {
+            f[c] = ((destino[k][c] + EPSILON) / (origem[k][c] + EPSILON))
+                .clamp(1.0 / FATOR_MAXIMO, FATOR_MAXIMO);
+        }
+        f
+    };
+    let mut fator: Vec<[f32; 3]> = (0..w * h).map(razao).collect();
+    // 🔑 A difusão suaviza o fator **ao longo da borda**, só com os pixels de
+    // fora (o anel de até 2 px em volta do traço): o miolo — a mancha que
+    // está saindo — nunca entra na conta da borda. A primeira versão
+    // suavizava destino e origem atravessando a borda, e a cor da mancha
+    // voltava como emenda no Remendo (borda dura).
+    let sigma = (difusao.clamp(1, 7) - 1) as f32 * 0.8;
+    if sigma > 0.0 {
+        let anel = anel_da_borda(livre, w, h);
+        let peso: Vec<[f32; 3]> = anel
+            .iter()
+            .map(|a| if *a { [1.0; 3] } else { [0.0; 3] })
+            .collect();
+        let ponderado: Vec<[f32; 3]> = (0..w * h)
+            .map(|k| if anel[k] { fator[k] } else { [0.0; 3] })
+            .collect();
+        let (num, den) = (
+            desfocar(&ponderado, w, h, sigma),
+            desfocar(&peso, w, h, sigma),
+        );
+        for k in 0..w * h {
+            if anel[k] && den[k][0] > 1e-6 {
+                for c in 0..3 {
+                    fator[k][c] = num[k][c] / den[k][0];
+                }
             }
-            f
-        })
-        .collect();
+        }
+    }
     resolver(&mut fator, livre, w, h);
     (0..w * h)
         .map(|k| {
@@ -103,6 +127,40 @@ pub fn adaptar(
             r
         })
         .collect()
+}
+
+/// Os pixels fixos a até 2 px (em passos de 4 vizinhos) de um pixel livre.
+fn anel_da_borda(livre: &[bool], w: usize, h: usize) -> Vec<bool> {
+    let mut anel = vec![false; w * h];
+    let mut frente: Vec<usize> = (0..w * h).filter(|&k| livre[k]).collect();
+    let mut visto = livre.to_vec();
+    for _ in 0..2 {
+        let mut proxima = Vec::new();
+        for k in frente {
+            let (x, y) = (k % w, k / w);
+            let mut vizinho = |v: usize| {
+                if !visto[v] {
+                    visto[v] = true;
+                    anel[v] = true;
+                    proxima.push(v);
+                }
+            };
+            if x > 0 {
+                vizinho(k - 1);
+            }
+            if x + 1 < w {
+                vizinho(k + 1);
+            }
+            if y > 0 {
+                vizinho(k - w);
+            }
+            if y + 1 < h {
+                vizinho(k + w);
+            }
+        }
+        frente = proxima;
+    }
+    anel
 }
 
 /// Gaussiano separável de desvio `sigma`, com a borda repetida.
@@ -294,6 +352,36 @@ mod testes {
             "a textura fica, na escala: {amplitude}"
         );
         assert_eq!(r[0], destino[0], "fora do traço, o destino");
+    }
+
+    #[test]
+    fn a_mancha_do_miolo_nao_entra_na_borda() {
+        // Destino liso a 150 com uma mancha escura que enche o miolo até
+        // perto da borda; origem lisa a 150. O resultado tem de ser 150 em
+        // toda parte — a mancha está saindo, não é referência de cor.
+        let (w, h) = (64, 64);
+        let livre = disco(w, h);
+        let destino: Vec<[f32; 3]> = (0..w * h)
+            .map(|k| {
+                let (x, y) = ((k % w) as f32 - 32.0, (k / w) as f32 - 32.0);
+                if x * x + y * y < 18.0 * 18.0 {
+                    [30.0; 3]
+                } else {
+                    [150.0; 3]
+                }
+            })
+            .collect();
+        let origem = vec![[150.0f32; 3]; w * h];
+        for difusao in [1, 5, 7] {
+            let r = adaptar(&origem, &destino, &livre, w, h, difusao);
+            for k in (0..w * h).filter(|&k| livre[k]) {
+                assert!(
+                    (r[k][0] - 150.0).abs() < 1.0,
+                    "difusão {difusao}, pixel {k}: {:?}",
+                    r[k]
+                );
+            }
+        }
     }
 
     #[test]

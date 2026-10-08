@@ -632,7 +632,7 @@ fn as_propriedades_e_os_cadeados_gravam_e_reabrem_no_formato_9() {
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("e1/projeto.json")).unwrap())
             .unwrap();
-    assert_eq!(json["formato"], 9);
+    assert!(json["formato"].as_u64().unwrap() >= 9, "do 9 em diante");
     let m = &json["camadas"][0]["mascara"];
     assert_eq!(m["vinculada"], false);
     assert!((m["densidade"].as_f64().unwrap() - 0.6).abs() < 1e-6);

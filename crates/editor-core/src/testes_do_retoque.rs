@@ -505,7 +505,7 @@ fn o_recorte_grava_e_reabre_no_formato_8() {
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("e1/projeto.json")).unwrap())
             .unwrap();
-    assert_eq!(json["formato"], crate::projeto::FORMATO, "do 8 em diante");
+    assert!(json["formato"].as_u64().unwrap() >= 8);
     assert_eq!(json["camadas"][2]["recortada"], true);
     assert!(json["camadas"][1].get("recortada").is_none());
     projeto(dir.path()).coletar(1).unwrap();
@@ -1002,6 +1002,30 @@ fn medir_o_retoque() {
         "recuperação, traço de 300 × 60 px, no soltar: {:?}",
         t.elapsed()
     );
+    s.escolher_camada(0);
+    assert!(s.comecar_a_liquidificar());
+    s.pincel.raio = 100.0;
+    let mut pior = std::time::Duration::ZERO;
+    for k in 0..20 {
+        let t = Instant::now();
+        s.liquidificar(
+            (3700.0 + k as f32 * 4.0, 1900.0),
+            (3704.0 + k as f32 * 4.0, 1896.0),
+        );
+        pior = pior.max(t.elapsed());
+    }
+    eprintln!("liquidificar, raio 100, pior trecho: {pior:?}");
+    let t = Instant::now();
+    s.aplicar_liquidificacao();
+    eprintln!("aplicar o liquidificar: {:?}", t.elapsed());
+    s.selecionar(
+        &Forma::Retangulo(Retangulo::novo(3600, 1800, 120, 90)),
+        Operacao::Nova,
+    );
+    s.nova_camada();
+    let t = Instant::now();
+    assert!(s.remendar(-200.0, 0.0));
+    eprintln!("remendo de 120 × 90 px: {:?}", t.elapsed());
 }
 
 /// 👀 Conferência visual da recuperação numa foto real (`VLB_FOTO_TESTE` e
@@ -1060,4 +1084,383 @@ fn olhar_a_recuperacao() {
         image::imageops::FilterType::Nearest,
     );
     lado.save(saida).unwrap();
+}
+
+// --------------------------------------------------------- antes/depois
+
+#[test]
+fn antes_depois_so_muda_a_tela_e_uma_edicao_volta_ao_depois() {
+    let mut s = com_fotografia();
+    s.pincel.cor = [255, 0, 0];
+    s.pincel.raio = 20.0;
+    s.apertar(300.0, 200.0);
+    s.arrastar(360.0, 200.0);
+    s.soltar();
+    let (doc, passos, alterado) = (
+        s.documento().clone(),
+        s.historico().passos().len(),
+        s.alterado(),
+    );
+    let vista_depois = s.vista().imagem().clone();
+    assert!(s.mostrar_antes(true));
+    assert!(s.mostrando_antes());
+    assert_ne!(s.vista().imagem(), &vista_depois, "a tela mostra o antes");
+    let so_a_base = crate::vista::Vista::nova(
+        s.base(),
+        &Documento::novo(BaseRef::da_imagem(s.base())),
+        350,
+    );
+    assert_eq!(s.vista().imagem(), so_a_base.imagem(), "a foto como abriu");
+    assert_eq!(s.documento(), &doc, "o documento não muda");
+    assert_eq!(s.historico().passos().len(), passos, "nem o histórico");
+    assert_eq!(s.alterado(), alterado);
+    // Desligar volta à tela de agora.
+    assert!(s.mostrar_antes(false));
+    assert_eq!(s.vista().imagem(), &vista_depois);
+    // Uma edição com o antes ligado volta ao depois.
+    s.mostrar_antes(true);
+    s.apertar(100.0, 100.0);
+    assert!(!s.mostrando_antes());
+    s.soltar();
+}
+
+// --------------------------------------------------------- liquidificar
+
+/// Uma camada opaca com uma faixa vertical escura em x = 200..210.
+fn com_faixa() -> Sessao {
+    let mut s = com_fotografia();
+    s.nova_camada();
+    let mut doc = s.documento().clone();
+    let c = &mut doc.camadas[2].pixels;
+    pintar(c, 0, 0, 700, 520, [220, 220, 220], 255);
+    pintar(c, 200, 0, 210, 520, [10, 10, 10], 255);
+    let mut s = Sessao::nova(s.base().clone(), doc, Historico::novo(), 350);
+    s.escolher_camada(2);
+    s.pincel.raio = 40.0;
+    s.pincel.dureza = 0.3;
+    s.forca_do_liquido = 1.0;
+    s
+}
+
+fn escuro(s: &Sessao, x: u32, y: u32) -> bool {
+    s.documento().camadas[2].pixels.pixel(x, y)[0] < 100
+}
+
+#[test]
+fn liquidificar_empurra_a_faixa_sem_buraco_e_e_um_passo() {
+    let mut s = com_faixa();
+    let original = s.documento().camadas[2].pixels.clone();
+    assert!(s.comecar_a_liquidificar());
+    // Arrastar 20 px para a direita, passando pela faixa na altura 260.
+    s.liquidificar((205.0, 260.0), (225.0, 260.0));
+    assert!(escuro(&s, 222, 260), "a faixa andou com o ponteiro");
+    assert!(!escuro(&s, 203, 260), "e saiu de onde estava");
+    assert!(escuro(&s, 205, 100), "longe do pincel, nada muda");
+    assert_eq!(
+        s.documento().camadas[2].pixels.pixel(205, 100),
+        original.pixel(205, 100)
+    );
+    // Sem buraco: a camada continua opaca no caminho.
+    for x in 150..280 {
+        assert_eq!(
+            s.documento().camadas[2].pixels.pixel(x, 260)[3],
+            255,
+            "x = {x}"
+        );
+    }
+    let passos = s.historico().passos().len();
+    assert!(s.aplicar_liquidificacao());
+    assert_eq!(s.historico().passos().len(), passos + 1);
+    assert_eq!(
+        s.historico().a_desfazer().unwrap().descricao(s.documento()),
+        "Liquidificar"
+    );
+    assert!(s.desfazer());
+    assert_eq!(s.documento().camadas[2].pixels, original);
+}
+
+#[test]
+fn liquidificar_cancelar_restaurar_e_sem_mudanca() {
+    let mut s = com_faixa();
+    let original = s.documento().camadas[2].pixels.clone();
+    let passos = s.historico().passos().len();
+    s.comecar_a_liquidificar();
+    s.liquidificar((205.0, 260.0), (230.0, 270.0));
+    s.cancelar_liquidificacao();
+    assert_eq!(s.documento().camadas[2].pixels, original, "Esc devolve");
+    s.comecar_a_liquidificar();
+    s.liquidificar((205.0, 260.0), (230.0, 270.0));
+    s.restaurar_liquidificacao();
+    assert!(s.liquidificando(), "Restaurar tudo não fecha");
+    assert_eq!(s.documento().camadas[2].pixels, original);
+    assert!(!s.aplicar_liquidificacao(), "sem mudança, sem passo");
+    assert_eq!(s.historico().passos().len(), passos);
+}
+
+#[test]
+fn liquidificar_nao_depende_de_quantos_eventos_e_respeita_a_selecao() {
+    let mut a = com_faixa();
+    a.comecar_a_liquidificar();
+    a.liquidificar((205.0, 260.0), (245.0, 260.0));
+    let mut b = com_faixa();
+    b.comecar_a_liquidificar();
+    for k in 0..40 {
+        b.liquidificar((205.0 + k as f32, 260.0), (206.0 + k as f32, 260.0));
+    }
+    let (pa, pb) = (
+        &a.documento().camadas[2].pixels,
+        &b.documento().camadas[2].pixels,
+    );
+    let diferentes = (150..300)
+        .filter(|&x| pa.pixel(x, 260)[0].abs_diff(pb.pixel(x, 260)[0]) > 40)
+        .count();
+    assert!(
+        diferentes <= 3,
+        "o mesmo caminho dá o mesmo resultado ({diferentes})"
+    );
+    // Com seleção, o de fora fica congelado.
+    let mut s = com_faixa();
+    s.selecionar(
+        &Forma::Retangulo(Retangulo::novo(0, 0, 700, 255)),
+        Operacao::Nova,
+    );
+    s.comecar_a_liquidificar();
+    s.liquidificar((205.0, 270.0), (230.0, 270.0));
+    assert!(escuro(&s, 205, 275), "fora da seleção, nada anda");
+}
+
+// ------------------------------------------------------------- remendo
+
+#[test]
+fn o_remendo_traz_a_textura_de_la_com_a_luz_daqui() {
+    let mut s = pele();
+    s.nova_camada();
+    assert!(!s.remendar(-300.0, 0.0), "sem seleção não há remendo");
+    // Uma "mancha" lisa na pele escura, para o remendo apagar.
+    let mut doc = s.documento().clone();
+    pintar(
+        &mut doc.camadas[0].pixels,
+        495,
+        195,
+        525,
+        225,
+        [60, 40, 30],
+        255,
+    );
+    let mut s = Sessao::nova(s.base().clone(), doc, Historico::novo(), 350);
+    s.escolher_camada(1);
+    s.selecionar(
+        &Forma::Retangulo(Retangulo::novo(485, 185, 50, 50)),
+        Operacao::Nova,
+    );
+    let passos = s.historico().passos().len();
+    assert!(s.remendar(-300.0, 0.0));
+    assert_eq!(s.historico().passos().len(), passos + 1);
+    assert_eq!(
+        s.historico().a_desfazer().unwrap().descricao(s.documento()),
+        "Remendo"
+    );
+    assert!(s.selecao().is_some(), "a seleção fica");
+    assert!(
+        s.documento().camadas[0].pixels.pixel(510, 210)[0] == 60,
+        "a de baixo não muda"
+    );
+    let foto = s.compor();
+    let (m, d) = media_e_desvio(&foto, 500, 200, 20);
+    let (m_viz, d_viz) = media_e_desvio(s.base(), 440, 200, 20);
+    assert!(
+        (m - m_viz).abs() < 10.0,
+        "a luz é a da pele em volta: {m} × {m_viz}"
+    );
+    assert!(d > 0.6 * d_viz, "a textura da origem: {d} × {d_viz}");
+    assert!(s.desfazer());
+    assert!(s.documento().camadas[1].pixels.vazia());
+}
+
+/// 👀 O Remendo na foto real (`VLB_FOTO_TESTE`, `VLB_SAIDA_TESTE`): a prega do
+/// sorriso remendada com a pele ao lado, lado a lado com o original.
+#[test]
+#[ignore]
+fn olhar_o_remendo() {
+    let (Some(foto), Some(saida)) = (
+        std::env::var_os("VLB_FOTO_TESTE"),
+        std::env::var_os("VLB_SAIDA_TESTE"),
+    ) else {
+        return;
+    };
+    let base = Arc::new(image::open(foto).unwrap().to_rgb8());
+    let remendo = |caixa: Retangulo, dx: f32, dy: f32, difusao: u8| {
+        let doc = Documento::novo(BaseRef::da_imagem(&base));
+        let mut s = Sessao::nova(base.clone(), doc, Historico::novo(), 800);
+        s.pincel.difusao = difusao;
+        s.selecionar(&Forma::Retangulo(caixa), Operacao::Nova);
+        s.difundir_selecao(3);
+        assert!(s.remendar(dx, dy));
+        s.compor()
+    };
+    let caixa = (3540u32, 1520u32, 220u32, 160u32);
+    let recorte = |img: &RgbImage| {
+        image::imageops::crop_imm(img, caixa.0, caixa.1, caixa.2, caixa.3).to_image()
+    };
+    let prega = Retangulo::novo(3632, 1585, 36, 50);
+    let paineis = [
+        recorte(&base),
+        recorte(&remendo(prega, -40.0, 0.0, 5)),
+        recorte(&remendo(prega, -40.0, 0.0, 2)),
+    ];
+    let mut lado = RgbImage::new(caixa.2 * 3 + 20, caixa.3);
+    for (k, p) in paineis.iter().enumerate() {
+        image::imageops::replace(&mut lado, p, (k as u32 * (caixa.2 + 10)) as i64, 0);
+    }
+    let lado = image::imageops::resize(
+        &lado,
+        lado.width() * 2,
+        lado.height() * 2,
+        image::imageops::FilterType::Nearest,
+    );
+    lado.save(saida).unwrap();
+}
+
+#[test]
+#[ignore]
+fn depurar_o_remendo() {
+    let Some(foto) = std::env::var_os("VLB_FOTO_TESTE") else {
+        return;
+    };
+    let base = Arc::new(image::open(foto).unwrap().to_rgb8());
+    let doc = Documento::novo(BaseRef::da_imagem(&base));
+    let mut s = Sessao::nova(base.clone(), doc, Historico::novo(), 800);
+    s.selecionar(
+        &Forma::Retangulo(Retangulo::novo(3632, 1585, 36, 50)),
+        Operacao::Nova,
+    );
+    let antes = s.compor();
+    assert!(s.remendar(-40.0, 0.0));
+    let depois = s.compor();
+    for (x, y) in [
+        (3650u32, 1610u32),
+        (3634, 1610),
+        (3666, 1610),
+        (3650, 1587),
+        (3650, 1633),
+    ] {
+        eprintln!(
+            "({x},{y}) destino {:?} origem {:?} resultado {:?}",
+            antes.get_pixel(x, y).0,
+            antes.get_pixel(x - 40, y).0,
+            depois.get_pixel(x, y).0
+        );
+    }
+}
+
+/// 📏 Remendo e recuperação medidos na foto real: uma mancha escura posta numa
+/// área lisa da bochecha; o retoque bom devolve algo perto da foto sem ela.
+#[test]
+#[ignore]
+fn medir_o_remendo_na_mancha() {
+    let (Some(foto), saida) = (
+        std::env::var_os("VLB_FOTO_TESTE"),
+        std::env::var_os("VLB_SAIDA_TESTE"),
+    ) else {
+        return;
+    };
+    let limpa = image::open(foto).unwrap().to_rgb8();
+    let mut manchada = limpa.clone();
+    let (cx, cy) = (3606i64, 1572i64);
+    for y in cy - 7..cy + 7 {
+        for x in cx - 7..cx + 7 {
+            if (x - cx).pow(2) + (y - cy).pow(2) <= 49 {
+                manchada.put_pixel(x as u32, y as u32, image::Rgb([70, 35, 30]));
+            }
+        }
+    }
+    let base = Arc::new(manchada);
+    let area = Retangulo::novo(3592, 1558, 28, 28);
+    let erro = |img: &RgbImage| -> f32 {
+        let mut soma = 0.0;
+        for y in area.y..area.baixo() {
+            for x in area.x..area.direita() {
+                let (a, b) = (img.get_pixel(x, y).0, limpa.get_pixel(x, y).0);
+                soma += (0..3).map(|c| a[c].abs_diff(b[c]) as f32).sum::<f32>() / 3.0;
+            }
+        }
+        soma / (area.largura * area.altura) as f32
+    };
+    let nova = || {
+        let doc = Documento::novo(BaseRef::da_imagem(&base));
+        Sessao::nova(base.clone(), doc, Historico::novo(), 800)
+    };
+    for d in 1..=7u8 {
+        let mut s = nova();
+        s.pincel.difusao = d;
+        s.selecionar(
+            &Forma::Retangulo(Retangulo::novo(3596, 1562, 20, 20)),
+            Operacao::Nova,
+        );
+        s.difundir_selecao(2);
+        assert!(s.remendar(0.0, -30.0));
+        let img = s.compor();
+        let media = |img: &RgbImage| -> f32 {
+            (3600..3612)
+                .flat_map(|x| (1566..1578).map(move |y| (x, y)))
+                .map(|(x, y)| img.get_pixel(x, y).0[1] as f32)
+                .sum::<f32>()
+                / 144.0
+        };
+        eprintln!(
+            "difusão {d}: erro {:.1}, verde médio {:.1} (limpa {:.1})",
+            erro(&img),
+            media(&img),
+            media(&limpa)
+        );
+    }
+    let mut s = nova();
+    s.selecionar(
+        &Forma::Retangulo(Retangulo::novo(3596, 1562, 20, 20)),
+        Operacao::Nova,
+    );
+    s.difundir_selecao(2);
+    assert!(s.remendar(0.0, -30.0));
+    let remendo = s.compor();
+    let mut c = nova();
+    c.pincel.ferramenta = Ferramenta::Carimbo;
+    c.pincel.raio = 11.0;
+    c.pincel.dureza = 0.5;
+    c.definir_origem(3606.0, 1542.0);
+    c.apertar(3606.0, 1572.0);
+    c.soltar();
+    let carimbo = c.compor();
+    let mut r = nova();
+    r.pincel.ferramenta = Ferramenta::Recuperacao;
+    r.pincel.raio = 11.0;
+    r.pincel.dureza = 0.5;
+    r.definir_origem(3606.0, 1542.0);
+    r.apertar(3606.0, 1572.0);
+    r.soltar();
+    let recuperacao = r.compor();
+    let (e0, e1, e2, e3) = (
+        erro(&base),
+        erro(&carimbo),
+        erro(&remendo),
+        erro(&recuperacao),
+    );
+    eprintln!("erro médio por canal na área: mancha {e0:.1} · carimbo {e1:.1} · remendo {e2:.1} · recuperação {e3:.1}");
+    assert!(e2 < e0 / 3.0 && e3 < e0 / 3.0);
+    if let Some(saida) = saida {
+        let caixa = (3560u32, 1520u32, 100u32, 90u32);
+        let paineis = [&limpa, &*base, &carimbo, &remendo, &recuperacao]
+            .map(|i| image::imageops::crop_imm(i, caixa.0, caixa.1, caixa.2, caixa.3).to_image());
+        let mut lado = RgbImage::new(caixa.2 * 5 + 40, caixa.3);
+        for (k, p) in paineis.iter().enumerate() {
+            image::imageops::replace(&mut lado, p, (k as u32 * (caixa.2 + 10)) as i64, 0);
+        }
+        image::imageops::resize(
+            &lado,
+            lado.width() * 3,
+            lado.height() * 3,
+            image::imageops::FilterType::Nearest,
+        )
+        .save(saida)
+        .unwrap();
+    }
 }

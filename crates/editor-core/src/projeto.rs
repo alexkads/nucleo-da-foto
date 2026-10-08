@@ -67,7 +67,10 @@ use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 ///   `difusao`), os cadeados da camada (`bloqueio`) e o passo `bloqueio`. A
 ///   0.1.115 comporia a máscara sem densidade nem difusão e ignoraria os
 ///   cadeados — recusa com o aviso. Os formatos 1–8 se leem como estão.
-pub const FORMATO: u32 = 9;
+/// - **10** (0.1.117): a camada de ajuste Curvas (`"tipo": "curvas"`, com
+///   os pontos de cada curva). A 0.1.116 não saberia ler o tipo — recusa com o
+///   aviso. Os formatos 1–9 se leem como estão.
+pub const FORMATO: u32 = 10;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -1661,14 +1664,11 @@ mod testes {
         let manifesto = dir.path().join("e1").join(MANIFESTO);
         let texto = std::fs::read_to_string(&manifesto).unwrap().replacen(
             &format!("\"formato\": {FORMATO}"),
-            "\"formato\": 10",
+            &format!("\"formato\": {}", FORMATO + 1),
             1,
         );
         std::fs::write(&manifesto, texto).unwrap();
-        assert!(matches!(
-            p.abrir(&base),
-            Err(ErroDoProjeto::FormatoNovo(10))
-        ));
+        assert!(matches!(p.abrir(&base), Err(ErroDoProjeto::FormatoNovo(f)) if f == FORMATO + 1));
     }
 
     fn walk(pasta: &Path) -> Vec<PathBuf> {

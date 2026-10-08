@@ -20,6 +20,7 @@ pub mod deformar;
 pub mod difusao;
 pub mod documento;
 pub mod historico;
+pub mod liquidificar;
 pub mod mesclagem;
 pub mod operacoes;
 pub mod pincel;
