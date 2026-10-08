@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::documento::{Camada, Mascara};
+use crate::documento::{Camada, Mascara, MascaraNoTile};
 use crate::mesclagem::mesclar_em_camada;
 use crate::pincel::Mudanca;
 use crate::retangulo::Retangulo;
@@ -85,6 +85,109 @@ pub fn apagar(camada: &mut CamadaDePixels, selecao: &Selecao) -> Option<Mudanca>
     })
 }
 
+/// "Bloquear pixels transparentes" depois de um gesto que mexeu nos pixels
+/// (preencher, degradê, lata, remendo): cada pixel volta ao alfa de antes, e
+/// o que era transparente volta como estava — só a cor muda. Devolve a mudança
+/// que sobrou (`None` quando nada mudou de fato).
+pub fn travar_alfa(camada: &mut CamadaDePixels, mudanca: Mudanca) -> Option<Mudanca> {
+    let mut antes = Vec::new();
+    let mut depois = Vec::new();
+    for ((posicao, velho), (_, novo)) in mudanca.antes.into_iter().zip(mudanca.depois) {
+        let corrigido: Option<Tile> = match (&velho, &novo) {
+            (None, _) => None,
+            (Some(v), None) => Some(v.clone()),
+            (Some(v), Some(n)) => {
+                let mut t = n.as_ref().clone();
+                for (px, pv) in t
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(v.as_chunks::<4>().0)
+                {
+                    if pv[3] == 0 {
+                        *px = *pv;
+                    } else {
+                        px[3] = pv[3];
+                    }
+                }
+                Some(Arc::new(t))
+            }
+        };
+        camada.definir(posicao, corrigido.clone());
+        let igual = match (&velho, &corrigido) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        };
+        if !igual {
+            antes.push((posicao, velho));
+            depois.push((posicao, corrigido));
+        }
+    }
+    (!antes.is_empty()).then_some(Mudanca { antes, depois })
+}
+
+/// Inverter (⌘I numa camada de pixels): cada cor vira o negativo dela, na
+/// proporção da seleção (sem seleção, a camada inteira). O alfa fica.
+pub fn inverter_cores(camada: &mut CamadaDePixels, selecao: Option<&Selecao>) -> Option<Mudanca> {
+    let posicoes: Vec<Posicao> = camada.existentes().map(|(p, _)| *p).collect();
+    refazer_tiles(camada, posicoes, |posicao, velho| {
+        let velho = velho?;
+        let m = selecao.map_or(Err(255), |s| s.do_tile(posicao));
+        if let Err(0) = m {
+            return None;
+        }
+        let mut novo = velho.as_ref().clone();
+        for ly in 0..LADO_DO_TILE {
+            for lx in 0..LADO_DO_TILE {
+                let v = mascara(&m, lx, ly) as u32;
+                let i = indice(lx, ly);
+                if v == 0 || novo[i + 3] == 0 {
+                    continue;
+                }
+                for c in &mut novo[i..i + 3] {
+                    let a = *c as u32;
+                    *c = ((a * (255 - v) + (255 - a) * v + 127) / 255) as u8;
+                }
+            }
+        }
+        Some(novo)
+    })
+}
+
+/// "Aplicar máscara": o alfa de cada pixel da camada passa a ser o alfa vezes
+/// o valor da máscara (com a densidade e a difusão) — a camada fica com a
+/// mesma cara sem a máscara. Também o que está fora da foto (a máscara vale
+/// o fundo lá).
+pub fn aplicar_mascara(camada: &mut CamadaDePixels, mascara: &Mascara) -> Option<Mudanca> {
+    let leitor = mascara.leitor();
+    let posicoes: Vec<Posicao> = camada.todos().map(|(p, _)| *p).collect();
+    let dentro: Vec<bool> = posicoes.iter().map(|p| camada.dentro(*p)).collect();
+    let mut k = 0;
+    refazer_tiles(camada, posicoes, |posicao, velho| {
+        let de_dentro = dentro[k];
+        k += 1;
+        let velho = velho?;
+        let m = if de_dentro {
+            leitor.no_tile(posicao)
+        } else {
+            MascaraNoTile::Constante(mascara.tabela_da_densidade()[mascara.fundo as usize])
+        };
+        if let MascaraNoTile::Constante(255) = m {
+            return None;
+        }
+        let mut novo = velho.as_ref().clone();
+        for j in (0..BYTES_DO_TILE).step_by(4) {
+            if novo[j + 3] == 0 {
+                continue;
+            }
+            let v = m.valor(j) as u32;
+            novo[j + 3] = ((novo[j + 3] as u32 * v + 127) / 255) as u8;
+        }
+        Some(novo)
+    })
+}
+
 /// Preenche a seleção com uma cor (⌥Delete), por cima do que a camada tem —
 /// sem seleção, a camada inteira.
 pub fn preencher(
@@ -130,11 +233,11 @@ pub fn preencher(
 /// mesclar não perde conteúdo que ainda pode voltar.
 pub fn mesclar_na_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<Mudanca> {
     let posicoes: Vec<Posicao> = cima.pixels.todos().map(|(p, _)| *p).collect();
-    let mascara = cima.mascara_ativa();
+    let leitor = cima.mascara_ativa().map(|m| m.leitor());
     refazer_tiles(baixo, posicoes, |posicao, velho| {
         let de_cima = cima.pixels.tile(posicao)?;
-        let m = mascara.map(|m| (m.pixels.tile(posicao), m.fundo));
-        if let Some((None, 0)) = m {
+        let m = leitor.as_ref().map(|l| l.no_tile(posicao));
+        if let Some(MascaraNoTile::Constante(0)) = m {
             return None;
         }
         let mut novo = velho.map_or_else(|| vec![0; BYTES_DO_TILE], |t| t.as_ref().clone());
@@ -143,13 +246,9 @@ pub fn mesclar_na_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<
             if c[3] == 0 {
                 continue;
             }
-            let opacidade = match m {
+            let opacidade = match &m {
                 None => cima.opacidade,
-                Some((None, fundo)) => cima.opacidade * fundo as f32 / 255.0,
-                Some((Some(t), fundo)) => {
-                    let v = Mascara::valor_do_pixel(fundo, [t[k], t[k + 1], t[k + 2], t[k + 3]]);
-                    cima.opacidade * v as f32 / 255.0
-                }
+                Some(m) => cima.opacidade * m.valor(k) as f32 / 255.0,
             };
             if opacidade <= 0.0 {
                 continue;
@@ -170,15 +269,15 @@ pub fn mesclar_na_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<
 pub fn mesclar_recortada_na_base(base: &mut CamadaDePixels, cima: &Camada) -> Option<Mudanca> {
     let preparado = cima.ajuste.as_ref().map(|a| a.preparar());
     let posicoes: Vec<Posicao> = base.todos().map(|(p, _)| *p).collect();
-    let mascara = cima.mascara_ativa();
+    let leitor = cima.mascara_ativa().map(|m| m.leitor());
     refazer_tiles(base, posicoes, |posicao, velho| {
         let velho = velho?;
         let de_cima = match preparado {
             Some(_) => None,
             None => Some(cima.pixels.tile(posicao)?),
         };
-        let m = mascara.map(|m| (m.pixels.tile(posicao), m.fundo));
-        if let Some((None, 0)) = m {
+        let m = leitor.as_ref().map(|l| l.no_tile(posicao));
+        if let Some(MascaraNoTile::Constante(0)) = m {
             return None;
         }
         let mut novo = velho.as_ref().clone();
@@ -186,16 +285,9 @@ pub fn mesclar_recortada_na_base(base: &mut CamadaDePixels, cima: &Camada) -> Op
             if novo[k + 3] == 0 {
                 continue;
             }
-            let opacidade = match m {
+            let opacidade = match &m {
                 None => cima.opacidade,
-                Some((None, fundo)) => cima.opacidade * fundo as f32 / 255.0,
-                Some((Some(t), fundo)) => {
-                    let v = Mascara::valor_do_pixel(fundo, [t[k], t[k + 1], t[k + 2], t[k + 3]]);
-                    if v == 0 {
-                        continue;
-                    }
-                    cima.opacidade * v as f32 / 255.0
-                }
+                Some(m) => cima.opacidade * m.valor(k) as f32 / 255.0,
             };
             if opacidade <= 0.0 {
                 continue;
@@ -222,11 +314,11 @@ pub fn mesclar_recortada_na_base(base: &mut CamadaDePixels, cima: &Camada) -> Op
 pub fn ajustar_a_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<Mudanca> {
     let preparado = cima.ajuste.as_ref()?.preparar();
     let posicoes: Vec<Posicao> = baixo.existentes().map(|(p, _)| *p).collect();
-    let mascara = cima.mascara_ativa();
+    let leitor = cima.mascara_ativa().map(|m| m.leitor());
     refazer_tiles(baixo, posicoes, |posicao, velho| {
         let velho = velho?;
-        let m = mascara.map(|m| (m.pixels.tile(posicao), m.fundo));
-        if let Some((None, 0)) = m {
+        let m = leitor.as_ref().map(|l| l.no_tile(posicao));
+        if let Some(MascaraNoTile::Constante(0)) = m {
             return None;
         }
         let mut novo = velho.as_ref().clone();
@@ -234,13 +326,9 @@ pub fn ajustar_a_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<M
             if novo[k + 3] == 0 {
                 continue;
             }
-            let opacidade = match m {
+            let opacidade = match &m {
                 None => cima.opacidade,
-                Some((None, fundo)) => cima.opacidade * fundo as f32 / 255.0,
-                Some((Some(t), fundo)) => {
-                    let v = Mascara::valor_do_pixel(fundo, [t[k], t[k + 1], t[k + 2], t[k + 3]]);
-                    cima.opacidade * v as f32 / 255.0
-                }
+                Some(m) => cima.opacidade * m.valor(k) as f32 / 255.0,
             };
             if opacidade <= 0.0 {
                 continue;

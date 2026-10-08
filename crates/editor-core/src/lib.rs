@@ -17,6 +17,7 @@ pub mod carimbo;
 pub mod composicao;
 pub mod contrato;
 pub mod deformar;
+pub mod difusao;
 pub mod documento;
 pub mod historico;
 pub mod mesclagem;
@@ -32,6 +33,8 @@ pub mod transformar;
 pub mod vista;
 
 #[cfg(test)]
+mod testes_da_etapa_16;
+#[cfg(test)]
 mod testes_da_mascara;
 #[cfg(test)]
 mod testes_das_ferramentas_de_selecao;
@@ -46,14 +49,17 @@ mod testes_fora_da_foto;
 
 pub use ajuste::Ajuste;
 pub use carimbo::AmostraDoCarimbo;
+pub use composicao::Exibicao;
 pub use contrato::VersaoEditada;
 pub use deformar::Malha;
-pub use documento::{BaseRef, Camada, Documento};
+pub use documento::{BaseRef, Bloqueio, Camada, Documento, Mascara};
 pub use historico::{Comando, Historico};
 pub use mesclagem::Modo;
 pub use pincel::{Ferramenta, Pincel};
 pub use retangulo::Retangulo;
 pub use selecao::{Acabamento, Amostra, Estilo, Forma, Molde, Operacao, Selecao};
-pub use sessao::{AmostraDaVarinha, OpcoesDaVarinha, OpcoesDoCarimbo, Sessao, VarinhaRecusada};
+pub use sessao::{
+    AmostraDaVarinha, Cadeado, OpcoesDaVarinha, OpcoesDoCarimbo, Sessao, VarinhaRecusada,
+};
 pub use tiles::{CamadaDePixels, LADO_DO_TILE};
 pub use transformar::{Caixa, Transformacao};

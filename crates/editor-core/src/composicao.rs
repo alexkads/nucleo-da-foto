@@ -14,7 +14,7 @@
 use image::RgbImage;
 
 use crate::ajuste::{Ajuste, Preparado};
-use crate::documento::{Camada, Documento, Mascara, Papel};
+use crate::documento::{Camada, Documento, LeitorDaMascara, MascaraNoTile, Papel};
 use crate::mesclagem::{mesclar, Modo};
 use crate::retangulo::Retangulo;
 use crate::tiles::{indice, retangulo_do_tile, CamadaDePixels, LADO_DO_TILE};
@@ -34,7 +34,7 @@ struct TileNaComposicao<'a> {
     preparado: Option<&'a Preparado>,
     opacidade: f32,
     modo: Modo,
-    mascara: Option<(&'a [u8], u8)>,
+    mascara: Option<MascaraNoTile<'a>>,
     papel: Papel,
 }
 
@@ -42,10 +42,10 @@ impl TileNaComposicao<'_> {
     /// A opacidade no pixel `j` do tile, com a máscara.
     #[inline]
     fn opacidade_em(&self, j: usize) -> f32 {
-        match self.mascara {
+        match &self.mascara {
             None => self.opacidade,
-            Some((m, fundo)) => {
-                let v = Mascara::valor_do_pixel(fundo, [m[j], m[j + 1], m[j + 2], m[j + 3]]);
+            Some(m) => {
+                let v = m.valor(j);
                 if v == 0 {
                     return 0.0;
                 }
@@ -103,6 +103,7 @@ pub fn compor_recorte(base: &RgbImage, doc: &Documento, ret: &Retangulo) -> RgbI
 /// nele (sem pixels ali, ou a máscara esconde o tile inteiro).
 fn tile_na_composicao<'a>(
     c: &'a Camada,
+    leitor: Option<&'a LeitorDaMascara<'a>>,
     preparado: Option<&'a Preparado>,
     posicao: crate::tiles::Posicao,
     papel: Papel,
@@ -111,13 +112,11 @@ fn tile_na_composicao<'a>(
         Some(_) => None,
         None => Some(c.pixels.tile(posicao)?.as_slice()),
     };
-    let (opacidade, mascara) = match c.mascara_ativa() {
+    let (opacidade, mascara) = match leitor.map(|l| l.no_tile(posicao)) {
         None => (c.opacidade, None),
-        Some(m) => match m.pixels.tile(posicao) {
-            Some(mt) => (c.opacidade, Some((mt.as_slice(), m.fundo))),
-            None if m.fundo == 0 => return None,
-            None => (c.opacidade * m.fundo as f32 / 255.0, None),
-        },
+        Some(MascaraNoTile::Constante(0)) => return None,
+        Some(MascaraNoTile::Constante(v)) => (c.opacidade * v as f32 / 255.0, None),
+        Some(m) => (c.opacidade, Some(m)),
     };
     Some(TileNaComposicao {
         pixels,
@@ -168,6 +167,11 @@ fn compor_deslocado(
         .iter()
         .map(|(c, _)| c.ajuste.as_ref().map(Ajuste::preparar))
         .collect();
+    // A máscara de cada uma, pronta (o mapa da difusão, a densidade).
+    let leitores: Vec<Option<LeitorDaMascara>> = camadas
+        .iter()
+        .map(|(c, _)| c.mascara_ativa().map(|m| m.leitor()))
+        .collect();
     let referencia = CamadaDePixels::nova(largura, altura);
     let fonte = base.as_raw();
     let largura_em_bytes = largura as usize * 3;
@@ -178,8 +182,8 @@ fn compor_deslocado(
         // inteiro vale o fundo — e entra na opacidade de uma vez.
         let mut tiles: Vec<TileNaComposicao> = Vec::with_capacity(camadas.len());
         let mut base_presente = false;
-        for ((c, papel), preparado) in camadas.iter().zip(&preparados) {
-            let t = tile_na_composicao(c, preparado.as_ref(), posicao, *papel);
+        for (((c, papel), preparado), leitor) in camadas.iter().zip(&preparados).zip(&leitores) {
+            let t = tile_na_composicao(c, leitor.as_ref(), preparado.as_ref(), posicao, *papel);
             match papel {
                 // Sem a base neste tile, as recortadas nele também somem.
                 Papel::Recortada if !base_presente => continue,
@@ -249,6 +253,80 @@ fn compor_deslocado(
             }
         }
     }
+}
+
+/// O que o palco mostra: a foto, ou a máscara de uma camada — sozinha, em
+/// cinza (⌥ + clique na miniatura da máscara), ou como sobreposição rubi sobre
+/// a foto (`\`). Só a tela: a imagem editada é sempre a foto.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Exibicao {
+    #[default]
+    Foto,
+    SoAMascara(usize),
+    Rubi(usize),
+}
+
+/// O vermelho da sobreposição e quanto ele cobre onde a máscara esconde tudo
+/// (os 50% do Photoshop).
+const RUBI: [f32; 3] = [255.0, 0.0, 0.0];
+const OPACIDADE_DO_RUBI: f32 = 0.5;
+
+/// [`compor_recorte`] com o que o palco mostra.
+pub fn compor_recorte_exibindo(
+    base: &RgbImage,
+    doc: &Documento,
+    ret: &Retangulo,
+    exibicao: Exibicao,
+) -> RgbImage {
+    let mascara = match exibicao {
+        Exibicao::Foto => None,
+        Exibicao::SoAMascara(i) | Exibicao::Rubi(i) => {
+            doc.camadas.get(i).and_then(|c| c.mascara.as_ref())
+        }
+    };
+    let Some(mascara) = mascara else {
+        return compor_recorte(base, doc, ret);
+    };
+    let ret = ret.limitado(base.width(), base.height());
+    let valores = valores_da_mascara(mascara, &ret);
+    if let Exibicao::SoAMascara(_) = exibicao {
+        return RgbImage::from_fn(ret.largura, ret.altura, |x, y| {
+            let v = valores[(y * ret.largura + x) as usize];
+            image::Rgb([v, v, v])
+        });
+    }
+    let mut foto = compor_recorte(base, doc, &ret);
+    for (p, v) in foto.pixels_mut().zip(valores) {
+        let a = OPACIDADE_DO_RUBI * (255 - v) as f32 / 255.0;
+        if a > 0.0 {
+            for (canal, rubi) in p.0.iter_mut().zip(RUBI) {
+                *canal = (*canal as f32 + (rubi - *canal as f32) * a).round() as u8;
+            }
+        }
+    }
+    foto
+}
+
+/// O valor da máscara (com a densidade e a difusão) em cada pixel de `ret`,
+/// linha a linha.
+fn valores_da_mascara(mascara: &crate::documento::Mascara, ret: &Retangulo) -> Vec<u8> {
+    let leitor = mascara.leitor();
+    let mut valores = vec![0u8; (ret.largura * ret.altura) as usize];
+    let referencia = CamadaDePixels::nova(mascara.pixels.largura(), mascara.pixels.altura());
+    for posicao in referencia.tiles_do_retangulo(ret) {
+        let no_tile = leitor.no_tile(posicao);
+        let pedaco = interseccao(
+            &retangulo_do_tile(posicao, mascara.pixels.largura(), mascara.pixels.altura()),
+            ret,
+        );
+        for y in pedaco.y..pedaco.baixo() {
+            for x in pedaco.x..pedaco.direita() {
+                valores[((y - ret.y) * ret.largura + x - ret.x) as usize] =
+                    no_tile.valor(indice(x % LADO_DO_TILE, y % LADO_DO_TILE));
+            }
+        }
+    }
+    valores
 }
 
 /// A parte comum de dois retângulos.

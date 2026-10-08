@@ -505,7 +505,7 @@ fn o_recorte_grava_e_reabre_no_formato_8() {
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("e1/projeto.json")).unwrap())
             .unwrap();
-    assert_eq!(json["formato"], 8);
+    assert_eq!(json["formato"], crate::projeto::FORMATO, "do 8 em diante");
     assert_eq!(json["camadas"][2]["recortada"], true);
     assert!(json["camadas"][1].get("recortada").is_none());
     projeto(dir.path()).coletar(1).unwrap();

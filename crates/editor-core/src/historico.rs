@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use crate::ajuste::Ajuste;
-use crate::documento::{Camada, Documento, Mascara};
+use crate::documento::{Bloqueio, Camada, Documento, Mascara};
 use crate::mesclagem::Modo;
 use crate::pincel::Mudanca;
 use crate::retangulo::Retangulo;
@@ -53,6 +53,12 @@ pub enum Comando {
         camada: usize,
         antes: bool,
         depois: bool,
+    },
+    /// Os cadeados da camada antes e depois.
+    Bloqueio {
+        camada: usize,
+        antes: Bloqueio,
+        depois: Bloqueio,
     },
     Opacidade {
         camada: usize,
@@ -126,14 +132,37 @@ impl Comando {
                 antes,
                 depois,
             } => {
-                let acao = match (antes, depois) {
-                    (None, Some(m)) if m.fundo == 0 => "Máscara que esconde tudo em",
-                    (None, _) => "Máscara em",
-                    (Some(_), None) => "Excluir a máscara de",
-                    (_, Some(m)) if m.ativa => "Ligar a máscara de",
-                    _ => "Desligar a máscara de",
-                };
-                format!("{acao} {}", nome(doc, *camada))
+                let nome = nome(doc, *camada);
+                match (antes.as_deref(), depois.as_deref()) {
+                    (None, Some(m)) if m.fundo == 0 => {
+                        format!("Máscara que esconde tudo em {nome}")
+                    }
+                    (None, _) => format!("Máscara em {nome}"),
+                    (Some(_), None) => format!("Excluir a máscara de {nome}"),
+                    (Some(a), Some(d)) if a.ativa != d.ativa => {
+                        let acao = if d.ativa { "Ligar" } else { "Desligar" };
+                        format!("{acao} a máscara de {nome}")
+                    }
+                    (Some(a), Some(d)) if a.vinculada != d.vinculada => {
+                        let acao = if d.vinculada {
+                            "Vincular"
+                        } else {
+                            "Desvincular"
+                        };
+                        format!("{acao} a máscara de {nome}")
+                    }
+                    (Some(a), Some(d)) if a.densidade != d.densidade => format!(
+                        "Densidade da máscara de {nome} ({}%)",
+                        (d.densidade * 100.0).round()
+                    ),
+                    (Some(a), Some(d)) if a.difusao != d.difusao => {
+                        format!("Difusão da máscara de {nome} ({:.1} px)", d.difusao)
+                    }
+                    (Some(a), Some(d)) if a.fundo != d.fundo => {
+                        format!("Inverter a máscara de {nome}")
+                    }
+                    _ => format!("Máscara de {nome}"),
+                }
             }
             Comando::Ajuste { camada, depois, .. } => {
                 format!("{} em {}", depois.nome(), nome(doc, *camada))
@@ -143,6 +172,13 @@ impl Comando {
                     format!("Criar máscara de corte em {}", nome(doc, *camada))
                 } else {
                     format!("Liberar máscara de corte de {}", nome(doc, *camada))
+                }
+            }
+            Comando::Bloqueio { camada, depois, .. } => {
+                if depois.algum() {
+                    format!("Bloquear {}", nome(doc, *camada))
+                } else {
+                    format!("Desbloquear {}", nome(doc, *camada))
                 }
             }
             Comando::Visibilidade { camada, depois, .. } => format!(
@@ -202,6 +238,7 @@ impl Comando {
             | Comando::Ajuste { camada, .. }
             | Comando::Visibilidade { camada, .. }
             | Comando::Recorte { camada, .. }
+            | Comando::Bloqueio { camada, .. }
             | Comando::Opacidade { camada, .. }
             | Comando::Modo { camada, .. }
             | Comando::Renomear { camada, .. } => *camada,
@@ -324,6 +361,10 @@ impl Comando {
                         alvo.definir(*posicao, tile.clone());
                         sujo = sujo.uniao(&retangulo_do_tile(*posicao, largura, altura));
                     }
+                    // A difusão leva a mudança da máscara além dos tiles.
+                    if let Some(m) = c.mascara.as_ref().filter(|_| *na_mascara) {
+                        sujo = m.alcance(&sujo);
+                    }
                 }
                 sujo
             }
@@ -362,6 +403,17 @@ impl Comando {
             } => mexer(doc, *camada, |c| {
                 c.recortada = if para_frente { *depois } else { *antes }
             }),
+            Comando::Bloqueio {
+                camada,
+                antes,
+                depois,
+            } => {
+                if let Some(c) = doc.camadas.get_mut(*camada) {
+                    c.bloqueio = if para_frente { *depois } else { *antes };
+                }
+                // O cadeado não muda pixel nenhum.
+                Retangulo::default()
+            }
             Comando::Opacidade {
                 camada,
                 antes,

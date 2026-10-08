@@ -123,6 +123,43 @@ impl Conteudo {
         Some(Self { caixa, rgba })
     }
 
+    /// O que a camada tem dentro de `caixa` (vezes a seleção, se houver),
+    /// com a caixa exata pedida — o transparente de dentro conta. É o par do
+    /// Deformar: a máscara vinculada se deforma pela malha da camada.
+    pub fn da_caixa(camada: &CamadaDePixels, selecao: Option<&Selecao>, caixa: Caixa) -> Self {
+        let valor = |x: i64, y: i64| match selecao {
+            None => 255,
+            Some(_) if x < 0 || y < 0 => 0,
+            Some(s) => s.valor(x as u32, y as u32),
+        };
+        let mut rgba = Vec::with_capacity((caixa.largura * caixa.altura * 4) as usize);
+        for y in caixa.y as i64..caixa.baixo() as i64 {
+            for x in caixa.x as i64..caixa.direita() as i64 {
+                let mut p = camada.pixel_em(x, y);
+                let m = valor(x, y) as u32;
+                p[3] = ((p[3] as u32 * m + 127) / 255) as u8;
+                rgba.extend_from_slice(&p);
+            }
+        }
+        Self { caixa, rgba }
+    }
+
+    /// Uma imagem RGBA (alfa reto) com o canto em `(x, y)` — o que veio de
+    /// fora (área de transferência do sistema, arquivo importado).
+    pub fn da_imagem(imagem: &image::RgbaImage, x: i32, y: i32) -> Self {
+        Self {
+            caixa: Caixa::nova(x, y, imagem.width(), imagem.height()),
+            rgba: imagem.as_raw().clone(),
+        }
+    }
+
+    /// Os pixels como imagem RGBA (alfa reto), do tamanho da caixa — para a
+    /// área de transferência do sistema.
+    pub fn imagem(&self) -> image::RgbaImage {
+        image::RgbaImage::from_raw(self.caixa.largura, self.caixa.altura, self.rgba.clone())
+            .unwrap_or_default()
+    }
+
     /// O pixel `(x, y)` da caixa, **pré-multiplicado**, em `0..=1`; fora é
     /// transparente.
     fn premultiplicado(&self, x: i64, y: i64) -> [f32; 4] {
@@ -347,9 +384,28 @@ pub fn desenhar(
     largura: u32,
     altura: u32,
 ) -> CamadaDePixels {
+    desenhar_na_referencia(conteudo, &conteudo.caixa, t, largura, altura)
+}
+
+/// O mesmo, com a transformação medida na caixa `referencia` (o centro e as
+/// alças dela), e não na do conteúdo — a máscara vinculada anda pela conta
+/// da camada, mesmo cobrindo outro pedaço da foto.
+pub fn desenhar_na_referencia(
+    conteudo: &Conteudo,
+    referencia: &Caixa,
+    t: &Transformacao,
+    largura: u32,
+    altura: u32,
+) -> CamadaDePixels {
     let mut saida = CamadaDePixels::nova(largura, altura);
     let caixa = conteudo.caixa;
-    let cantos = t.cantos(&caixa);
+    let cantos = [
+        (caixa.x as f32, caixa.y as f32),
+        (caixa.direita() as f32, caixa.y as f32),
+        (caixa.direita() as f32, caixa.baixo() as f32),
+        (caixa.x as f32, caixa.baixo() as f32),
+    ]
+    .map(|(x, y)| t.aplicar(referencia, x, y));
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for (x, y) in cantos {
         x0 = x0.min(x);
@@ -369,7 +425,7 @@ pub fn desenhar(
     }
     // A inversa em coordenadas da caixa: (u, v) = c + a·x + b·y.
     let em = |x: f32, y: f32| {
-        let (u, v) = t.inversa(&caixa, x, y);
+        let (u, v) = t.inversa(referencia, x, y);
         (u - caixa.x as f32, v - caixa.y as f32)
     };
     let c = em(0.0, 0.0);
@@ -436,6 +492,56 @@ pub fn desenhar(
     };
     for (posicao, tile) in resultados.into_iter().flatten() {
         saida.definir(posicao, Some(std::sync::Arc::new(tile)));
+    }
+    saida
+}
+
+/// `camada` sem o que ela tem dentro de `caixa` (vezes a seleção) — o que
+/// fica quando o pedaço da caixa sai para o Deformar (ver
+/// [`Conteudo::da_caixa`]).
+pub fn sem_a_caixa(
+    camada: &CamadaDePixels,
+    selecao: Option<&Selecao>,
+    caixa: Caixa,
+) -> CamadaDePixels {
+    let mut saida = camada.clone();
+    let lado = LADO_DO_TILE as i64;
+    let mut tocados = std::collections::BTreeSet::new();
+    for (posicao, tile) in camada.todos() {
+        let (tx, ty) = origem_do_tile(*posicao);
+        let x0 = (caixa.x as i64).max(tx);
+        let x1 = (caixa.direita() as i64).min(tx + lado);
+        let y0 = (caixa.y as i64).max(ty);
+        let y1 = (caixa.baixo() as i64).min(ty + lado);
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        let mut novo: Option<Vec<u8>> = None;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = indice((x - tx) as u32, (y - ty) as u32);
+                if tile[i + 3] == 0 {
+                    continue;
+                }
+                let s = match selecao {
+                    None => 255,
+                    Some(_) if x < 0 || y < 0 => 0,
+                    Some(sel) => sel.valor(x as u32, y as u32),
+                } as u32;
+                if s == 0 {
+                    continue;
+                }
+                let t = novo.get_or_insert_with(|| tile.as_ref().clone());
+                t[i + 3] = ((t[i + 3] as u32 * (255 - s) + 127) / 255) as u8;
+            }
+        }
+        if let Some(t) = novo {
+            saida.definir(*posicao, Some(std::sync::Arc::new(t)));
+            tocados.insert(*posicao);
+        }
+    }
+    for posicao in tocados {
+        saida.enxugar(posicao);
     }
     saida
 }

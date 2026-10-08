@@ -15,9 +15,9 @@ use std::sync::Arc;
 use image::RgbImage;
 
 use crate::ajuste::Ajuste;
-use crate::composicao;
+use crate::composicao::{self, Exibicao};
 use crate::deformar::{self, Malha};
-use crate::documento::{Camada, Documento, Mascara, NOME_DA_FOTOGRAFIA};
+use crate::documento::{Bloqueio, Camada, Documento, Mascara, NOME_DA_FOTOGRAFIA};
 use crate::historico::{Comando, Historico};
 use crate::mesclagem::Modo;
 use crate::operacoes;
@@ -31,6 +31,15 @@ use crate::vista::Vista;
 
 /// A tolerância da lata de tinta — o padrão do Photoshop.
 pub const TOLERANCIA_DA_LATA: u8 = 32;
+
+/// Um cadeado do painel Camadas ("Bloquear:").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cadeado {
+    Transparencia,
+    Pixels,
+    Posicao,
+    Tudo,
+}
 
 /// As opções do carimbo (S) na barra do Photoshop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +123,7 @@ pub struct PedidoDeLupa {
     pub fator: u32,
     base: Arc<RgbImage>,
     doc: Documento,
+    exibicao: Exibicao,
 }
 
 impl PedidoDeLupa {
@@ -121,7 +131,13 @@ impl PedidoDeLupa {
     pub fn montar(self) -> (u64, Vista) {
         (
             self.id,
-            Vista::da_regiao(&self.base, &self.doc, &self.regiao, self.fator),
+            Vista::da_regiao_exibindo(
+                &self.base,
+                &self.doc,
+                &self.regiao,
+                self.fator,
+                self.exibicao,
+            ),
         )
     }
 }
@@ -169,8 +185,11 @@ pub struct Sessao {
     /// Alinhado (o padrão do Photoshop): o primeiro traço depois de escolher a
     /// origem fixa a distância, e os seguintes copiam à mesma distância.
     distancia_do_carimbo: Option<(f32, f32)>,
-    /// A camada (e se é a máscara dela) antes de o arrasto do Mover começar.
-    movendo: Option<(usize, bool, crate::tiles::CamadaDePixels)>,
+    /// A camada (e o que anda dela) antes de o arrasto do Mover começar.
+    movendo: Option<Movendo>,
+    /// A máscara da escolhida quando o arrasto da densidade ou da difusão
+    /// começou — o passo do desfazer é o arrasto inteiro.
+    mascara_antes: Option<(usize, Mascara)>,
     /// O conteúdo solto da camada (⌘T, ou o Mover com seleção).
     flutuante: Option<Flutuante>,
     /// A seleção de quando o arrasto do contorno começou (arrastar por dentro
@@ -180,6 +199,26 @@ pub struct Sessao {
     fim_do_ultimo_traco: Option<(f32, f32)>,
     /// "Transformar seleção" em curso: só o contorno, sem os pixels.
     selecao_solta: Option<SelecaoSolta>,
+}
+
+/// O arrasto do Mover sem seleção: a camada e cada alvo que anda (os pixels,
+/// a máscara vinculada), como era no começo.
+struct Movendo {
+    camada: usize,
+    alvos: Vec<(bool, CamadaDePixels)>,
+}
+
+/// O par do conteúdo solto: a máscara vinculada (ou os pixels, quando o ⌘T é
+/// na máscara), que anda pela mesma conta.
+struct Par {
+    na_mascara: bool,
+    original: CamadaDePixels,
+    /// O ⌘T: o conteúdo inteiro do par, transformado na caixa da camada.
+    fundo: CamadaDePixels,
+    conteudo: Conteudo,
+    /// O Deformar: o par recortado na caixa da camada (a malha só existe
+    /// nela), e o que fica fora. Montado ao entrar no Deformar.
+    na_caixa: Option<(CamadaDePixels, Conteudo)>,
 }
 
 /// O conteúdo de uma camada tirado dela para ser transformado.
@@ -199,6 +238,8 @@ struct Flutuante {
     malha: Option<(Malha, Malha)>,
     /// Onde a camada mudou até agora (para a vista).
     area: Retangulo,
+    /// O que anda junto (a máscara vinculada).
+    par: Option<Par>,
 }
 
 impl Sessao {
@@ -231,6 +272,7 @@ impl Sessao {
             origem: None,
             distancia_do_carimbo: None,
             movendo: None,
+            mascara_antes: None,
             flutuante: None,
             contorno_movendo: None,
             fim_do_ultimo_traco: None,
@@ -302,6 +344,7 @@ impl Sessao {
             fator,
             base: self.base.clone(),
             doc: self.doc.clone(),
+            exibicao: self.vista.exibicao(),
         }
     }
 
@@ -326,6 +369,72 @@ impl Sessao {
         self.lupa_pedida = None;
     }
 
+    // ----------------------------------------------------------- exibição
+
+    /// O que o palco mostra agora.
+    pub fn exibicao(&self) -> Exibicao {
+        self.vista.exibicao()
+    }
+
+    fn exibir(&mut self, exibicao: Exibicao) {
+        self.vista.exibir(&self.base, &self.doc, exibicao);
+        if let Some(lupa) = self.lupa.as_mut() {
+            lupa.exibir(&self.base, &self.doc, exibicao);
+        }
+        // Uma lupa a caminho foi montada com a exibição de antes.
+        if let Some((_, desde)) = self.lupa_pedida.as_mut() {
+            *desde = Retangulo::inteiro(self.doc.largura(), self.doc.altura());
+        }
+        self.versao += 1;
+    }
+
+    /// ⌥ + clique na miniatura da máscara: o palco mostra só ela, em cinza, e
+    /// o pincel vai para ela; de novo, volta a foto. Falso sem máscara.
+    pub fn alternar_so_a_mascara(&mut self, indice: usize) -> bool {
+        if self.exibicao() == Exibicao::SoAMascara(indice) {
+            self.exibir(Exibicao::Foto);
+            return true;
+        }
+        if !self.escolher_mascara(indice) {
+            return false;
+        }
+        self.exibir(Exibicao::SoAMascara(indice));
+        true
+    }
+
+    /// `\`: a máscara da escolhida como sobreposição rubi (vermelho onde
+    /// esconde), ou de volta à foto. Falso sem máscara.
+    pub fn alternar_rubi(&mut self) -> bool {
+        let indice = self.ativa();
+        if self.exibicao() == Exibicao::Rubi(indice) {
+            self.exibir(Exibicao::Foto);
+            return true;
+        }
+        if self.doc.camadas[indice].mascara.is_none() {
+            return false;
+        }
+        self.exibir(Exibicao::Rubi(indice));
+        true
+    }
+
+    /// A máscara à vista só vale para a escolhida, enquanto ela tiver máscara:
+    /// escolher outra camada, ou a máscara sumir, volta à foto.
+    fn conferir_a_exibicao(&mut self) {
+        let indice = match self.exibicao() {
+            Exibicao::Foto => return,
+            Exibicao::SoAMascara(i) | Exibicao::Rubi(i) => i,
+        };
+        let vale = indice == self.ativa()
+            && self
+                .doc
+                .camadas
+                .get(indice)
+                .is_some_and(|c| c.mascara.is_some());
+        if !vale {
+            self.exibir(Exibicao::Foto);
+        }
+    }
+
     // ------------------------------------------------------------- camadas
 
     /// A camada onde o pincel pinta.
@@ -343,6 +452,7 @@ impl Sessao {
         self.soltar();
         self.confirmar_opacidade();
         self.confirmar_ajuste();
+        self.confirmar_mascara();
         self.terminar_de_mover();
         self.aplicar_transformacao();
         self.terminar_de_mover_o_contorno();
@@ -357,6 +467,7 @@ impl Sessao {
         }
         // A camada de ajuste pinta na máscara.
         self.cores_em_cinza_na_mascara();
+        self.conferir_a_exibicao();
     }
 
     /// Escolhe a máscara da camada `indice` para pintar. Falso sem máscara.
@@ -375,6 +486,7 @@ impl Sessao {
             self.na_mascara = true;
         }
         self.cores_em_cinza_na_mascara();
+        self.conferir_a_exibicao();
         true
     }
 
@@ -415,6 +527,45 @@ impl Sessao {
     fn pode_pintar(&self) -> bool {
         let camada = self.camada_ativa();
         camada.visivel && (camada.ajuste.is_none() || camada.mascara.is_some())
+    }
+
+    /// Os pixels da escolhida estão trancados ("Bloquear pixels") e o gesto
+    /// iria neles — a máscara continua aberta.
+    pub fn pixels_bloqueados(&self) -> bool {
+        !self.na_mascara() && self.camada_ativa().bloqueio.pixels
+    }
+
+    /// A escolhida não anda ("Bloquear posição").
+    pub fn posicao_bloqueada(&self) -> bool {
+        self.camada_ativa().bloqueio.posicao
+    }
+
+    /// A tinta na escolhida não mexe na transparência ("Bloquear pixels
+    /// transparentes"), e não se pinta onde ela é transparente.
+    pub fn alfa_travado(&self) -> bool {
+        !self.na_mascara() && self.camada_ativa().bloqueio.transparencia
+    }
+
+    /// O outro alvo que anda com a escolhida: a máscara, quando vinculada (ou
+    /// os pixels, quando o gesto é na máscara). `Some(na_mascara)` do par.
+    fn par_vinculado(&self) -> Option<bool> {
+        let camada = self.camada_ativa();
+        let mascara = camada.mascara.as_ref()?;
+        (mascara.vinculada && camada.ajuste.is_none()).then_some(!self.na_mascara())
+    }
+
+    /// Onde a foto muda quando os pixels do alvo mudam em `sujo` — na
+    /// máscara com difusão, o desfoque leva a mudança além do traço.
+    fn alcance_no_alvo(&self, camada: usize, na_mascara: bool, sujo: Retangulo) -> Retangulo {
+        match self
+            .doc
+            .camadas
+            .get(camada)
+            .and_then(|c| c.mascara.as_ref())
+        {
+            Some(m) if na_mascara => m.alcance(&sujo),
+            _ => sujo,
+        }
     }
 
     // ------------------------------------------------------------ ajuste
@@ -505,6 +656,7 @@ impl Sessao {
         self.seguir_o_passo(&comando, true);
         self.hist.registrar(comando);
         self.refazer_a_vista(&sujo);
+        self.conferir_a_exibicao();
     }
 
     /// A escolha vai para onde o passo mexeu — a camada, e a máscara dela
@@ -614,6 +766,208 @@ impl Sessao {
         let sujo = comando.aplicar(&mut self.doc, true);
         self.hist.registrar(comando);
         self.refazer_a_vista(&sujo);
+        true
+    }
+
+    /// Muda a máscara da camada `indice` num passo, sem mudar o que está
+    /// escolhido (como a visibilidade). Falso sem máscara ou sem mudança.
+    fn mudar_mascara_de(&mut self, indice: usize, mudar: impl FnOnce(&Mascara) -> Mascara) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let Some(antes) = self.doc.camadas.get(indice).and_then(|c| c.mascara.clone()) else {
+            return false;
+        };
+        let depois = mudar(&antes);
+        if depois == antes {
+            return false;
+        }
+        let comando = Comando::Mascara {
+            camada: indice,
+            antes: Some(Box::new(antes)),
+            depois: Some(Box::new(depois)),
+        };
+        let sujo = comando.aplicar(&mut self.doc, true);
+        self.hist.registrar(comando);
+        self.refazer_a_vista(&sujo);
+        true
+    }
+
+    /// A corrente entre a miniatura da camada e a da máscara: liga ou
+    /// desliga o vínculo.
+    pub fn alternar_vinculo_de(&mut self, indice: usize) -> bool {
+        self.mudar_mascara_de(indice, |m| {
+            let mut nova = m.clone();
+            nova.vinculada = !m.vinculada;
+            nova
+        })
+    }
+
+    /// "Inverter" nas Propriedades da máscara (e ⌘I com a máscara escolhida).
+    pub fn inverter_mascara_de(&mut self, indice: usize) -> bool {
+        self.mudar_mascara_de(indice, Mascara::invertida)
+    }
+
+    /// ⌘I: na máscara escolhida, inverte a máscara; numa camada de pixels, o
+    /// negativo das cores (na seleção, se houver). Falso com os pixels
+    /// bloqueados ou sem nada para inverter.
+    pub fn inverter(&mut self) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let camada = self.ativa();
+        if self.na_mascara() {
+            return self.inverter_mascara_de(camada);
+        }
+        if !self.pode_pintar() || self.pixels_bloqueados() {
+            return false;
+        }
+        let selecao = self.selecao.clone();
+        let mudanca =
+            operacoes::inverter_cores(&mut self.doc.camadas[camada].pixels, selecao.as_deref());
+        let Some(mudanca) = mudanca else {
+            return false;
+        };
+        self.executar_um_ou_varios(
+            "Inverter",
+            vec![Comando::Traco {
+                camada,
+                na_mascara: false,
+                mudanca,
+            }],
+        );
+        true
+    }
+
+    /// "Aplicar máscara": a máscara entra no alfa da camada e sai — a foto
+    /// fica igual. Um passo. Falso sem máscara, numa camada de ajuste ou com
+    /// os pixels bloqueados.
+    pub fn aplicar_mascara(&mut self) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let indice = self.ativa();
+        let camada = &self.doc.camadas[indice];
+        if camada.ajuste.is_some() || camada.bloqueio.pixels {
+            return false;
+        }
+        let Some(mascara) = camada.mascara.clone() else {
+            return false;
+        };
+        let mut pixels = camada.pixels.clone();
+        let mut passos = Vec::new();
+        if mascara.ativa {
+            if let Some(mudanca) = operacoes::aplicar_mascara(&mut pixels, &mascara) {
+                passos.push(Comando::Traco {
+                    camada: indice,
+                    na_mascara: false,
+                    mudanca,
+                });
+            }
+        }
+        passos.push(Comando::Mascara {
+            camada: indice,
+            antes: Some(Box::new(mascara)),
+            depois: None,
+        });
+        // Os passos são aplicados por `executar`: os pixels ainda estão como
+        // eram no documento.
+        self.executar(Comando::Varios {
+            nome: "Aplicar máscara".into(),
+            passos,
+        });
+        true
+    }
+
+    /// O slider da densidade (0–1) da máscara da escolhida andou: a foto
+    /// muda na hora, o histórico só no [`Self::confirmar_mascara`].
+    pub fn mover_densidade(&mut self, valor: f32) {
+        self.mover_propriedade_da_mascara(|m| m.densidade = valor.clamp(0.0, 1.0));
+    }
+
+    /// O slider da difusão (px) da máscara da escolhida andou.
+    pub fn mover_difusao(&mut self, px: f32) {
+        self.mover_propriedade_da_mascara(|m| {
+            m.difusao = px.clamp(0.0, crate::difusao::DIFUSAO_MAXIMA)
+        });
+    }
+
+    fn mover_propriedade_da_mascara(&mut self, mudar: impl FnOnce(&mut Mascara)) {
+        self.soltar();
+        let indice = self.ativa();
+        if self
+            .mascara_antes
+            .as_ref()
+            .is_some_and(|(i, _)| *i != indice)
+        {
+            self.confirmar_mascara();
+        }
+        let Some(atual) = self.doc.camadas[indice].mascara.clone() else {
+            return;
+        };
+        let mut nova = atual.clone();
+        mudar(&mut nova);
+        self.mascara_antes.get_or_insert((indice, atual.clone()));
+        if nova == atual {
+            return;
+        }
+        let area_antes = self.doc.camadas[indice].area();
+        self.doc.camadas[indice].mascara = Some(nova);
+        let area = area_antes.uniao(&self.doc.camadas[indice].area());
+        // Em rascunho durante o arrasto (a difusão desfoca a máscara inteira
+        // a cada valor); exata ao soltar.
+        self.versao += 1;
+        self.vista.rascunhar(&self.base, &self.doc, &area);
+        if let Some(lupa) = self.lupa.as_mut() {
+            lupa.rascunhar(&self.base, &self.doc, &area);
+        }
+        if let Some((_, desde)) = self.lupa_pedida.as_mut() {
+            *desde = desde.uniao(&area);
+        }
+        self.rascunho = self.rascunho.uniao(&area);
+    }
+
+    /// O arrasto da densidade ou da difusão acabou.
+    pub fn confirmar_mascara(&mut self) {
+        let Some((camada, antes)) = self.mascara_antes.take() else {
+            return;
+        };
+        let rascunho = std::mem::take(&mut self.rascunho);
+        self.refazer_a_vista(&rascunho);
+        let Some(depois) = self.doc.camadas.get(camada).and_then(|c| c.mascara.clone()) else {
+            return;
+        };
+        if antes != depois {
+            self.hist.registrar(Comando::Mascara {
+                camada,
+                antes: Some(Box::new(antes)),
+                depois: Some(Box::new(depois)),
+            });
+        }
+    }
+
+    /// Um cadeado do painel Camadas na camada `indice`. "Tudo" liga os três
+    /// (ou desliga, se já estavam). Não muda o que está escolhido.
+    pub fn alternar_bloqueio_de(&mut self, indice: usize, cadeado: Cadeado) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let Some(antes) = self.doc.camadas.get(indice).map(|c| c.bloqueio) else {
+            return false;
+        };
+        let mut depois = antes;
+        match cadeado {
+            Cadeado::Transparencia => depois.transparencia = !antes.transparencia,
+            Cadeado::Pixels => depois.pixels = !antes.pixels,
+            Cadeado::Posicao => depois.posicao = !antes.posicao,
+            Cadeado::Tudo => {
+                depois = if antes.tudo() {
+                    Bloqueio::default()
+                } else {
+                    Bloqueio::TUDO
+                }
+            }
+        }
+        let comando = Comando::Bloqueio {
+            camada: indice,
+            antes,
+            depois,
+        };
+        comando.aplicar(&mut self.doc, true);
+        self.hist.registrar(comando);
+        self.versao += 1;
         true
     }
 
@@ -894,7 +1248,7 @@ impl Sessao {
         self.fechar_o_que_esta_aberto();
         let camada = self.ativa();
         let antes = self.doc.camadas[camada].modo;
-        if antes != modo {
+        if antes != modo && !self.doc.camadas[camada].bloqueio.tudo() {
             self.executar(Comando::Modo {
                 camada,
                 antes,
@@ -1055,7 +1409,12 @@ impl Sessao {
         peso: &dyn Fn(u32, u32) -> u8,
     ) -> bool {
         self.fechar_o_que_esta_aberto();
-        if camada >= self.doc.camadas.len() {
+        if self
+            .doc
+            .camadas
+            .get(camada)
+            .is_none_or(|c| c.bloqueio.pixels)
+        {
             return false;
         }
         let mudanca = operacoes::colar(&mut self.doc.camadas[camada].pixels, ret, rgba, peso);
@@ -1070,18 +1429,22 @@ impl Sessao {
     pub fn comecar_a_mover(&mut self) -> bool {
         self.fechar_o_que_esta_aberto();
         let ativa = self.ativa();
-        if !self.pode_pintar() {
+        if !self.pode_pintar() || self.posicao_bloqueada() {
             return false;
         }
         if self.selecao.is_some() {
             return self.comecar_a_transformar();
         }
         let na_mascara = self.na_mascara();
-        self.movendo = Some((
-            ativa,
-            na_mascara,
-            self.doc.camadas[ativa].alvo(na_mascara).clone(),
-        ));
+        let mut alvos = vec![(na_mascara, self.doc.camadas[ativa].alvo(na_mascara).clone())];
+        // A máscara vinculada anda junto, inteira.
+        if let Some(par) = self.par_vinculado() {
+            alvos.push((par, self.doc.camadas[ativa].alvo(par).clone()));
+        }
+        self.movendo = Some(Movendo {
+            camada: ativa,
+            alvos,
+        });
         true
     }
 
@@ -1091,15 +1454,36 @@ impl Sessao {
             self.definir_transformacao(Transformacao::deslocamento(dx as f32, dy as f32));
             return;
         }
-        let Some((camada, na_mascara, original)) = self.movendo.as_ref() else {
+        let Some(movendo) = self.movendo.as_ref() else {
             return;
         };
-        let (camada, na_mascara) = (*camada, *na_mascara);
-        let nova = operacoes::deslocada(original, dx, dy);
-        let antes = self.doc.camadas[camada].area();
-        *self.doc.camadas[camada].alvo_mut(na_mascara) = nova;
-        let sujo = antes.uniao(&self.doc.camadas[camada].area());
+        let camada = movendo.camada;
+        let novos: Vec<(bool, CamadaDePixels)> = movendo
+            .alvos
+            .iter()
+            .map(|(na_mascara, original)| (*na_mascara, operacoes::deslocada(original, dx, dy)))
+            .collect();
+        let mut sujo = self.doc.camadas[camada].area();
+        for (na_mascara, nova) in novos {
+            sujo = sujo.uniao(&self.trocar_alvo(camada, na_mascara, nova));
+        }
+        sujo = sujo.uniao(&self.doc.camadas[camada].area());
         self.refazer_a_vista(&sujo);
+    }
+
+    /// Troca os pixels de um alvo da camada e devolve onde a foto pode ter
+    /// mudado (sem refazer a vista).
+    fn trocar_alvo(&mut self, camada: usize, na_mascara: bool, nova: CamadaDePixels) -> Retangulo {
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let area = |c: &CamadaDePixels| {
+            c.existentes().fold(Retangulo::default(), |a, (p, _)| {
+                a.uniao(&crate::tiles::retangulo_do_tile(*p, largura, altura))
+            })
+        };
+        let alvo = self.doc.camadas[camada].alvo_mut(na_mascara);
+        let sujo = area(alvo).uniao(&area(&nova));
+        *alvo = nova;
+        self.alcance_no_alvo(camada, na_mascara, sujo)
     }
 
     /// O arrasto acabou: o deslocamento vira um passo do desfazer.
@@ -1107,25 +1491,32 @@ impl Sessao {
         if self.flutuante.is_some() {
             return self.aplicar_transformacao();
         }
-        let Some((camada, na_mascara, original)) = self.movendo.take() else {
+        let Some(movendo) = self.movendo.take() else {
             return false;
         };
-        let mudanca = operacoes::diferenca(&original, self.doc.camadas[camada].alvo(na_mascara));
-        match mudanca {
-            // "Mover" no Histórico, e não "Pincel" (o nome de um traço).
-            Some(m) => {
-                self.hist.registrar(Comando::Varios {
-                    nome: "Mover".into(),
-                    passos: vec![Comando::Traco {
+        let camada = movendo.camada;
+        let passos: Vec<Comando> = movendo
+            .alvos
+            .iter()
+            .filter_map(|(na_mascara, original)| {
+                operacoes::diferenca(original, self.doc.camadas[camada].alvo(*na_mascara)).map(
+                    |m| Comando::Traco {
                         camada,
-                        na_mascara,
+                        na_mascara: *na_mascara,
                         mudanca: m,
-                    }],
-                });
-                true
-            }
-            None => false,
+                    },
+                )
+            })
+            .collect();
+        if passos.is_empty() {
+            return false;
         }
+        // "Mover" no Histórico, e não "Pincel" (o nome de um traço).
+        self.hist.registrar(Comando::Varios {
+            nome: "Mover".into(),
+            passos,
+        });
+        true
     }
 
     pub fn movendo(&self) -> bool {
@@ -1143,7 +1534,7 @@ impl Sessao {
             return true;
         }
         let camada = self.ativa();
-        if !self.pode_pintar() {
+        if !self.pode_pintar() || self.posicao_bloqueada() || self.pixels_bloqueados() {
             return false;
         }
         let na_mascara = self.na_mascara();
@@ -1162,6 +1553,25 @@ impl Sessao {
         let area = conteudo
             .caixa
             .na_foto(original.largura(), original.altura());
+        let par = self.par_vinculado().and_then(|par_na_mascara| {
+            let original = self.doc.camadas[camada].alvo(par_na_mascara).clone();
+            let conteudo = Conteudo::da_camada(&original, selecao.as_deref())?;
+            let fundo = match selecao.as_deref() {
+                Some(s) => {
+                    let mut f = original.clone();
+                    operacoes::apagar(&mut f, s);
+                    f
+                }
+                None => CamadaDePixels::nova(original.largura(), original.altura()),
+            };
+            Some(Par {
+                na_mascara: par_na_mascara,
+                original,
+                fundo,
+                conteudo,
+                na_caixa: None,
+            })
+        });
         self.flutuante = Some(Flutuante {
             camada,
             na_mascara,
@@ -1172,6 +1582,7 @@ impl Sessao {
             t: Transformacao::default(),
             malha: None,
             area,
+            par,
         });
         true
     }
@@ -1258,11 +1669,22 @@ impl Sessao {
         f.t = t;
         let (largura, altura) = (f.original.largura(), f.original.altura());
         let desenhado = transformar::desenhar(&f.conteudo, &t, largura, altura);
-        self.mostrar_desenhado(desenhado);
+        let par = f.par.as_ref().map(|p| {
+            let d = transformar::desenhar_na_referencia(
+                &p.conteudo,
+                &f.conteudo.caixa,
+                &t,
+                largura,
+                altura,
+            );
+            transformar::sobre(&p.fundo, &d)
+        });
+        self.mostrar_desenhado(desenhado, par);
     }
 
-    /// A camada do flutuante passa a ser o fundo com `desenhado` por cima.
-    fn mostrar_desenhado(&mut self, desenhado: CamadaDePixels) {
+    /// A camada do flutuante passa a ser o fundo com `desenhado` por cima (e
+    /// o par, quando há, passa a ser `par`).
+    fn mostrar_desenhado(&mut self, desenhado: CamadaDePixels, par: Option<CamadaDePixels>) {
         let Some(f) = self.flutuante.as_mut() else {
             return;
         };
@@ -1276,8 +1698,23 @@ impl Sessao {
         let sujo = f.area.uniao(&area_nova);
         f.area = area_nova.uniao(&f.conteudo.caixa.na_foto(largura, altura));
         let (camada, na_mascara) = (f.camada, f.na_mascara);
-        *self.doc.camadas[camada].alvo_mut(na_mascara) = nova;
+        let par_na_mascara = f.par.as_ref().map(|p| p.na_mascara);
+        let mut sujo = sujo.uniao(&self.trocar_alvo(camada, na_mascara, nova));
+        if let (Some(par), Some(na)) = (par, par_na_mascara) {
+            sujo = sujo.uniao(&self.trocar_alvo(camada, na, par));
+        }
         self.refazer_a_vista(&sujo);
+    }
+
+    /// Os dois alvos do flutuante voltam a ser o que eram (cancelar, malha
+    /// parada). Devolve onde a foto pode ter mudado.
+    fn devolver_o_original(&mut self, f: &Flutuante) -> Retangulo {
+        let mut sujo = f.area;
+        sujo = sujo.uniao(&self.trocar_alvo(f.camada, f.na_mascara, f.original.clone()));
+        if let Some(p) = &f.par {
+            sujo = sujo.uniao(&self.trocar_alvo(f.camada, p.na_mascara, p.original.clone()));
+        }
+        sujo
     }
 
     /// Enter: a transformação vira um passo do desfazer. A seleção anda junto
@@ -1302,7 +1739,8 @@ impl Sessao {
                 .is_none()
         {
             // Deformar sem mudar nada: nem passo, nem a seleção some.
-            *self.doc.camadas[f.camada].alvo_mut(f.na_mascara) = f.original;
+            let sujo = self.devolver_o_original(&f);
+            self.refazer_a_vista(&sujo);
             return false;
         }
         let selecao_antes = self.selecao.clone();
@@ -1319,14 +1757,22 @@ impl Sessao {
         }
         // 🔑 Um passo só: os pixels e a seleção que foi junto voltam no mesmo
         // desfazer.
-        let pixels =
-            operacoes::diferenca(&f.original, self.doc.camadas[f.camada].alvo(f.na_mascara)).map(
-                |m| Comando::Traco {
-                    camada: f.camada,
-                    na_mascara: f.na_mascara,
-                    mudanca: m,
-                },
-            );
+        let mut alvos = vec![(f.na_mascara, &f.original)];
+        if let Some(p) = &f.par {
+            alvos.push((p.na_mascara, &p.original));
+        }
+        let pixels: Vec<Comando> = alvos
+            .into_iter()
+            .filter_map(|(na_mascara, original)| {
+                operacoes::diferenca(original, self.doc.camadas[f.camada].alvo(na_mascara)).map(
+                    |m| Comando::Traco {
+                        camada: f.camada,
+                        na_mascara,
+                        mudanca: m,
+                    },
+                )
+            })
+            .collect();
         let selecao = self.passo_da_selecao(selecao_antes, "Mover seleção");
         let nome = if deformou {
             "Deformar"
@@ -1335,19 +1781,19 @@ impl Sessao {
         } else {
             "Transformação livre"
         };
-        match (pixels, selecao) {
+        match (pixels.is_empty(), selecao) {
+            (true, Some(s)) => self.hist.registrar(s),
+            (true, None) => return false,
             // Com o nome do gesto no Histórico ("Mover", "Transformação
             // livre"), e não o do traço que ele grava ("Pincel").
-            (Some(p), None) => self.hist.registrar(Comando::Varios {
-                nome: nome.into(),
-                passos: vec![p],
-            }),
-            (Some(p), Some(s)) => self.hist.registrar(Comando::Varios {
-                nome: nome.into(),
-                passos: vec![p, s],
-            }),
-            (None, Some(s)) => self.hist.registrar(s),
-            (None, None) => return false,
+            (false, s) => {
+                let mut passos = pixels;
+                passos.extend(s);
+                self.hist.registrar(Comando::Varios {
+                    nome: nome.into(),
+                    passos,
+                });
+            }
         }
         true
     }
@@ -1363,8 +1809,8 @@ impl Sessao {
         let Some(f) = self.flutuante.take() else {
             return;
         };
-        *self.doc.camadas[f.camada].alvo_mut(f.na_mascara) = f.original;
-        self.refazer_a_vista(&f.area);
+        let sujo = self.devolver_o_original(&f);
+        self.refazer_a_vista(&sujo);
     }
 
     // ------------------------------------------------------------ deformar
@@ -1387,6 +1833,15 @@ impl Sessao {
         if f.malha.is_none() {
             let m = Malha::da_transformacao(&f.conteudo.caixa, &f.t);
             f.malha = Some((m, m));
+        }
+        // A máscara vinculada se deforma pela malha da camada: o pedaço dela
+        // dentro da caixa (fora da caixa a malha não existe, e ela fica).
+        let caixa = f.conteudo.caixa;
+        let selecao = f.selecao.clone();
+        if let Some(p) = f.par.as_mut().filter(|p| p.na_caixa.is_none()) {
+            let conteudo = Conteudo::da_caixa(&p.original, selecao.as_deref(), caixa);
+            let fundo = transformar::sem_a_caixa(&p.original, selecao.as_deref(), caixa);
+            p.na_caixa = Some((fundo, conteudo));
         }
         true
     }
@@ -1420,14 +1875,21 @@ impl Sessao {
         // conteúdo de borda difusa posto de volta sobre o fundo (que perdeu a
         // mesma borda) não somaria o alfa de antes.
         if m.quase_igual(&Malha::da_caixa(&f.conteudo.caixa)) {
-            let sujo = f.area;
-            let (camada, na_mascara) = (f.camada, f.na_mascara);
-            *self.doc.camadas[camada].alvo_mut(na_mascara) = f.original.clone();
+            let f = self.flutuante.take().expect("flutuante aberto");
+            let sujo = self.devolver_o_original(&f);
+            self.flutuante = Some(f);
             self.refazer_a_vista(&sujo);
             return;
         }
         let desenhado = deformar::desenhar(&f.conteudo, &m, largura, altura);
-        self.mostrar_desenhado(desenhado);
+        let par = f
+            .par
+            .as_ref()
+            .and_then(|p| p.na_caixa.as_ref())
+            .map(|(fundo, conteudo)| {
+                transformar::sobre(fundo, &deformar::desenhar(conteudo, &m, largura, altura))
+            });
+        self.mostrar_desenhado(desenhado, par);
     }
 
     /// "Redefinir": volta à malha do começo do Deformar, sem confirmar.
@@ -1535,6 +1997,211 @@ impl Sessao {
             passos,
         });
         true
+    }
+
+    // ------------------------------------------------ área de transferência
+
+    /// ⌘C: o que a escolhida tem na seleção (sem seleção, a camada inteira),
+    /// com o lugar de onde saiu. Com a máscara escolhida, a máscara em cinza.
+    /// `mesclado` (⇧⌘C, "Copiar mesclado"): a foto como aparece. `None` quando
+    /// não há o que copiar.
+    pub fn copiar(&mut self, mesclado: bool) -> Option<Conteudo> {
+        self.fechar_o_que_esta_aberto();
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let selecao = self.selecao.clone();
+        let indice = self.ativa();
+        if mesclado || self.na_mascara() {
+            let ret = selecao
+                .as_deref()
+                .map_or(Retangulo::inteiro(largura, altura), Selecao::caixa_justa);
+            if ret.vazio() {
+                return None;
+            }
+            let mut camada = CamadaDePixels::nova(largura, altura);
+            let pixels = if mesclado {
+                composicao::compor_recorte(&self.base, &self.doc, &ret)
+            } else {
+                let m = self.doc.camadas[indice].mascara.as_ref()?;
+                RgbImage::from_fn(ret.largura, ret.altura, |x, y| {
+                    let v = m.valor(ret.x + x, ret.y + y);
+                    image::Rgb([v, v, v])
+                })
+            };
+            for posicao in camada.tiles_do_retangulo(&ret) {
+                let pedaco = composicao::interseccao(
+                    &crate::tiles::retangulo_do_tile(posicao, largura, altura),
+                    &ret,
+                );
+                let tile = camada.tile_mut(posicao);
+                for y in pedaco.y..pedaco.baixo() {
+                    for x in pedaco.x..pedaco.direita() {
+                        let [r, g, b] = pixels.get_pixel(x - ret.x, y - ret.y).0;
+                        let i = crate::tiles::indice(
+                            x % crate::tiles::LADO_DO_TILE,
+                            y % crate::tiles::LADO_DO_TILE,
+                        );
+                        tile[i..i + 4].copy_from_slice(&[r, g, b, 255]);
+                    }
+                }
+            }
+            return Conteudo::da_camada(&camada, selecao.as_deref());
+        }
+        let camada = &self.doc.camadas[indice];
+        if camada.ajuste.is_some() {
+            return None;
+        }
+        Conteudo::da_camada(&camada.pixels, selecao.as_deref())
+    }
+
+    /// ⌘X: copia e apaga o que foi copiado (sem seleção, a camada inteira).
+    /// `None` com os pixels bloqueados ou sem o que copiar.
+    pub fn recortar(&mut self) -> Option<Conteudo> {
+        if self.pixels_bloqueados() || self.camada_ativa().ajuste.is_some() && !self.na_mascara() {
+            return None;
+        }
+        let conteudo = self.copiar(false)?;
+        let indice = self.ativa();
+        let na_mascara = self.na_mascara();
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let selecao = self.selecao.clone().unwrap_or_else(|| {
+            Arc::new(Selecao::da_forma(
+                largura,
+                altura,
+                &Forma::Retangulo(Retangulo::inteiro(largura, altura)),
+            ))
+        });
+        let mudanca = if self.alfa_travado() {
+            operacoes::preencher(
+                &mut self.doc.camadas[indice].pixels,
+                Some(&selecao),
+                self.pincel.cor_de_fundo,
+            )
+        } else if na_mascara {
+            // Na máscara, recortar devolve o fundo dela.
+            operacoes::apagar(self.doc.camadas[indice].alvo_mut(true), &selecao)
+        } else {
+            operacoes::apagar(&mut self.doc.camadas[indice].pixels, &selecao)
+        };
+        let Some(mudanca) = mudanca else {
+            return Some(conteudo);
+        };
+        let mudanca = if !na_mascara && self.doc.camadas[indice].bloqueio.transparencia {
+            match operacoes::travar_alfa(&mut self.doc.camadas[indice].pixels, mudanca) {
+                Some(m) => m,
+                None => return Some(conteudo),
+            }
+        } else {
+            mudanca
+        };
+        let (l, a) = (largura, altura);
+        let sujo = mudanca
+            .depois
+            .iter()
+            .fold(Retangulo::default(), |r, (p, _)| {
+                r.uniao(&crate::tiles::retangulo_do_tile(*p, l, a))
+            });
+        let sujo = self.alcance_no_alvo(indice, na_mascara, sujo);
+        self.hist.registrar(Comando::Varios {
+            nome: "Recortar".into(),
+            passos: vec![Comando::Traco {
+                camada: indice,
+                na_mascara,
+                mudanca,
+            }],
+        });
+        self.refazer_a_vista(&sujo);
+        Some(conteudo)
+    }
+
+    /// ⌘V / ⇧⌘V: o conteúdo numa camada nova logo acima da escolhida, que
+    /// passa a ser a escolhida; a seleção sai, como no Photoshop. `centro`
+    /// `None` = no mesmo lugar de onde saiu ("Colar no lugar"); `Some` = com o
+    /// meio da caixa ali (o meio da vista, ou da seleção). Um passo.
+    pub fn colar(&mut self, conteudo: &Conteudo, centro: Option<(f32, f32)>) -> bool {
+        let nome = self.doc.proximo_nome();
+        self.colar_com_nome(conteudo, centro, &nome, "Colar")
+    }
+
+    /// O mesmo, com o nome da camada e o do passo — a imagem importada leva o
+    /// nome do arquivo.
+    pub fn colar_com_nome(
+        &mut self,
+        conteudo: &Conteudo,
+        centro: Option<(f32, f32)>,
+        nome: &str,
+        nome_do_passo: &str,
+    ) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        let caixa = conteudo.caixa;
+        if caixa.vazia() {
+            return false;
+        }
+        let (dx, dy) = match centro {
+            None => (0, 0),
+            Some((cx, cy)) => (
+                (cx - caixa.largura as f32 / 2.0).round() as i64 - caixa.x as i64,
+                (cy - caixa.altura as f32 / 2.0).round() as i64 - caixa.y as i64,
+            ),
+        };
+        let pixels = transformar::desenhar(
+            conteudo,
+            &Transformacao::deslocamento(dx as f32, dy as f32),
+            largura,
+            altura,
+        );
+        let indice = (self.ativa() + 1).min(self.doc.camadas.len());
+        let mut camada = Camada::nova(nome, largura, altura);
+        camada.pixels = pixels;
+        camada.recortada = self.entra_no_conjunto(indice);
+        let mut passos = vec![Comando::CriarCamada {
+            indice,
+            camada: Box::new(camada),
+        }];
+        if let Some(antes) = self.selecao.clone() {
+            passos.push(Comando::Selecao {
+                nome: "Desmarcar".into(),
+                antes: Some(antes),
+                depois: None,
+            });
+        }
+        self.executar(Comando::Varios {
+            nome: nome_do_passo.into(),
+            passos,
+        });
+        true
+    }
+
+    /// ⇧⌘⌥E, "Carimbar visível": a foto como aparece numa camada nova logo
+    /// acima da escolhida. `pixels` é a composta como camada (montada em
+    /// segundo plano, a partir da `versao`); recusa se a foto mudou desde
+    /// então. Um passo.
+    pub fn carimbar_visivel(&mut self, versao: u64, pixels: CamadaDePixels) -> bool {
+        if self.mudou_desde(versao) {
+            return false;
+        }
+        self.fechar_o_que_esta_aberto();
+        let indice = (self.ativa() + 1).min(self.doc.camadas.len());
+        let mut camada = Camada::nova(
+            &self.doc.proximo_nome(),
+            self.doc.largura(),
+            self.doc.altura(),
+        );
+        camada.pixels = pixels;
+        camada.recortada = self.entra_no_conjunto(indice);
+        self.executar(Comando::Varios {
+            nome: "Carimbar visível".into(),
+            passos: vec![Comando::CriarCamada {
+                indice,
+                camada: Box::new(camada),
+            }],
+        });
+        true
+    }
+
+    /// O que o "Carimbar visível" precisa para compor fora da thread da tela.
+    pub fn pedido_de_carimbo(&self) -> (u64, Arc<RgbImage>, Documento) {
+        (self.versao, self.base.clone(), self.doc.clone())
     }
 
     // ------------------------------------------------------------- seleção
@@ -1830,16 +2497,25 @@ impl Sessao {
         na_mascara: bool,
         mudanca: Option<Mudanca>,
     ) -> bool {
-        let Some(mudanca) = mudanca else {
+        let Some(mut mudanca) = mudanca else {
             return false;
         };
         let (largura, altura) = (self.doc.largura(), self.doc.altura());
+        if !na_mascara && self.doc.camadas[camada].bloqueio.transparencia {
+            let Some(travada) =
+                operacoes::travar_alfa(&mut self.doc.camadas[camada].pixels, mudanca)
+            else {
+                return false;
+            };
+            mudanca = travada;
+        }
         let sujo = mudanca
             .depois
             .iter()
             .fold(Retangulo::default(), |a, (p, _)| {
                 a.uniao(&crate::tiles::retangulo_do_tile(*p, largura, altura))
             });
+        let sujo = self.alcance_no_alvo(camada, na_mascara, sujo);
         self.hist.registrar(Comando::Traco {
             camada,
             na_mascara,
@@ -1855,8 +2531,21 @@ impl Sessao {
         let Some(selecao) = self.selecao.clone() else {
             return false;
         };
+        if self.pixels_bloqueados() {
+            return false;
+        }
         let (camada, na_mascara) = (self.ativa(), self.na_mascara());
-        let mudanca = operacoes::apagar(self.doc.camadas[camada].alvo_mut(na_mascara), &selecao);
+        // Com a transparência bloqueada, o Delete pinta a cor de fundo (o
+        // Photoshop faz o mesmo): apagar tiraria alfa.
+        let mudanca = if self.alfa_travado() {
+            operacoes::preencher(
+                &mut self.doc.camadas[camada].pixels,
+                Some(&selecao),
+                self.pincel.cor_de_fundo,
+            )
+        } else {
+            operacoes::apagar(self.doc.camadas[camada].alvo_mut(na_mascara), &selecao)
+        };
         self.registrar_mudanca(camada, na_mascara, mudanca)
     }
 
@@ -1864,7 +2553,7 @@ impl Sessao {
     pub fn preencher_selecao(&mut self) -> bool {
         self.fechar_o_que_esta_aberto();
         let camada = self.ativa();
-        if !self.pode_pintar() {
+        if !self.pode_pintar() || self.pixels_bloqueados() {
             return false;
         }
         let selecao = self.selecao.clone();
@@ -1884,7 +2573,7 @@ impl Sessao {
     pub fn degrade(&mut self, de: (f32, f32), ate: (f32, f32)) -> bool {
         self.fechar_o_que_esta_aberto();
         let camada = self.ativa();
-        if !self.pode_pintar() {
+        if !self.pode_pintar() || self.pixels_bloqueados() {
             return false;
         }
         let na_mascara = self.na_mascara();
@@ -1914,7 +2603,7 @@ impl Sessao {
     pub fn lata_de_tinta(&mut self, x: f32, y: f32) -> bool {
         self.fechar_o_que_esta_aberto();
         let camada = self.ativa();
-        if !self.pode_pintar() || x < 0.0 || y < 0.0 {
+        if !self.pode_pintar() || self.pixels_bloqueados() || x < 0.0 || y < 0.0 {
             return false;
         }
         let na_mascara = self.na_mascara();
@@ -2040,7 +2729,7 @@ impl Sessao {
         // antes: ele é um passo próprio do desfazer.
         self.fechar_o_que_esta_aberto();
         let ativa = self.ativa();
-        if !self.pode_pintar() {
+        if !self.pode_pintar() || self.pixels_bloqueados() {
             return false;
         }
         // Na máscara só se pinta cinza: o carimbo, o tom e o foco leem a foto.
@@ -2050,19 +2739,23 @@ impl Sessao {
         // Na máscara, a borracha pinta a cor de fundo (branco: revela), como no
         // Photoshop — e não "volta ao fundo da máscara", que numa máscara que
         // esconde tudo esconderia de novo.
-        let pincel =
-            if self.na_mascara() && self.pincel.ferramenta == crate::pincel::Ferramenta::Borracha {
-                crate::pincel::Pincel {
-                    ferramenta: crate::pincel::Ferramenta::Pincel,
-                    cor: self.pincel.cor_de_fundo,
-                    ..self.pincel
-                }
-            } else {
-                self.pincel
-            };
+        // Com a transparência bloqueada, também: apagar não pode tirar alfa.
+        let travado = self.alfa_travado();
+        let pincel = if (self.na_mascara() || travado)
+            && self.pincel.ferramenta == crate::pincel::Ferramenta::Borracha
+        {
+            crate::pincel::Pincel {
+                ferramenta: crate::pincel::Ferramenta::Pincel,
+                cor: self.pincel.cor_de_fundo,
+                ..self.pincel
+            }
+        } else {
+            self.pincel
+        };
         let mut traco = Traco::novo(pincel)
             .dentro_de(self.selecao.clone())
-            .com_cordao(self.escala_da_tela);
+            .com_cordao(self.escala_da_tela)
+            .com_alfa_travado(travado);
         if self.pincel.ferramenta.le_a_foto() && !self.pincel.ferramenta.copia_da_origem() {
             // Tom e foco: a foto até a camada escolhida, no próprio lugar.
             traco = traco.copiando_de(crate::carimbo::Fonte::nova(
@@ -2102,6 +2795,7 @@ impl Sessao {
             None => traco.ate(alvo, x, y),
         };
         self.traco = Some(traco);
+        let sujo = self.alcance_no_alvo(ativa, na_mascara, sujo);
         self.refazer_a_vista(&sujo);
         true
     }
@@ -2114,6 +2808,7 @@ impl Sessao {
             return;
         };
         let sujo = traco.ate(self.doc.camadas[ativa].alvo_mut(na_mascara), x, y);
+        let sujo = self.alcance_no_alvo(ativa, na_mascara, sujo);
         self.refazer_a_vista(&sujo);
     }
 
@@ -2195,6 +2890,10 @@ impl Sessao {
         self.soltar();
         let valor = valor.clamp(0.0, 1.0);
         let indice = self.ativa();
+        // "Bloquear tudo" tranca também a opacidade e o modo.
+        if self.doc.camadas[indice].bloqueio.tudo() {
+            return;
+        }
         if self.opacidade_antes.is_some_and(|(i, _)| i != indice) {
             self.confirmar_opacidade();
         }
@@ -2237,6 +2936,7 @@ impl Sessao {
                     self.seguir_o_passo(&p, false);
                 }
                 self.refazer_a_vista(&sujo);
+                self.conferir_a_exibicao();
                 true
             }
             None => false,
@@ -2267,6 +2967,7 @@ impl Sessao {
                     self.seguir_o_passo(&p, true);
                 }
                 self.refazer_a_vista(&sujo);
+                self.conferir_a_exibicao();
                 true
             }
             None => false,
@@ -2282,6 +2983,7 @@ impl Sessao {
             || self.traco.is_some()
             || self.opacidade_antes.is_some()
             || self.ajuste_antes.is_some()
+            || self.mascara_antes.is_some()
             || self.movendo.is_some()
             || self.flutuante.is_some()
     }
@@ -2891,6 +3593,8 @@ mod testes {
         assert!(s.preencher_selecao());
         s.desmarcar();
         assert_eq!(s.cor_em(50.0, 50.0), Some([255, 0, 0]));
+        // Vinculada (o padrão), a camada iria junto: solta, só a máscara anda.
+        assert!(s.alternar_vinculo_de(0));
         assert!(s.comecar_a_mover());
         s.mover_por(300, 0);
         assert!(s.terminar_de_mover());

@@ -394,6 +394,9 @@ pub struct Traco {
     selecao: Option<Arc<Selecao>>,
     /// De onde o carimbo copia (`Ferramenta::Carimbo`).
     fonte: Option<Fonte>,
+    /// "Bloquear pixels transparentes": a tinta muda a cor e deixa o alfa de
+    /// cada pixel como estava — onde era transparente, nada acontece.
+    alfa_travado: bool,
 }
 
 impl Traco {
@@ -408,7 +411,14 @@ impl Traco {
             resto: 0.0,
             selecao: None,
             fonte: None,
+            alfa_travado: false,
         }
+    }
+
+    /// Com a transparência da camada bloqueada (ver [`Traco::alfa_travado`]).
+    pub fn com_alfa_travado(mut self, travado: bool) -> Self {
+        self.alfa_travado = travado;
+        self
     }
 
     /// A suavização do pincel com a tela de agora: `escala` são pontos da
@@ -561,7 +571,14 @@ impl Traco {
                         Some(t) => [t[i], t[i + 1], t[i + 2], t[i + 3]],
                         None => [0; 4],
                     };
-                    let novo = match (self.pincel.ferramenta, self.fonte.as_mut()) {
+                    let alfa_de_antes = de_antes[3];
+                    let de_antes = match self.alfa_travado {
+                        true if alfa_de_antes == 0 => continue,
+                        // A conta como se o pixel fosse opaco: só a cor muda.
+                        true => [de_antes[0], de_antes[1], de_antes[2], 255],
+                        false => de_antes,
+                    };
+                    let mut novo = match (self.pincel.ferramenta, self.fonte.as_mut()) {
                         (Ferramenta::Carimbo | Ferramenta::Recuperacao, Some(fonte)) => {
                             match fonte.cor_com_alfa(px, py) {
                                 // O alfa da origem (a camada atual tem
@@ -595,6 +612,9 @@ impl Traco {
                         }
                         _ => pintar(&self.pincel, de_antes, a),
                     };
+                    if self.alfa_travado {
+                        novo[3] = alfa_de_antes;
+                    }
                     tile[i..i + 4].copy_from_slice(&novo);
                 }
             }
@@ -690,11 +710,17 @@ impl Traco {
                     Some(t) => [t[i], t[i + 1], t[i + 2], t[i + 3]],
                     None => [0; 4],
                 };
-                if a <= 0.0 {
+                if a <= 0.0 || (self.alfa_travado && de_antes[3] == 0) {
                     continue;
                 }
                 let cor = resultado[j].map(|v| v.round() as u8);
-                let novo = pintar(&Pincel { cor, ..pincel }, de_antes, a);
+                let novo = if self.alfa_travado {
+                    let [r, g, b, alfa] = de_antes;
+                    let [r, g, b, _] = pintar(&Pincel { cor, ..pincel }, [r, g, b, 255], a);
+                    [r, g, b, alfa]
+                } else {
+                    pintar(&Pincel { cor, ..pincel }, de_antes, a)
+                };
                 tile[i..i + 4].copy_from_slice(&novo);
             }
         }

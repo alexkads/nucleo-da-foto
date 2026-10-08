@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::ajuste::Ajuste;
+use crate::difusao::{Guarda, MapaDifuso, DIFUSAO_MAXIMA};
 use crate::mesclagem::Modo;
 use crate::retangulo::Retangulo;
 use crate::tiles::{retangulo_do_tile, CamadaDePixels};
@@ -56,7 +57,11 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// alfa. Assim o pincel, a borracha (que devolve ao fundo), o Delete, o
 /// preenchimento, o degradê e a lata de tinta funcionam nela sem código à
 /// parte — e um tile que nunca foi pintado não existe, como na camada.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// 🔑 **Densidade e difusão não mexem nos pixels** (Propriedades da máscara,
+/// etapa 16): entram só na conta da composição ([`Mascara::leitor`]). Voltar a
+/// difusão a 0 devolve a borda que foi pintada.
+#[derive(Clone, Debug)]
 pub struct Mascara {
     /// O valor de onde não se pintou: 255 revela tudo (o botão), 0 esconde
     /// tudo (⌥ + o botão).
@@ -64,14 +69,43 @@ pub struct Mascara {
     /// Desligada (⇧ + clique na miniatura), a camada aparece inteira.
     pub ativa: bool,
     pub pixels: CamadaDePixels,
+    /// A corrente entre a miniatura da camada e a da máscara (ligada ao
+    /// nascer): o Mover, o ⌘T e o Deformar levam as duas juntas.
+    pub vinculada: bool,
+    /// `0..=1`: quanto o preto esconde. Com 0,5, o preto deixa passar metade.
+    pub densidade: f32,
+    /// O raio do desfoque da máscara na composição, em pixels da foto.
+    pub difusao: f32,
+    /// O mapa desfocado (só com difusão), refeito onde os pixels mudarem.
+    mapa: Guarda,
+}
+
+impl PartialEq for Mascara {
+    fn eq(&self, outra: &Self) -> bool {
+        self.fundo == outra.fundo
+            && self.ativa == outra.ativa
+            && self.pixels == outra.pixels
+            && self.vinculada == outra.vinculada
+            && self.densidade == outra.densidade
+            && self.difusao == outra.difusao
+    }
 }
 
 impl Mascara {
     pub fn nova(fundo: u8, largura: u32, altura: u32) -> Self {
+        Self::com_pixels(fundo, CamadaDePixels::nova(largura, altura))
+    }
+
+    /// Ligada, vinculada, densidade 100% e sem difusão — como nasce.
+    pub fn com_pixels(fundo: u8, pixels: CamadaDePixels) -> Self {
         Self {
             fundo,
             ativa: true,
-            pixels: CamadaDePixels::nova(largura, altura),
+            pixels,
+            vinculada: true,
+            densidade: 1.0,
+            difusao: 0.0,
+            mapa: Guarda::default(),
         }
     }
 
@@ -87,14 +121,159 @@ impl Mascara {
         (f + (d + 127 * d.signum()) / 255) as u8
     }
 
-    /// O valor em `(x, y)`.
+    /// O valor pintado em `(x, y)` — sem densidade nem difusão.
     pub fn valor(&self, x: u32, y: u32) -> u8 {
         Self::valor_do_pixel(self.fundo, self.pixels.pixel(x, y))
     }
 
+    /// O valor que entra na composição em `(x, y)`: com a difusão e a
+    /// densidade.
+    pub fn valor_efetivo(&self, x: u32, y: u32) -> u8 {
+        let leitor = self.leitor();
+        let posicao = crate::tiles::tile_de(x, y);
+        let (ox, oy) = crate::tiles::origem_do_tile(posicao);
+        leitor.no_tile(posicao).valor(crate::tiles::indice(
+            (x as i64 - ox) as u32,
+            (y as i64 - oy) as u32,
+        ))
+    }
+
     /// A máscara esconde a camada inteira.
     pub fn esconde_tudo(&self) -> bool {
-        self.ativa && self.fundo == 0 && self.pixels.vazia()
+        self.ativa && self.fundo == 0 && self.densidade >= 1.0 && self.pixels.vazia()
+    }
+
+    /// O mesmo valor com a densidade: `255 − densidade · (255 − v)`.
+    pub fn tabela_da_densidade(&self) -> [u8; 256] {
+        let d = self.densidade.clamp(0.0, 1.0);
+        std::array::from_fn(|v| {
+            if d >= 1.0 {
+                v as u8
+            } else {
+                255 - ((255 - v) as f32 * d).round() as u8
+            }
+        })
+    }
+
+    /// Quem lê a máscara na composição — uma vez por conta, e depois tile a
+    /// tile.
+    pub fn leitor(&self) -> LeitorDaMascara<'_> {
+        let mapa = (self.difusao > 0.0).then(|| {
+            self.mapa
+                .mapa(&self.pixels, self.fundo, self.difusao.min(DIFUSAO_MAXIMA))
+        });
+        LeitorDaMascara {
+            mascara: self,
+            mapa,
+            tabela: self.tabela_da_densidade(),
+        }
+    }
+
+    /// Quanto uma mudança nos pixels em `sujo` muda a foto: com difusão, o
+    /// desfoque leva a mudança três raios além.
+    pub fn alcance(&self, sujo: &Retangulo) -> Retangulo {
+        if self.difusao <= 0.0 || sujo.vazio() {
+            return *sujo;
+        }
+        let m = (self.difusao.min(DIFUSAO_MAXIMA) * 3.0).ceil() as u32 + 2;
+        let (largura, altura) = (self.pixels.largura(), self.pixels.altura());
+        Retangulo::novo(
+            sujo.x.saturating_sub(m),
+            sujo.y.saturating_sub(m),
+            sujo.largura + 2 * m,
+            sujo.altura + 2 * m,
+        )
+        .limitado(largura, altura)
+    }
+
+    /// Inverter (⌘I na máscara, "Inverter" nas Propriedades): o que revelava
+    /// passa a esconder, valor a valor (`255 − v`), sem perder a borda.
+    pub fn invertida(&self) -> Mascara {
+        let mut nova = self.clone();
+        nova.mapa = Guarda::default();
+        nova.fundo = 255 - self.fundo;
+        for (posicao, tile) in self.pixels.todos() {
+            let mut t = tile.as_ref().clone();
+            for p in t.as_chunks_mut::<4>().0 {
+                if p[3] > 0 {
+                    *p = [255 - p[0], 255 - p[1], 255 - p[2], p[3]];
+                }
+            }
+            nova.pixels.definir(*posicao, Some(std::sync::Arc::new(t)));
+        }
+        nova
+    }
+}
+
+/// O valor da máscara num tile da composição.
+pub enum MascaraNoTile<'a> {
+    /// O tile inteiro vale o mesmo (já com a densidade).
+    Constante(u8),
+    Pixels {
+        tile: &'a [u8],
+        fundo: u8,
+        tabela: [u8; 256],
+    },
+    Difusa {
+        mapa: &'a MapaDifuso,
+        origem: (i64, i64),
+        tabela: [u8; 256],
+    },
+}
+
+impl MascaraNoTile<'_> {
+    /// O valor no pixel cujo byte R está em `j` dentro do tile.
+    #[inline]
+    pub fn valor(&self, j: usize) -> u8 {
+        match self {
+            MascaraNoTile::Constante(v) => *v,
+            MascaraNoTile::Pixels {
+                tile,
+                fundo,
+                tabela,
+            } => {
+                tabela[Mascara::valor_do_pixel(
+                    *fundo,
+                    [tile[j], tile[j + 1], tile[j + 2], tile[j + 3]],
+                ) as usize]
+            }
+            MascaraNoTile::Difusa {
+                mapa,
+                origem,
+                tabela,
+            } => {
+                let p = (j / 4) as i64;
+                let lado = crate::tiles::LADO_DO_TILE as i64;
+                tabela[mapa.valor(origem.0 + p % lado, origem.1 + p / lado) as usize]
+            }
+        }
+    }
+}
+
+/// A máscara pronta para ser lida tile a tile.
+pub struct LeitorDaMascara<'a> {
+    mascara: &'a Mascara,
+    mapa: Option<std::sync::Arc<MapaDifuso>>,
+    tabela: [u8; 256],
+}
+
+impl LeitorDaMascara<'_> {
+    pub fn no_tile(&self, posicao: crate::tiles::Posicao) -> MascaraNoTile<'_> {
+        if let Some(mapa) = &self.mapa {
+            return MascaraNoTile::Difusa {
+                mapa,
+                origem: crate::tiles::origem_do_tile(posicao),
+                tabela: self.tabela,
+            };
+        }
+        match self.mascara.pixels.tile(posicao) {
+            Some(t) => MascaraNoTile::Pixels {
+                tile: t.as_slice(),
+                fundo: self.mascara.fundo,
+                tabela: self.tabela,
+            },
+            None => MascaraNoTile::Constante(self.tabela[self.mascara.fundo as usize]),
+        }
     }
 }
 
@@ -114,6 +293,41 @@ pub struct Camada {
     /// camada só aparece onde a **base do conjunto** — a primeira camada não
     /// recortada abaixo dela — tem pixels. Ver [`Documento::papeis`].
     pub recortada: bool,
+    /// Os cadeados do painel Camadas (etapa 16).
+    pub bloqueio: Bloqueio,
+}
+
+/// Os bloqueios da camada ("Bloquear:" no painel Camadas do Photoshop).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bloqueio {
+    /// Pixels transparentes (`/`): a tinta muda a cor do que existe e não
+    /// pinta onde é transparente; a borracha pinta a cor de fundo.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transparencia: bool,
+    /// Pixels: nada pinta, apaga ou preenche a camada (a máscara continua
+    /// aberta, como no Photoshop).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pixels: bool,
+    /// Posição: o Mover, o ⌘T e o Deformar não levam a camada.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub posicao: bool,
+}
+
+impl Bloqueio {
+    /// O cadeado "Bloquear tudo": os três.
+    pub const TUDO: Bloqueio = Bloqueio {
+        transparencia: true,
+        pixels: true,
+        posicao: true,
+    };
+
+    pub fn tudo(&self) -> bool {
+        *self == Self::TUDO
+    }
+
+    pub fn algum(&self) -> bool {
+        self.transparencia || self.pixels || self.posicao
+    }
 }
 
 impl Camada {
@@ -128,6 +342,7 @@ impl Camada {
             mascara: None,
             ajuste: None,
             recortada: false,
+            bloqueio: Bloqueio::default(),
         }
     }
 
@@ -169,7 +384,9 @@ impl Camada {
             // O ajuste muda a foto inteira — ou só onde a máscara que esconde
             // tudo foi pintada.
             return match self.mascara_ativa() {
-                Some(m) if m.fundo == 0 => area_dos_tiles(&m.pixels),
+                Some(m) if m.fundo == 0 && m.densidade >= 1.0 => {
+                    m.alcance(&area_dos_tiles(&m.pixels))
+                }
                 _ => Retangulo::inteiro(largura, altura),
             };
         }

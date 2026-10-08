@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 
 use image::RgbImage;
 
-use crate::composicao;
+use crate::composicao::{self, Exibicao};
 use crate::documento::Documento;
 use crate::retangulo::Retangulo;
 
@@ -34,6 +34,8 @@ pub struct Vista {
     regiao: Retangulo,
     imagem: RgbImage,
     sujos: BTreeSet<(u32, u32)>,
+    /// A foto, ou a máscara de uma camada (ver [`Exibicao`]).
+    exibicao: Exibicao,
 }
 
 impl Vista {
@@ -52,6 +54,17 @@ impl Vista {
     /// A vista de um pedaço da foto, num fator dado — a lupa. A região é
     /// alargada até a origem cair num múltiplo do fator.
     pub fn da_regiao(base: &RgbImage, doc: &Documento, regiao: &Retangulo, fator: u32) -> Self {
+        Self::da_regiao_exibindo(base, doc, regiao, fator, Exibicao::Foto)
+    }
+
+    /// O mesmo, já mostrando `exibicao` (a lupa com a máscara à vista).
+    pub fn da_regiao_exibindo(
+        base: &RgbImage,
+        doc: &Documento,
+        regiao: &Retangulo,
+        fator: u32,
+        exibicao: Exibicao,
+    ) -> Self {
         let fator = fator.max(1);
         let (largura, altura) = (base.width(), base.height());
         let r = regiao.limitado(largura, altura);
@@ -66,9 +79,24 @@ impl Vista {
                 regiao.altura.div_ceil(fator).max(1),
             ),
             sujos: BTreeSet::new(),
+            exibicao,
         };
         vista.refazer(base, doc, &regiao);
         vista
+    }
+
+    /// Passa a mostrar `exibicao` — refeita inteira se mudou.
+    pub fn exibir(&mut self, base: &RgbImage, doc: &Documento, exibicao: Exibicao) {
+        if self.exibicao == exibicao {
+            return;
+        }
+        self.exibicao = exibicao;
+        let regiao = self.regiao;
+        self.refazer(base, doc, &regiao);
+    }
+
+    pub fn exibicao(&self) -> Exibicao {
+        self.exibicao
     }
 
     /// O pedaço da foto que a vista cobre.
@@ -190,8 +218,12 @@ impl Vista {
             let largura = ((vx1 - vx0) * f).min(fim_x - x0);
             for vy in a..b {
                 let y = (oy + vy * f + f / 2).min(fim_y - 1);
-                let linha =
-                    composicao::compor_recorte(base, doc, &Retangulo::novo(x0, y, largura, 1));
+                let linha = composicao::compor_recorte_exibindo(
+                    base,
+                    doc,
+                    &Retangulo::novo(x0, y, largura, 1),
+                    self.exibicao,
+                );
                 for k in 0..colunas as u32 {
                     let x = (k * f + f / 2).min(linha.width() - 1);
                     saida.extend_from_slice(&linha.get_pixel(x, 0).0);
@@ -201,7 +233,7 @@ impl Vista {
         }
         let regiao = Retangulo::novo(ox + vx0 * f, oy + a * f, (vx1 - vx0) * f, (b - a) * f)
             .limitado(fim_x, fim_y);
-        let composta = composicao::compor_recorte(base, doc, &regiao);
+        let composta = composicao::compor_recorte_exibindo(base, doc, &regiao, self.exibicao);
         let colunas = (vx1 - vx0) as usize;
         let mut saida = Vec::with_capacity(colunas * (b - a) as usize * 3);
         if f == 1 {

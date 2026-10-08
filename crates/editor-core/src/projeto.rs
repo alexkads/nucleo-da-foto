@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use crate::ajuste::Ajuste;
 use crate::composicao;
 use crate::contrato::VersaoEditada;
-use crate::documento::{hex, BaseRef, Camada, Documento, Mascara};
+use crate::documento::{hex, BaseRef, Bloqueio, Camada, Documento, Mascara};
 use crate::historico::{Comando, Historico};
 use crate::mesclagem::Modo;
 use crate::pincel::Mudanca;
@@ -63,7 +63,11 @@ use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 ///   de tudo — recusa com o aviso. A malha do Deformar **não** é gravada (o
 ///   resultado vai como pixels, num passo de traço). Os formatos 1–7 se leem
 ///   como estão.
-pub const FORMATO: u32 = 8;
+/// - **9** (etapa 16): propriedades da máscara (`vinculada`, `densidade`,
+///   `difusao`), os cadeados da camada (`bloqueio`) e o passo `bloqueio`. A
+///   0.1.115 comporia a máscara sem densidade nem difusão e ignoraria os
+///   cadeados — recusa com o aviso. Os formatos 1–8 se leem como estão.
+pub const FORMATO: u32 = 9;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -238,6 +242,13 @@ pub struct CamadaSalva {
     /// Formato 8: a máscara de corte (ausente = solta).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recortada: bool,
+    /// Formato 9: os cadeados (ausente = nenhum).
+    #[serde(default, skip_serializing_if = "sem_bloqueio")]
+    pub bloqueio: Bloqueio,
+}
+
+fn sem_bloqueio(b: &Bloqueio) -> bool {
+    !b.algum()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -245,6 +256,31 @@ pub struct MascaraSalva {
     pub fundo: u8,
     pub ativa: bool,
     pub tiles: BTreeMap<String, String>,
+    /// Formato 9: a corrente com a camada (ausente = vinculada).
+    #[serde(default = "verdadeiro", skip_serializing_if = "Clone::clone")]
+    pub vinculada: bool,
+    /// Formato 9: a densidade (ausente = 100%).
+    #[serde(default = "um", skip_serializing_if = "e_um")]
+    pub densidade: f32,
+    /// Formato 9: a difusão em px (ausente = 0).
+    #[serde(default, skip_serializing_if = "e_zero")]
+    pub difusao: f32,
+}
+
+fn verdadeiro() -> bool {
+    true
+}
+
+fn um() -> f32 {
+    1.0
+}
+
+fn e_um(v: &f32) -> bool {
+    *v == 1.0
+}
+
+fn e_zero(v: &f32) -> bool {
+    *v == 0.0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -283,6 +319,12 @@ pub enum PassoSalvo {
         camada: usize,
         antes: bool,
         depois: bool,
+    },
+    /// Formato 9: os cadeados da camada.
+    Bloqueio {
+        camada: usize,
+        antes: Bloqueio,
+        depois: Bloqueio,
     },
     Opacidade {
         camada: usize,
@@ -364,6 +406,7 @@ fn salvar_camada(
             .transpose()?,
         ajuste: camada.ajuste,
         recortada: camada.recortada,
+        bloqueio: camada.bloqueio,
     })
 }
 
@@ -435,6 +478,15 @@ fn salvar_passo(
             antes,
             depois,
         } => PassoSalvo::Recorte {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
+        Comando::Bloqueio {
+            camada,
+            antes,
+            depois,
+        } => PassoSalvo::Bloqueio {
             camada: *camada,
             antes: *antes,
             depois: *depois,
@@ -604,6 +656,15 @@ fn ler_passo(
             antes: *antes,
             depois: *depois,
         },
+        PassoSalvo::Bloqueio {
+            camada,
+            antes,
+            depois,
+        } => Comando::Bloqueio {
+            camada: *camada,
+            antes: *antes,
+            depois: *depois,
+        },
         PassoSalvo::Opacidade {
             camada,
             antes,
@@ -691,6 +752,9 @@ fn salvar_mascara(
         fundo: mascara.fundo,
         ativa: mascara.ativa,
         tiles,
+        vinculada: mascara.vinculada,
+        densidade: mascara.densidade,
+        difusao: mascara.difusao,
     })
 }
 
@@ -962,11 +1026,12 @@ impl Projeto {
         let ler_mascara = |salva: &MascaraSalva,
                            ler_tile: &mut dyn FnMut(&str) -> Result<Tile, ErroDoProjeto>|
          -> Result<Mascara, ErroDoProjeto> {
-            Ok(Mascara {
-                fundo: salva.fundo,
-                ativa: salva.ativa,
-                pixels: ler_pixels(&salva.tiles, ler_tile)?,
-            })
+            let mut m = Mascara::com_pixels(salva.fundo, ler_pixels(&salva.tiles, ler_tile)?);
+            m.ativa = salva.ativa;
+            m.vinculada = salva.vinculada;
+            m.densidade = salva.densidade;
+            m.difusao = salva.difusao;
+            Ok(m)
         };
         let ler_camada = |salva: &CamadaSalva,
                           ler_tile: &mut dyn FnMut(&str) -> Result<Tile, ErroDoProjeto>|
@@ -984,6 +1049,7 @@ impl Projeto {
                     .transpose()?,
                 ajuste: salva.ajuste,
                 recortada: salva.recortada,
+                bloqueio: salva.bloqueio,
             })
         };
         let mut camadas = Vec::with_capacity(manifesto.camadas.len());
@@ -1595,11 +1661,14 @@ mod testes {
         let manifesto = dir.path().join("e1").join(MANIFESTO);
         let texto = std::fs::read_to_string(&manifesto).unwrap().replacen(
             &format!("\"formato\": {FORMATO}"),
-            "\"formato\": 9",
+            "\"formato\": 10",
             1,
         );
         std::fs::write(&manifesto, texto).unwrap();
-        assert!(matches!(p.abrir(&base), Err(ErroDoProjeto::FormatoNovo(9))));
+        assert!(matches!(
+            p.abrir(&base),
+            Err(ErroDoProjeto::FormatoNovo(10))
+        ));
     }
 
     fn walk(pasta: &Path) -> Vec<PathBuf> {
