@@ -183,6 +183,8 @@ pub struct Sessao {
     rascunho: Retangulo,
     /// O letreiro. `Arc`: o traço leva uma cópia barata.
     selecao: Option<Arc<Selecao>>,
+    /// A última seleção desmarcada — o "Reselecionar" (⇧⌘D) a traz de volta.
+    desmarcada: Option<Arc<Selecao>>,
     /// Sobe a cada mudança de pixel ou de seleção — quem desenha miniaturas e
     /// bordas sabe quando refazer.
     versao: u64,
@@ -280,6 +282,7 @@ impl Sessao {
             ajuste_antes: None,
             rascunho: Retangulo::default(),
             selecao: None,
+            desmarcada: None,
             versao: 0,
             versao_da_selecao: 0,
             origem: None,
@@ -2748,6 +2751,9 @@ impl Sessao {
             return;
         }
         let antes = std::mem::replace(&mut self.selecao, depois.clone());
+        if depois.is_none() && antes.is_some() {
+            self.desmarcada = antes.clone();
+        }
         self.hist.registrar(Comando::Selecao {
             nome: nome.to_string(),
             antes,
@@ -2780,6 +2786,7 @@ impl Sessao {
         let Some(antes) = self.selecao.take() else {
             return;
         };
+        self.desmarcada = Some(antes.clone());
         let nome = self
             .hist
             .a_desfazer()
@@ -2801,6 +2808,19 @@ impl Sessao {
     pub fn desmarcar(&mut self) {
         self.fechar_o_que_esta_aberto();
         self.trocar_selecao(None, "Desmarcar");
+    }
+
+    /// ⇧⌘D: volta a última seleção desmarcada (no Photoshop, "Reselecionar").
+    pub fn reselecionar(&mut self) {
+        self.fechar_o_que_esta_aberto();
+        if let Some(d) = self.desmarcada.clone() {
+            self.trocar_selecao(Some((*d).clone()), "Reselecionar");
+        }
+    }
+
+    /// Há seleção desmarcada para o ⇧⌘D trazer de volta.
+    pub fn pode_reselecionar(&self) -> bool {
+        self.desmarcada.is_some()
     }
 
     /// ⇧⌘I. Sem seleção não faz nada (no Photoshop também).

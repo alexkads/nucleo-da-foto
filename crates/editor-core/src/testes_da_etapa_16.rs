@@ -763,3 +763,28 @@ fn medir_a_difusao() {
     let _ = s.compor();
     eprintln!("imagem editada inteira com difusão 250: {:?}", t.elapsed());
 }
+
+/// ⇧⌘D: o Reselecionar traz a última seleção desmarcada, num passo próprio
+/// que o desfazer tira; sem nada desmarcado, não há o que trazer.
+#[test]
+fn reselecionar_traz_a_ultima_desmarcada() {
+    let mut s = sessao();
+    assert!(!s.pode_reselecionar());
+    s.reselecionar();
+    assert!(s.selecao().is_none());
+    retangulo(&mut s, 10, 20, 30, 40);
+    let antes = s.selecao().cloned();
+    s.desmarcar();
+    assert!(s.selecao().is_none());
+    assert!(s.pode_reselecionar());
+    s.reselecionar();
+    assert_eq!(s.selecao().cloned(), antes);
+    assert_eq!(
+        s.historico()
+            .a_desfazer()
+            .map(|p| p.descricao(s.documento())),
+        Some("Reselecionar".to_string())
+    );
+    s.desfazer();
+    assert!(s.selecao().is_none());
+}
