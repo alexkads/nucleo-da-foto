@@ -634,6 +634,26 @@ impl Historico {
         self.respeitar_o_teto();
     }
 
+    /// Os `n` últimos passos (todos aplicados) viram um só, com o `nome` —
+    /// um gesto feito de vários passos iguais (arrastar a camada por várias
+    /// posições). Sem efeito com algo para refazer.
+    pub fn juntar_os_ultimos(&mut self, n: usize, nome: &str) {
+        if n < 2 || n > self.passos.len() || self.posicao != self.passos.len() {
+            return;
+        }
+        let inicio = self.passos.len() - n;
+        let passos: Vec<Comando> = self.passos.drain(inicio..).collect();
+        self.passos.push(Comando::Varios {
+            nome: nome.into(),
+            passos,
+        });
+        self.posicao = self.passos.len();
+        if self.salvo_em.is_some_and(|s| s > inicio) {
+            // O salvo estava no meio do que virou um passo só.
+            self.salvo_em = None;
+        }
+    }
+
     fn respeitar_o_teto(&mut self) {
         let mut total: usize = self.passos.iter().map(Comando::bytes).sum();
         let mut tirar = 0;

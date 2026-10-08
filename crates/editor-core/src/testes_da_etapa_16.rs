@@ -645,3 +645,52 @@ fn a_camada_sem_as_propriedades_novas_nao_as_grava() {
     assert!(m.get("difusao").is_none());
     assert!(json["camadas"][0].get("bloqueio").is_none());
 }
+
+// ------------------------------------------------------ arrastar a camada
+
+#[test]
+fn arrastar_a_camada_por_varias_posicoes_e_um_passo() {
+    let mut s = sessao();
+    for _ in 0..3 {
+        s.nova_camada();
+    }
+    let nomes = |s: &Sessao| -> Vec<String> {
+        s.documento()
+            .camadas
+            .iter()
+            .map(|c| c.nome.clone())
+            .collect()
+    };
+    let antes = nomes(&s);
+    s.escolher_camada(3);
+    let passos = s.historico().passos().len();
+    assert!(s.mover_camada_para(0));
+    assert_eq!(s.ativa(), 0);
+    assert_eq!(nomes(&s)[0], "Camada 3");
+    assert_eq!(s.historico().passos().len(), passos + 1, "um passo só");
+    assert_eq!(
+        s.historico().a_desfazer().unwrap().descricao(s.documento()),
+        "Mover camada"
+    );
+    assert!(s.desfazer());
+    assert_eq!(nomes(&s), antes);
+    assert!(!s.mover_camada_para(3), "já está lá");
+}
+
+#[test]
+fn o_arrasto_ao_vivo_por_varias_linhas_e_um_passo() {
+    let mut s = sessao();
+    for _ in 0..3 {
+        s.nova_camada();
+    }
+    s.escolher_camada(3);
+    let desde = s.historico().posicao();
+    let passos = s.historico().passos().len();
+    assert!(s.mover_camada_arrastando(2, Some(desde)));
+    assert!(s.mover_camada_arrastando(1, Some(desde)));
+    assert!(s.mover_camada_arrastando(0, Some(desde)));
+    assert_eq!(s.documento().camadas[0].nome, "Camada 3");
+    assert_eq!(s.historico().passos().len(), passos + 1, "um passo só");
+    assert!(s.desfazer());
+    assert_eq!(s.documento().camadas[3].nome, "Camada 3");
+}

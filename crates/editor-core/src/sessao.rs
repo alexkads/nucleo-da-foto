@@ -1166,6 +1166,55 @@ impl Sessao {
         true
     }
 
+    /// Arrastar a escolhida no painel Camadas até a posição `alvo`: anda uma
+    /// posição de cada vez pela regra do [`Self::mover_camada`] (o conjunto
+    /// de recorte anda inteiro), num passo só do desfazer.
+    pub fn mover_camada_para(&mut self, alvo: usize) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let alvo = alvo.min(self.doc.camadas.len().saturating_sub(1));
+        let mut passos = 0;
+        loop {
+            let de = self.ativa();
+            if de == alvo {
+                break;
+            }
+            let direcao = if alvo > de { 1 } else { -1 };
+            if !self.mover_camada(direcao) || self.ativa() == de {
+                break;
+            }
+            passos += 1;
+            let agora = self.ativa();
+            if (direcao > 0 && agora >= alvo) || (direcao < 0 && agora <= alvo) {
+                break;
+            }
+        }
+        self.hist.juntar_os_ultimos(passos, "Mover camada");
+        passos > 0
+    }
+
+    /// O arrasto ao vivo do painel: a escolhida vai para `alvo`, e todos os
+    /// "Mover camada" desde a posição `desde` do histórico (o aperto na linha)
+    /// viram um passo só — passar por três linhas é um desfazer.
+    pub fn mover_camada_arrastando(&mut self, alvo: usize, desde: Option<usize>) -> bool {
+        if !self.mover_camada_para(alvo) {
+            return false;
+        }
+        let Some(desde) = desde else {
+            return true;
+        };
+        let passos = self.hist.passos();
+        let fim = passos.len();
+        let so_mover = |p: &Comando| match p {
+            Comando::MoverCamada { .. } => true,
+            Comando::Varios { nome, .. } => nome == "Mover camada",
+            _ => false,
+        };
+        if self.hist.posicao() == fim && desde < fim && passos[desde..].iter().all(so_mover) {
+            self.hist.juntar_os_ultimos(fim - desde, "Mover camada");
+        }
+        true
+    }
+
     // ---------------------------------------------------- máscara de corte
 
     /// A camada `indice` pode ser recortada: não é a de baixo de todas, ainda
@@ -1940,6 +1989,9 @@ impl Sessao {
             return true;
         };
         let origem = self.ativa();
+        if recortar && self.doc.camadas[origem].bloqueio.pixels {
+            return false;
+        }
         let original = self.doc.camadas[origem].pixels.clone();
         let Some(conteudo) = Conteudo::da_camada(&original, Some(&selecao)) else {
             return false;
