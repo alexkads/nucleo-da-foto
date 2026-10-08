@@ -28,6 +28,11 @@ pub const LADO_DO_TILE: u32 = 256;
 /// foi pintada.
 pub const BYTES_DO_TILE: usize = (LADO_DO_TILE * LADO_DO_TILE * 4) as usize;
 
+/// Os bits de cada canal das camadas — o "RGB/8" que a aba do documento
+/// mostra. É o formato dos tiles, e muda junto com ele.
+pub const BITS_POR_CANAL: u8 =
+    (BYTES_DO_TILE / (LADO_DO_TILE * LADO_DO_TILE) as usize / 4 * 8) as u8;
+
 pub type Tile = Arc<Vec<u8>>;
 
 /// Onde um tile fica: coluna e linha, em tiles — negativas, ou além da última,

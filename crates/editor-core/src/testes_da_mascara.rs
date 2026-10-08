@@ -380,3 +380,24 @@ fn o_pincel_da_amostragem_inclui_e_exclui() {
     assert_eq!(a.valor(100, 100), 0);
     assert_eq!(a.valor(100, 115), 255);
 }
+
+/// 🎨 A cor escolhida no seletor (frente ou fundo) vira o cinza dela na
+/// máscara, como o X e o D; fora da máscara fica a cor.
+#[test]
+fn a_cor_escolhida_vira_cinza_na_mascara() {
+    let mut s = cenario();
+    s.definir_cor_de_frente([255, 0, 0]);
+    s.definir_cor_de_fundo([0, 0, 255]);
+    assert_eq!(s.pincel.cor, [255, 0, 0], "na camada, a cor como veio");
+    assert!(s.adicionar_mascara(false));
+    s.definir_cor_de_frente([255, 0, 0]);
+    s.definir_cor_de_fundo([0, 0, 255]);
+    let [r, g, b] = s.pincel.cor;
+    assert!(r == g && g == b, "frente em cinza: {:?}", s.pincel.cor);
+    let [r, g, b] = s.pincel.cor_de_fundo;
+    assert!(
+        r == g && g == b,
+        "fundo em cinza: {:?}",
+        s.pincel.cor_de_fundo
+    );
+}

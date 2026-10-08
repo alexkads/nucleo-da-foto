@@ -567,6 +567,19 @@ impl Sessao {
         self.pincel.cor_de_fundo = [255; 3];
     }
 
+    /// A cor de frente escolhida no seletor ou nas amostras — na máscara, o
+    /// cinza dela (a regra de [`Self::cores_em_cinza_na_mascara`]).
+    pub fn definir_cor_de_frente(&mut self, cor: [u8; 3]) {
+        self.pincel.cor = cor;
+        self.cores_em_cinza_na_mascara();
+    }
+
+    /// A cor de fundo escolhida no seletor — na máscara, o cinza dela.
+    pub fn definir_cor_de_fundo(&mut self, cor: [u8; 3]) {
+        self.pincel.cor_de_fundo = cor;
+        self.cores_em_cinza_na_mascara();
+    }
+
     /// Na máscara só valem cinzas: como o Photoshop, as duas cores viram o
     /// cinza delas quando o pincel vai para a máscara — o quadrado da cor
     /// mostra o que vai ser pintado, e não um vermelho que pinta 30% de cinza.
