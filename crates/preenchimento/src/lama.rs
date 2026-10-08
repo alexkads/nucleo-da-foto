@@ -330,6 +330,7 @@ mod testes {
             amostragem: None,
             semente: 1,
             contexto: 0.5,
+            adaptar_cor: true,
         }
     }
 

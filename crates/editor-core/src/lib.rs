@@ -60,7 +60,8 @@ pub use pincel::{Ferramenta, Pincel};
 pub use retangulo::Retangulo;
 pub use selecao::{Acabamento, Amostra, Estilo, Forma, Molde, Operacao, Selecao};
 pub use sessao::{
-    AmostraDaVarinha, Cadeado, OpcoesDaVarinha, OpcoesDoCarimbo, Sessao, VarinhaRecusada,
+    AmostraDaVarinha, Cadeado, OpcoesDaVarinha, OpcoesDoCarimbo, SaidaDoPreenchimento, Sessao,
+    VarinhaRecusada,
 };
 pub use tiles::{CamadaDePixels, LADO_DO_TILE};
 pub use transformar::{Caixa, Transformacao};

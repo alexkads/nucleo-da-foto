@@ -33,7 +33,10 @@ impl Motor for PatchMatch {
             altura: e.altura,
             destino: e.destino,
             amostragem: e.amostragem,
-            qualidade: Qualidade::recomendada(),
+            qualidade: Qualidade {
+                harmonizar: e.adaptar_cor,
+                ..Qualidade::recomendada()
+            },
             semente: e.semente,
         };
         let r = motor::sintetizar(
