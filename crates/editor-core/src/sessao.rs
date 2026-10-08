@@ -1494,14 +1494,34 @@ impl Sessao {
         ret: &Retangulo,
         rgba: &[u8],
         peso: &dyn Fn(u32, u32) -> u8,
-        em_camada_nova: bool,
+        saida: SaidaDoPreenchimento,
     ) -> Result<(), &'static str> {
         if self.mudou_desde(versao) {
             return Err("A foto mudou enquanto o preenchimento era calculado — refaça a prévia");
         }
         self.fechar_o_que_esta_aberto();
         let ativa = self.ativa();
-        if !em_camada_nova {
+        if saida == SaidaDoPreenchimento::Duplicada {
+            // "Duplicar camada" do Photoshop: a cópia da escolhida, já com o
+            // remendo — criar a cópia e pintar nela é um passo só.
+            let camada = &self.doc.camadas[ativa];
+            if camada.ajuste.is_some() || self.na_mascara() {
+                return Err(
+                    "Duplicar vale para uma camada de pixels: escolha uma, ou use uma camada nova",
+                );
+            }
+            let mut copia = camada.clone();
+            copia.nome = format!("{} cópia", copia.nome);
+            if operacoes::colar(&mut copia.pixels, ret, rgba, peso).is_none() {
+                return Err("O remendo não mudou nada");
+            }
+            self.executar(Comando::CriarCamada {
+                indice: ativa + 1,
+                camada: Box::new(copia),
+            });
+            return Ok(());
+        }
+        if saida == SaidaDoPreenchimento::CamadaAtual {
             if self.doc.camadas[ativa].ajuste.is_some() || self.na_mascara() {
                 return Err("O preenchimento vai nos pixels: escolha uma camada de pixels, ou use uma camada nova");
             }
@@ -3355,6 +3375,19 @@ impl Sessao {
     pub fn compor(&self) -> RgbImage {
         composicao::compor(&self.base, &self.doc)
     }
+}
+
+/// Para onde vai o Preenchimento sensível ao conteúdo ("Saída para" do
+/// Photoshop).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SaidaDoPreenchimento {
+    /// A camada escolhida (de pixels).
+    CamadaAtual,
+    /// Uma camada "Preenchimento N" só com o remendo, acima da escolhida.
+    #[default]
+    CamadaNova,
+    /// A cópia da escolhida, com o remendo, acima dela.
+    Duplicada,
 }
 
 #[cfg(test)]

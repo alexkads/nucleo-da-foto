@@ -74,6 +74,7 @@ impl Metodo {
                 precisa_de_modelo: false,
                 progresso_interno: true,
                 contexto_ajustavel: false,
+                adaptacao_de_cor: true,
             },
             Metodo::LaMa => Capacidades {
                 amostragem: false,
@@ -81,6 +82,7 @@ impl Metodo {
                 precisa_de_modelo: true,
                 progresso_interno: false,
                 contexto_ajustavel: true,
+                adaptacao_de_cor: false,
             },
         }
     }
@@ -99,6 +101,8 @@ pub struct Capacidades {
     pub progresso_interno: bool,
     /// Aceita a margem de contexto em volta do destino.
     pub contexto_ajustavel: bool,
+    /// Ajusta o tom do remendo à borda (a "Adaptação de cor" do Photoshop).
+    pub adaptacao_de_cor: bool,
 }
 
 /// A entrada de um motor: a região de trabalho e as máscaras dela.
@@ -117,6 +121,9 @@ pub struct Entrada<'a> {
     /// (0,5 = meio destino de cada lado). Motor sem
     /// [`Capacidades::contexto_ajustavel`] ignora.
     pub contexto: f32,
+    /// Ajustar o tom do remendo à borda. Motor sem
+    /// [`Capacidades::adaptacao_de_cor`] ignora.
+    pub adaptar_cor: bool,
 }
 
 /// O remendo: a caixa do destino, em coordenadas da região de entrada. Fora

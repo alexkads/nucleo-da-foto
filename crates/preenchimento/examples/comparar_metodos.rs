@@ -82,6 +82,7 @@ fn main() {
                 amostragem: None,
                 semente: 1,
                 contexto: 0.6,
+                adaptar_cor: true,
             };
             let parado = AtomicBool::new(false);
             let inicio = Instant::now();

@@ -339,8 +339,14 @@ fn o_preenchimento_entra_numa_camada_nova_num_passo_e_recusa_versao_velha() {
     let ret = Retangulo::novo(300, 300, 20, 10);
     let rgba: Vec<u8> = (0..200).flat_map(|_| [0u8, 200, 0, 255]).collect();
     let peso = |x: u32, _y: u32| if x < 305 { 128 } else { 255 };
-    s.aplicar_preenchimento(versao, &ret, &rgba, &peso, true)
-        .unwrap();
+    s.aplicar_preenchimento(
+        versao,
+        &ret,
+        &rgba,
+        &peso,
+        crate::sessao::SaidaDoPreenchimento::CamadaNova,
+    )
+    .unwrap();
     assert_eq!(s.documento().camadas.len(), camadas + 1);
     assert_eq!(s.historico().passos().len(), passos + 1, "um passo só");
     let nova = &s.documento().camadas[s.ativa()];
@@ -365,9 +371,48 @@ fn o_preenchimento_entra_numa_camada_nova_num_passo_e_recusa_versao_velha() {
     s.desfazer();
     assert!(s.mudou_desde(velha));
     assert!(s
-        .aplicar_preenchimento(velha, &ret, &rgba, &peso, true)
+        .aplicar_preenchimento(
+            velha,
+            &ret,
+            &rgba,
+            &peso,
+            crate::sessao::SaidaDoPreenchimento::CamadaNova
+        )
         .is_err());
     assert_eq!(s.documento().camadas.len(), camadas);
+}
+
+/// "Saída para: Duplicar camada" — a cópia da escolhida com o remendo, num
+/// passo; a original fica intacta.
+#[test]
+fn o_preenchimento_duplicado_copia_a_camada_com_o_remendo() {
+    use crate::sessao::SaidaDoPreenchimento;
+    let mut s = cenario();
+    let original = s.documento().camadas[s.ativa()].pixels.clone();
+    let (versao, camadas, passos) = (
+        s.versao(),
+        s.documento().camadas.len(),
+        s.historico().passos().len(),
+    );
+    let ret = Retangulo::novo(300, 300, 20, 10);
+    let rgba: Vec<u8> = (0..200).flat_map(|_| [0u8, 200, 0, 255]).collect();
+    let peso = |_x: u32, _y: u32| 255u8;
+    s.aplicar_preenchimento(versao, &ret, &rgba, &peso, SaidaDoPreenchimento::Duplicada)
+        .unwrap();
+    assert_eq!(s.documento().camadas.len(), camadas + 1);
+    assert_eq!(s.historico().passos().len(), passos + 1, "um passo só");
+    let copia = &s.documento().camadas[s.ativa()];
+    assert!(copia.nome.ends_with(" cópia"), "{}", copia.nome);
+    assert_eq!(copia.pixels.pixel(310, 305), [0, 200, 0, 255]);
+    assert_eq!(
+        copia.pixels.pixel(10, 10),
+        original.pixel(10, 10),
+        "o resto é a cópia"
+    );
+    assert_eq!(
+        s.documento().camadas[s.ativa() - 1].pixels.pixel(310, 305),
+        original.pixel(310, 305)
+    );
 }
 
 #[test]
