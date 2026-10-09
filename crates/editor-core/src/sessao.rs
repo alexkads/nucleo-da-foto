@@ -238,6 +238,8 @@ pub struct Sessao {
     /// A máscara vetorial de quando o arrasto da densidade ou da difusão
     /// dela começou.
     vetorial_antes: Option<(usize, crate::vetor::MascaraVetorial)>,
+    /// "Transformar caminho" em curso (o ⌘T de um caminho).
+    caminho_solto: Option<caminhos::CaminhoSolto>,
 }
 
 /// O arrasto do Mover sem seleção: a camada e cada alvo que anda (os pixels,
@@ -332,6 +334,7 @@ impl Sessao {
             alvo_vetorial: None,
             gesto_vetorial: None,
             vetorial_antes: None,
+            caminho_solto: None,
         }
     }
 
@@ -1870,6 +1873,9 @@ impl Sessao {
 
     /// A caixa do conteúdo e a transformação de agora — o que a tela desenha.
     pub fn transformacao(&self) -> Option<(transformar::Caixa, Transformacao)> {
+        if let Some(c) = self.caixa_do_caminho_solto() {
+            return Some(c);
+        }
         if let Some(s) = &self.selecao_solta {
             return Some((s.molde.caixa().into(), s.t));
         }
@@ -1879,6 +1885,10 @@ impl Sessao {
     /// A camada passa a mostrar o conteúdo transformado por `t` (ou a
     /// seleção, no "Transformar seleção").
     pub fn definir_transformacao(&mut self, t: Transformacao) {
+        if self.caminho_solto.is_some() {
+            self.transformar_o_caminho_solto(t);
+            return;
+        }
         if let Some(solta) = self.selecao_solta.as_mut() {
             if solta.t == t {
                 return;
@@ -1973,6 +1983,9 @@ impl Sessao {
     /// Enter: a transformação vira um passo do desfazer. A seleção anda junto
     /// num deslocamento; com escala ou giro, sai (o recorte já não é o mesmo).
     pub fn aplicar_transformacao(&mut self) -> bool {
+        if self.caminho_solto.is_some() {
+            return self.aplicar_o_caminho_solto();
+        }
         if let Some(solta) = self.selecao_solta.take() {
             // Um passo de seleção: não muda pixel, não pede para salvar.
             return match self.passo_da_selecao(Some(solta.antes), "Transformar seleção") {
@@ -2073,6 +2086,9 @@ impl Sessao {
 
     /// Esc: a camada volta a ser o que era.
     pub fn cancelar_transformacao(&mut self) {
+        if self.cancelar_o_caminho_solto() {
+            return;
+        }
         if let Some(solta) = self.selecao_solta.take() {
             self.selecao = Some(solta.antes);
             self.versao += 1;
@@ -2537,7 +2553,7 @@ impl Sessao {
     }
 
     pub fn transformando(&self) -> bool {
-        self.flutuante.is_some() || self.selecao_solta.is_some()
+        self.flutuante.is_some() || self.selecao_solta.is_some() || self.caminho_solto.is_some()
     }
 
     /// ⌘J com seleção: uma camada nova só com o selecionado, logo acima. Sem

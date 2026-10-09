@@ -495,6 +495,23 @@ pub fn transformar(c: &mut Caminho, m: [f64; 6]) {
     }
 }
 
+/// Só os componentes `subs` pela afim (o ⌘T de componentes escolhidos).
+pub fn transformar_subcaminhos(c: &mut Caminho, subs: &[u64], m: [f64; 6]) {
+    let f = |p: Ponto| {
+        Ponto::novo(
+            m[0] * p.x + m[1] * p.y + m[2],
+            m[3] * p.x + m[4] * p.y + m[5],
+        )
+    };
+    for s in c.subcaminhos.iter_mut().filter(|s| subs.contains(&s.id)) {
+        for a in &mut s.ancoras {
+            a.ponto = f(a.ponto);
+            a.entrada = a.entrada.map(f);
+            a.saida = a.saida.map(f);
+        }
+    }
+}
+
 // ------------------------------------------------- formas prontas (testes, comandos)
 
 /// Um retângulo fechado, no sentido horário, num caminho novo.

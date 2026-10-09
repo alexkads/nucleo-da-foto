@@ -30,6 +30,40 @@ pub(super) struct GestoVetorial {
     indice: usize,
 }
 
+/// "Transformar caminho" em curso (⌘T com uma ferramenta de caminho): a
+/// caixa dos componentes, o caminho de antes e a transformação de agora — a
+/// mesma caixa e as mesmas alças do ⌘T dos pixels.
+#[derive(Clone, Debug)]
+pub(super) struct CaminhoSolto {
+    lugar: LugarDoCaminho,
+    indice: usize,
+    antes: Caminho,
+    subs: Vec<u64>,
+    caixa: crate::transformar::Caixa,
+    pub(super) t: crate::transformar::Transformacao,
+}
+
+/// A afim da transformação na caixa, em `f64`: `p ↦ (a·x + b·y + c, d·x +
+/// e·y + f)` — a mesma conta de `Transformacao::aplicar`.
+pub fn afim_da_transformacao(
+    caixa: &crate::transformar::Caixa,
+    t: &crate::transformar::Transformacao,
+) -> [f64; 6] {
+    let cx = caixa.x as f64 + caixa.largura as f64 / 2.0;
+    let cy = caixa.y as f64 + caixa.altura as f64 / 2.0;
+    let (sx, sy) = (t.escala_x as f64, t.escala_y as f64);
+    let (sen, cos) = (t.angulo as f64).sin_cos();
+    let (a, b, d, e) = (sx * cos, -sy * sen, sx * sen, sy * cos);
+    [
+        a,
+        b,
+        cx + t.dx as f64 - a * cx - b * cy,
+        d,
+        e,
+        cy + t.dy as f64 - d * cx - e * cy,
+    ]
+}
+
 /// As opções de "Fazer seleção" (o diálogo do Photoshop).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OpcoesDaSelecaoDoCaminho {
@@ -540,6 +574,115 @@ impl Sessao {
         let antes = self.versao_da_selecao;
         self.entrar_na_selecao(nova, opcoes.operacao, "Fazer seleção");
         self.versao_da_selecao != antes
+    }
+
+    // ------------------------------------------------- transformar caminho
+
+    /// ⌘T com uma ferramenta de caminho: a caixa em volta dos componentes
+    /// escolhidos (ou do caminho inteiro), com as alças do ⌘T. Enter aplica
+    /// num passo ("Transformar caminho"), Esc volta. Falso sem caminho com
+    /// âncoras.
+    pub fn comecar_a_transformar_caminho(&mut self) -> bool {
+        self.fechar_o_que_esta_aberto();
+        let Some(lugar) = self.alvo_vetorial() else {
+            return false;
+        };
+        let Some(c) = self.doc.caminho(lugar).cloned() else {
+            return false;
+        };
+        let mut subs: Vec<u64> = self
+            .caneta
+            .componentes_escolhidos()
+            .iter()
+            .copied()
+            .collect();
+        subs.extend(self.caneta.pontos_escolhidos().iter().map(|r| r.sub));
+        subs.sort_unstable();
+        subs.dedup();
+        if subs.is_empty() {
+            subs = c.subcaminhos.iter().map(|s| s.id).collect();
+        }
+        let caixa = c
+            .subcaminhos
+            .iter()
+            .filter(|s| subs.contains(&s.id))
+            .filter_map(|s| s.limites())
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)));
+        let Some((x0, y0, x1, y1)) = caixa else {
+            return false;
+        };
+        let (x0, y0) = (x0.floor(), y0.floor());
+        let (x1, y1) = (x1.ceil().max(x0 + 1.0), y1.ceil().max(y0 + 1.0));
+        self.caminho_solto = Some(CaminhoSolto {
+            lugar,
+            indice: self.indice_do_lugar(lugar),
+            antes: c,
+            subs,
+            caixa: crate::transformar::Caixa::nova(
+                x0 as i32,
+                y0 as i32,
+                (x1 - x0) as u32,
+                (y1 - y0) as u32,
+            ),
+            t: crate::transformar::Transformacao::default(),
+        });
+        self.versao += 1;
+        true
+    }
+
+    pub fn transformando_o_caminho(&self) -> bool {
+        self.caminho_solto.is_some()
+    }
+
+    pub(super) fn caixa_do_caminho_solto(
+        &self,
+    ) -> Option<(crate::transformar::Caixa, crate::transformar::Transformacao)> {
+        self.caminho_solto.as_ref().map(|c| (c.caixa, c.t))
+    }
+
+    /// A transformação de agora no caminho, ao vivo (sem passo).
+    pub(super) fn transformar_o_caminho_solto(&mut self, t: crate::transformar::Transformacao) {
+        let Some(solto) = self.caminho_solto.as_mut() else {
+            return;
+        };
+        if solto.t == t {
+            return;
+        }
+        solto.t = t;
+        let mut c = solto.antes.clone();
+        edicao::transformar_subcaminhos(
+            &mut c,
+            &solto.subs,
+            afim_da_transformacao(&solto.caixa, &t),
+        );
+        let (lugar, indice) = (solto.lugar, solto.indice);
+        self.doc.definir_caminho(lugar, indice, Some(c));
+        self.versao += 1;
+    }
+
+    /// Enter: o caminho transformado num passo.
+    pub(super) fn aplicar_o_caminho_solto(&mut self) -> bool {
+        let Some(solto) = self.caminho_solto.take() else {
+            return false;
+        };
+        self.versao += 1;
+        let nome = if solto.t.so_desloca() {
+            "Mover caminho"
+        } else {
+            "Transformar caminho"
+        };
+        self.registrar_caminho(nome, solto.lugar, solto.indice, Some(solto.antes))
+    }
+
+    /// Esc: o caminho volta.
+    pub(super) fn cancelar_o_caminho_solto(&mut self) -> bool {
+        let Some(solto) = self.caminho_solto.take() else {
+            return false;
+        };
+        self.doc
+            .definir_caminho(solto.lugar, solto.indice, Some(solto.antes));
+        self.versao += 1;
+        true
     }
 
     // ------------------------------------------------- máscara vetorial

@@ -502,3 +502,65 @@ fn densidade_e_difusao_da_mascara_vetorial_sem_mexer_no_caminho() {
     let zero = crate::vista::Vista::nova(s.base(), s.documento(), 300);
     assert_eq!(s.vista().imagem().as_raw(), zero.imagem().as_raw());
 }
+
+#[test]
+fn transformar_caminho_com_a_caixa_do_cmd_t() {
+    use crate::transformar::Transformacao;
+    let mut s = sessao();
+    quadrado(&mut s);
+    let antes = s.caminho_alvo().cloned().unwrap();
+    assert!(s.comecar_a_transformar_caminho());
+    assert!(s.transformando() && s.transformando_o_caminho());
+    let (caixa, _) = s.transformacao().unwrap();
+    assert_eq!(
+        (caixa.x, caixa.y, caixa.largura, caixa.altura),
+        (100, 100, 200, 200)
+    );
+    // Gira 90° em volta do centro (200, 200) e dobra a largura.
+    s.definir_transformacao(Transformacao {
+        escala_x: 2.0,
+        angulo: std::f32::consts::FRAC_PI_2,
+        ..Default::default()
+    });
+    let a = s.caminho_alvo().unwrap().subcaminhos[0].ancoras[0].ponto;
+    // (100,100) → relativo (-100,-100) → escala (-200,-100) → gira 90°: (100,-200).
+    assert!(a.distancia(p(300.0, 0.0)) < 1e-3, "{a:?}");
+    let posicao = s.historico().posicao();
+    assert_eq!(s.historico().posicao(), posicao, "ao vivo, sem passo");
+    // Esc volta.
+    s.cancelar_transformacao();
+    assert_eq!(s.caminho_alvo(), Some(&antes));
+    // De novo, só andando: um passo "Mover caminho"; desfazer volta.
+    s.comecar_a_transformar_caminho();
+    s.definir_transformacao(Transformacao::deslocamento(10.0, 5.0));
+    assert!(s.aplicar_transformacao());
+    assert_eq!(nome_do_ultimo(&s), "Mover caminho");
+    assert_eq!(
+        s.caminho_alvo().unwrap().subcaminhos[0].ancoras[0].ponto,
+        p(110.0, 105.0)
+    );
+    s.desfazer();
+    assert_eq!(s.caminho_alvo(), Some(&antes));
+    // Com um componente escolhido, só ele.
+    s.caneta.opcoes.operacao = OperacaoDoComponente::Somar;
+    for q in [p(400.0, 50.0), p(450.0, 50.0), p(450.0, 90.0)] {
+        clicar(&mut s, q);
+    }
+    s.caneta.encerrar();
+    let segundo = s.caminho_alvo().unwrap().subcaminhos[1].id;
+    s.caneta.escolher_componentes([segundo]);
+    s.comecar_a_transformar_caminho();
+    s.definir_transformacao(Transformacao {
+        escala_x: 2.0,
+        escala_y: 2.0,
+        ..Default::default()
+    });
+    assert!(s.aplicar_transformacao());
+    assert_eq!(nome_do_ultimo(&s), "Transformar caminho");
+    let c = s.caminho_alvo().unwrap();
+    assert_eq!(
+        c.subcaminhos[0], antes.subcaminhos[0],
+        "o outro componente fica"
+    );
+    assert!(c.subcaminhos[1].ancoras[0].ponto.distancia(p(375.0, 30.0)) < 1e-3);
+}
