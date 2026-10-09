@@ -19,6 +19,7 @@ pub mod contrato;
 pub mod deformar;
 pub mod difusao;
 pub mod documento;
+pub mod filtros;
 pub mod historico;
 pub mod liquidificar;
 pub mod mesclagem;

@@ -788,3 +788,38 @@ fn reselecionar_traz_a_ultima_desmarcada() {
     s.desfazer();
     assert!(s.selecao().is_none());
 }
+
+/// Filtro › Desfoque gaussiano: a prévia troca os pixels sem passo, o OK vira
+/// um passo com o nome do filtro (que o desfazer tira), e o Cancelar volta.
+#[test]
+fn o_filtro_tem_previa_passo_unico_e_cancelar() {
+    use crate::filtros::{filtrada, Filtro};
+    let mut s = sessao();
+    // Camada vazia: nada para filtrar.
+    assert!(s.comecar_filtro().is_none());
+    let foto = CamadaDePixels::da_imagem(&base());
+    s.criar_camada_da_fotografia(foto);
+    let passos = s.historico().posicao();
+    let filtro = Filtro::DesfoqueGaussiano { raio: 4.0 };
+    let (original, selecao) = s.comecar_filtro().expect("a fotografia filtra");
+    let antes = s.camada_ativa().pixels.pixel(60, 60);
+    s.mostrar_filtro(filtrada(&original, filtro, selecao.as_deref()));
+    assert_eq!(s.historico().posicao(), passos, "a prévia não é passo");
+    let depois = s.camada_ativa().pixels.pixel(60, 60);
+    assert_ne!(depois, antes, "a prévia desfocou");
+    s.cancelar_filtro();
+    assert_eq!(s.camada_ativa().pixels.pixel(60, 60), antes);
+
+    let (original, selecao) = s.comecar_filtro().unwrap();
+    s.mostrar_filtro(filtrada(&original, filtro, selecao.as_deref()));
+    assert!(s.aplicar_filtro(filtro.nome()));
+    assert!(!s.filtrando());
+    assert_eq!(s.historico().posicao(), passos + 1);
+    assert_eq!(
+        s.historico().a_desfazer().map(|p| p.descricao(s.documento())),
+        Some("Desfoque gaussiano".to_string())
+    );
+    assert_eq!(s.camada_ativa().pixels.pixel(60, 60), depois);
+    s.desfazer();
+    assert_eq!(s.camada_ativa().pixels.pixel(60, 60), antes);
+}

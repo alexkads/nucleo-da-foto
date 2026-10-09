@@ -147,6 +147,9 @@ pub struct Sessao {
     doc: Documento,
     /// O Liquidificar aberto: a camada (e se é a máscara dela) e o campo.
     liquido: Option<(usize, bool, crate::liquidificar::Liquido)>,
+    /// O filtro com o diálogo aberto: a camada, se é a máscara, e o alvo como
+    /// era (a prévia troca os pixels; Cancelar volta a ele).
+    filtro: Option<(usize, bool, CamadaDePixels)>,
     /// A força do Liquidificar (a "Pressão" do Photoshop), 0..=1.
     pub forca_do_liquido: f32,
     /// O documento como abriu nesta sessão — o "antes" do Antes/Depois.
@@ -263,6 +266,7 @@ impl Sessao {
         Self {
             base,
             liquido: None,
+            filtro: None,
             forca_do_liquido: 0.5,
             doc_inicial: doc.clone(),
             mostrando_antes: false,
@@ -394,7 +398,8 @@ impl Sessao {
             && (self.flutuante.is_some()
                 || self.traco.is_some()
                 || self.selecao_solta.is_some()
-                || self.liquido.is_some())
+                || self.liquido.is_some()
+                || self.filtro.is_some())
         {
             return false;
         }
@@ -525,6 +530,7 @@ impl Sessao {
         self.aplicar_transformacao();
         self.terminar_de_mover_o_contorno();
         self.aplicar_liquidificacao();
+        self.cancelar_filtro();
     }
 
     /// Escolhe a camada — os pixels dela, e não a máscara.
@@ -2176,6 +2182,84 @@ impl Sessao {
         let area = liquido.area;
         *self.doc.camadas[camada].alvo_mut(na_mascara) = liquido.original().clone();
         self.refazer_a_vista(&area);
+    }
+
+    // ------------------------------------------------------------- filtros
+
+    /// Filtro › Desfoque gaussiano / Máscara de nitidez: abre o diálogo na
+    /// camada escolhida (ou na máscara dela) e devolve o alvo e a seleção para
+    /// a conta ([`crate::filtros::filtrada`]) correr em segundo plano. `None`
+    /// com a camada escondida, os pixels bloqueados, numa camada de ajuste sem
+    /// a máscara escolhida, ou sem nada para filtrar.
+    pub fn comecar_filtro(&mut self) -> Option<(CamadaDePixels, Option<Arc<Selecao>>)> {
+        if let Some((_, _, original)) = &self.filtro {
+            return Some((original.clone(), self.selecao.clone()));
+        }
+        self.fechar_o_que_esta_aberto();
+        let na_mascara = self.na_mascara();
+        if !self.pode_pintar()
+            || (!na_mascara && (self.camada_ativa().ajuste.is_some() || self.pixels_bloqueados()))
+        {
+            return None;
+        }
+        let camada = self.ativa();
+        let original = self.doc.camadas[camada].alvo(na_mascara).clone();
+        if original.existentes().next().is_none() {
+            return None;
+        }
+        self.filtro = Some((camada, na_mascara, original.clone()));
+        Some((original, self.selecao.clone()))
+    }
+
+    pub fn filtrando(&self) -> bool {
+        self.filtro.is_some()
+    }
+
+    /// A prévia: o alvo passa a ser `pixels` (a conta de agora), sem passo.
+    pub fn mostrar_filtro(&mut self, pixels: CamadaDePixels) {
+        let Some((camada, na_mascara, _)) = &self.filtro else {
+            return;
+        };
+        let (camada, na_mascara) = (*camada, *na_mascara);
+        *self.doc.camadas[camada].alvo_mut(na_mascara) = pixels;
+        self.versao += 1;
+        let tudo = Retangulo::inteiro(self.doc.largura(), self.doc.altura());
+        self.refazer_a_vista(&tudo);
+    }
+
+    /// OK: o que a prévia mostra vira **um** passo com o nome do filtro; sem
+    /// mudança, nenhum.
+    pub fn aplicar_filtro(&mut self, nome: &str) -> bool {
+        let Some((camada, na_mascara, original)) = self.filtro.take() else {
+            return false;
+        };
+        match operacoes::diferenca(&original, self.doc.camadas[camada].alvo(na_mascara)) {
+            Some(mudanca) => {
+                self.hist.registrar(Comando::Varios {
+                    nome: nome.to_string(),
+                    passos: vec![Comando::Traco {
+                        camada,
+                        na_mascara,
+                        mudanca,
+                    }],
+                });
+                self.versao += 1;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Cancelar (e qualquer outro comando com o diálogo aberto): o alvo volta
+    /// a ser o que era, sem passo.
+    pub fn cancelar_filtro(&mut self) {
+        let Some((camada, na_mascara, original)) = self.filtro.take() else {
+            return;
+        };
+        *self.doc.camadas[camada].alvo_mut(na_mascara) = original;
+        self.versao += 1;
+        let tudo = Retangulo::inteiro(self.doc.largura(), self.doc.altura());
+        self.refazer_a_vista(&tudo);
     }
 
     // ------------------------------------------------------------ deformar
