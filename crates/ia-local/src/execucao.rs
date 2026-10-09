@@ -77,6 +77,15 @@ impl Backend {
                 _ => Err("o ONNX Runtime ainda não foi baixado".into()),
             };
         }
+        if matches!(self, Backend::Automatico | Backend::Cpu) {
+            return Ok(());
+        }
+        // 🚨 Antes de qualquer pergunta ao `ort`, o runtime **nosso** carregado.
+        // No Windows (`load-dynamic`), sem o `init_from` o `ort` carrega o
+        // `onnxruntime.dll` que o sistema achar — o do System32, mais velho — e
+        // entra em pânico (`MissingApi`) dentro do laço de mensagens, que não
+        // desenrola: abrir o editor fechava o app (0.1.122, Windows 10).
+        crate::runtime::garantir()?;
         match self {
             Backend::Automatico | Backend::Cpu => Ok(()),
             #[cfg(target_os = "macos")]
