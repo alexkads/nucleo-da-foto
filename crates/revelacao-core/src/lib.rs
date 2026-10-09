@@ -23,6 +23,10 @@
 //! `o_fragmento_revela_o_mesmo_pixel_que_o_compute`, em [`motor`].
 
 pub mod ajustes;
+/// A mesma revelação em cada API gráfica da máquina (Desempenho → Comparar
+/// APIs gráficas, e o binário `medir-gpu`).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod comparacao_de_apis;
 pub mod cronometro;
 pub mod guia;
 pub mod jpeg;
