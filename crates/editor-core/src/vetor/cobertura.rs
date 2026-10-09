@@ -78,6 +78,26 @@ pub fn rasterizar(caminho: &Caminho, largura: u32, altura: u32, opcoes: &Opcoes)
     acumulado.unwrap_or_else(|| Selecao::vazia(largura, altura))
 }
 
+/// A miniatura do caminho (o painel Caminhos): a foto `largura × altura`
+/// reduzida a `l × a`, um byte de cobertura por pixel (fechamento virtual,
+/// operações e regra valendo, como na seleção).
+pub fn miniatura(c: &Caminho, largura: u32, altura: u32, l: u32, a: u32) -> Vec<u8> {
+    let mut reduzido = c.clone();
+    let (fx, fy) = (
+        l as f64 / largura.max(1) as f64,
+        a as f64 / altura.max(1) as f64,
+    );
+    super::edicao::transformar(&mut reduzido, [fx, 0.0, 0.0, 0.0, fy, 0.0]);
+    let s = rasterizar(&reduzido, l, a, &Opcoes::da_mascara());
+    let mut v = Vec::with_capacity((l * a) as usize);
+    for y in 0..a {
+        for x in 0..l {
+            v.push(s.valor(x, y));
+        }
+    }
+    v
+}
+
 /// Um componente sozinho, com a regra.
 pub fn do_componente(
     s: &Subcaminho,
