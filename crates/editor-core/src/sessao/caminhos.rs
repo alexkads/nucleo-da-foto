@@ -244,7 +244,7 @@ impl Sessao {
             }
             // Sem caminho escolhido, só a Caneta começa um: o de trabalho,
             // no lugar do anterior (que o passo guarda).
-            None if efetiva == FerramentaVetorial::Caneta => (
+            None if efetiva.desenha() => (
                 LugarDoCaminho::Trabalho,
                 self.caminho_novo_de_trabalho(),
                 self.doc.caminhos.trabalho.clone(),

@@ -647,3 +647,29 @@ fn o_modo_forma_cria_a_camada_de_forma_e_shift_soma() {
     s.confirmar_ajuste();
     assert_eq!(s.compor().get_pixel(200, 200).0, [0, 255, 0]);
 }
+
+#[test]
+fn a_curvatura_e_a_forma_livre_comecam_o_caminho_de_trabalho() {
+    let mut s = sessao();
+    s.usar_ferramenta_vetorial(FerramentaVetorial::Curvatura);
+    for q in [p(100.0, 100.0), p(200.0, 200.0), p(300.0, 100.0)] {
+        clicar(&mut s, q);
+    }
+    assert_eq!(s.alvo_vetorial(), Some(LugarDoCaminho::Trabalho));
+    assert_eq!(s.caminho_alvo().unwrap().subcaminhos[0].ancoras.len(), 3);
+    assert_eq!(nome_do_ultimo(&s), "Ponto de curvatura");
+    s.caneta_encerrar();
+    s.escolher_caminho(None);
+    s.usar_ferramenta_vetorial(FerramentaVetorial::FormaLivre);
+    s.caneta_apertar(p(50.0, 300.0), NADA, M);
+    for i in 1..=40 {
+        s.caneta_arrastar(
+            p(50.0 + i as f64 * 5.0, 300.0 + (i as f64 * 0.3).sin() * 20.0),
+            NADA,
+            M,
+        );
+    }
+    s.caneta_soltar(M);
+    assert_eq!(nome_do_ultimo(&s), "Forma livre");
+    assert!(s.caminho_alvo().unwrap().subcaminhos[0].ancoras.len() >= 2);
+}
