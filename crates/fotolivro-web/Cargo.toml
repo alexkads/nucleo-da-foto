@@ -1,0 +1,17 @@
+[package]
+name = "fotolivro-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "O fotolivro virtual compilado para a galeria do cliente: o mesmo livro do balcão, gerado no navegador dele"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fotolivro = { path = "../fotolivro" }
+# A regra de abrir a foto de pé (e o WebP do acervo), a mesma do desktop.
+foto-codec = { path = "../foto-codec" }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"

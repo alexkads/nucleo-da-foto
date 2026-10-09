@@ -1,0 +1,16 @@
+[package]
+name = "fotolivro"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "O fotolivro virtual do ensaio em PDF — diagramado, navegável e tocável — para o balcão e para a galeria do cliente"
+
+[dependencies]
+image = { version = "0.25", default-features = false }
+# `jpeg`: as fotos entram no PDF em DCT (JPEG), e não em pixels crus — um
+# livro de 30 fotos cai de ~150 MB para poucos MB.
+printpdf = { version = "0.12", default-features = false, features = ["jpeg"] }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
