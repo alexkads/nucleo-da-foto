@@ -34,8 +34,11 @@ pub mod selecao;
 pub mod sessao;
 pub mod tiles;
 pub mod transformar;
+pub mod vetor;
 pub mod vista;
 
+#[cfg(test)]
+mod testes_da_caneta;
 #[cfg(test)]
 mod testes_da_etapa_16;
 #[cfg(test)]

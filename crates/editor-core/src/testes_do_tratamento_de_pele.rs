@@ -526,7 +526,7 @@ fn o_tratamento_inteiro_grava_reabre_e_continua_editavel() {
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("e1/projeto.json")).unwrap())
             .unwrap();
-    assert_eq!(json["formato"], 11);
+    assert_eq!(json["formato"], crate::projeto::FORMATO);
     assert_eq!(json["camadas"][2]["modo"], "luz_linear");
     assert_eq!(json["camadas"][2]["retoque"]["papel"], "alta");
     assert_eq!(json["camadas"][1]["retoque"]["raio"], 4.0);

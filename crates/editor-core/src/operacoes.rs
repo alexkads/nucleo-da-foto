@@ -233,7 +233,7 @@ pub fn preencher(
 /// mesclar não perde conteúdo que ainda pode voltar.
 pub fn mesclar_na_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<Mudanca> {
     let posicoes: Vec<Posicao> = cima.pixels.todos().map(|(p, _)| *p).collect();
-    let leitor = cima.mascara_ativa().map(|m| m.leitor());
+    let leitor = cima.leitor_das_mascaras();
     refazer_tiles(baixo, posicoes, |posicao, velho| {
         let de_cima = cima.pixels.tile(posicao)?;
         let m = leitor.as_ref().map(|l| l.no_tile(posicao));
@@ -269,7 +269,7 @@ pub fn mesclar_na_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<
 pub fn mesclar_recortada_na_base(base: &mut CamadaDePixels, cima: &Camada) -> Option<Mudanca> {
     let preparado = cima.ajuste.as_ref().map(|a| a.preparar());
     let posicoes: Vec<Posicao> = base.todos().map(|(p, _)| *p).collect();
-    let leitor = cima.mascara_ativa().map(|m| m.leitor());
+    let leitor = cima.leitor_das_mascaras();
     refazer_tiles(base, posicoes, |posicao, velho| {
         let velho = velho?;
         let de_cima = match preparado {
@@ -314,7 +314,7 @@ pub fn mesclar_recortada_na_base(base: &mut CamadaDePixels, cima: &Camada) -> Op
 pub fn ajustar_a_de_baixo(baixo: &mut CamadaDePixels, cima: &Camada) -> Option<Mudanca> {
     let preparado = cima.ajuste.as_ref()?.preparar();
     let posicoes: Vec<Posicao> = baixo.existentes().map(|(p, _)| *p).collect();
-    let leitor = cima.mascara_ativa().map(|m| m.leitor());
+    let leitor = cima.leitor_das_mascaras();
     refazer_tiles(baixo, posicoes, |posicao, velho| {
         let velho = velho?;
         let m = leitor.as_ref().map(|l| l.no_tile(posicao));

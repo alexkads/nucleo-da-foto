@@ -29,6 +29,8 @@ use crate::tiles::CamadaDePixels;
 use crate::transformar::{self, Conteudo, Transformacao};
 use crate::vista::Vista;
 
+mod caminhos;
+pub use caminhos::OpcoesDaSelecaoDoCaminho;
 mod pele;
 pub use pele::{
     Frequencia, OrigemDaSeparacao, PedidoDeSeparacao, VistaDaSeparacao, NOME_DO_CLAREAR,
@@ -226,6 +228,13 @@ pub struct Sessao {
     fim_do_ultimo_traco: Option<(f32, f32)>,
     /// "Transformar seleção" em curso: só o contorno, sem os pixels.
     selecao_solta: Option<SelecaoSolta>,
+    /// A Caneta e as ferramentas de caminho (`vetor::caneta`): a ferramenta,
+    /// as opções, o estado do desenho e os pontos escolhidos.
+    pub caneta: crate::vetor::caneta::Caneta,
+    /// O caminho escolhido no painel Caminhos.
+    alvo_vetorial: Option<crate::vetor::LugarDoCaminho>,
+    /// O gesto vetorial com o botão apertado (o antes, para o passo).
+    gesto_vetorial: Option<caminhos::GestoVetorial>,
 }
 
 /// O arrasto do Mover sem seleção: a camada e cada alvo que anda (os pixels,
@@ -233,6 +242,9 @@ pub struct Sessao {
 struct Movendo {
     camada: usize,
     alvos: Vec<(bool, CamadaDePixels)>,
+    /// O deslocamento de agora, desde o começo — a máscara vetorial
+    /// vinculada anda tanto quanto ao soltar.
+    deslocamento: (i64, i64),
 }
 
 /// O par do conteúdo solto: a máscara vinculada (ou os pixels, quando o ⌘T é
@@ -313,6 +325,9 @@ impl Sessao {
             contorno_movendo: None,
             fim_do_ultimo_traco: None,
             selecao_solta: None,
+            caneta: crate::vetor::caneta::Caneta::nova(),
+            alvo_vetorial: None,
+            gesto_vetorial: None,
         }
     }
 
@@ -556,6 +571,7 @@ impl Sessao {
     /// Fecha o que estiver em curso — antes de qualquer gesto que não seja o
     /// próprio traço ou o próprio slider.
     fn fechar_o_que_esta_aberto(&mut self) {
+        self.terminar_gesto_vetorial();
         self.soltar();
         self.confirmar_opacidade();
         self.confirmar_ajuste();
@@ -798,6 +814,17 @@ impl Sessao {
             }
             // As guias já mudaram no `aplicar`; a escolha fica.
             Comando::Guias { .. } => return,
+            // O caminho que o passo mexeu fica escolhido no painel (se ainda
+            // existe), e a Caneta esquece o que não existe mais.
+            Comando::Caminho { lugar, .. } => {
+                if self.doc.caminho(*lugar).is_some() {
+                    self.alvo_vetorial = Some(*lugar);
+                }
+                self.caneta
+                    .conferir(self.alvo_vetorial.and_then(|l| self.doc.caminho(l)));
+                self.versao += 1;
+                return;
+            }
             Comando::Varios { passos, .. } => {
                 if para_frente {
                     passos.iter().for_each(|p| self.seguir_o_passo(p, true));
@@ -827,6 +854,16 @@ impl Sessao {
                 } else if entrou {
                     self.na_mascara = true;
                 }
+            }
+            Comando::MascaraVetorial { camada, .. } => {
+                let lugar = crate::vetor::LugarDoCaminho::Mascara(*camada);
+                if self.doc.caminho(lugar).is_some() {
+                    self.alvo_vetorial = Some(lugar);
+                } else if self.alvo_vetorial == Some(lugar) {
+                    self.alvo_vetorial = None;
+                }
+                self.caneta
+                    .conferir(self.alvo_vetorial.and_then(|l| self.doc.caminho(l)));
             }
             _ => {}
         }
@@ -1644,6 +1681,7 @@ impl Sessao {
         self.movendo = Some(Movendo {
             camada: ativa,
             alvos,
+            deslocamento: (0, 0),
         });
         true
     }
@@ -1654,9 +1692,10 @@ impl Sessao {
             self.definir_transformacao(Transformacao::deslocamento(dx as f32, dy as f32));
             return;
         }
-        let Some(movendo) = self.movendo.as_ref() else {
+        let Some(movendo) = self.movendo.as_mut() else {
             return;
         };
+        movendo.deslocamento = (dx, dy);
         let camada = movendo.camada;
         let novos: Vec<(bool, CamadaDePixels)> = movendo
             .alvos
@@ -1708,6 +1747,15 @@ impl Sessao {
                 )
             })
             .collect();
+        // A máscara vetorial vinculada anda com os pixels da camada.
+        let (dx, dy) = movendo.deslocamento;
+        let mut passos = passos;
+        if movendo.alvos.iter().any(|(na_mascara, _)| !na_mascara) && !passos.is_empty() {
+            passos.extend(self.passo_da_mascara_vetorial_junto(
+                camada,
+                [1.0, 0.0, dx as f64, 0.0, 1.0, dy as f64],
+            ));
+        }
         if passos.is_empty() {
             return false;
         }
@@ -1930,6 +1978,19 @@ impl Sessao {
                 None => false,
             };
         }
+        let afim = self.transformacao().map(|(caixa, t)| {
+            let o = t.aplicar(&caixa, 0.0, 0.0);
+            let ex = t.aplicar(&caixa, 1.0, 0.0);
+            let ey = t.aplicar(&caixa, 0.0, 1.0);
+            [
+                (ex.0 - o.0) as f64,
+                (ey.0 - o.0) as f64,
+                o.0 as f64,
+                (ex.1 - o.1) as f64,
+                (ey.1 - o.1) as f64,
+                o.1 as f64,
+            ]
+        });
         let Some(f) = self.flutuante.take() else {
             return false;
         };
@@ -1973,6 +2034,13 @@ impl Sessao {
                 )
             })
             .collect();
+        // A máscara vetorial vinculada acompanha a afim do ⌘T (o Deformar não
+        // é afim: o caminho fica — como numa camada com a corrente solta).
+        let mut pixels = pixels;
+        let leva_a_camada = !f.na_mascara || f.par.as_ref().is_some_and(|p| !p.na_mascara);
+        if let (Some(m), false, true, false) = (afim, deformou, leva_a_camada, pixels.is_empty()) {
+            pixels.extend(self.passo_da_mascara_vetorial_junto(f.camada, m));
+        }
         let selecao = self.passo_da_selecao(selecao_antes, "Mover seleção");
         let nome = if deformou {
             "Deformar"

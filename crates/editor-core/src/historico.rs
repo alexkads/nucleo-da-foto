@@ -17,6 +17,7 @@ use crate::pincel::Mudanca;
 use crate::retangulo::Retangulo;
 use crate::selecao::Selecao;
 use crate::tiles::{retangulo_do_tile, BYTES_DO_TILE};
+use crate::vetor::{Caminho, LugarDoCaminho, MascaraVetorial};
 
 /// O teto de memória do histórico (tiles guardados), em bytes.
 pub const TETO_DO_HISTORICO: usize = 256 * 1024 * 1024;
@@ -111,6 +112,24 @@ pub enum Comando {
         nome: String,
         antes: Vec<crate::documento::Guia>,
         depois: Vec<crate::documento::Guia>,
+    },
+    /// Um caminho antes e depois de um gesto da Caneta (ou de um comando do
+    /// painel Caminhos): `None → Some` cria, `Some → None` exclui. O nomeado
+    /// que entra vai para a posição `indice` da lista. Só vetores — nenhum
+    /// tile é copiado; na máscara vetorial, a foto muda onde a curva passou.
+    Caminho {
+        nome: String,
+        lugar: LugarDoCaminho,
+        indice: usize,
+        antes: Option<Box<Caminho>>,
+        depois: Option<Box<Caminho>>,
+    },
+    /// A máscara vetorial da camada antes e depois: criar, excluir, ligar,
+    /// desligar, vincular.
+    MascaraVetorial {
+        camada: usize,
+        antes: Option<Box<MascaraVetorial>>,
+        depois: Option<Box<MascaraVetorial>>,
     },
 }
 
@@ -209,7 +228,32 @@ impl Comando {
             Comando::Mesclar { de_cima, .. } => format!("Mesclar {} para baixo", de_cima.nome),
             Comando::Selecao { nome, .. }
             | Comando::Varios { nome, .. }
-            | Comando::Guias { nome, .. } => nome.clone(),
+            | Comando::Guias { nome, .. }
+            | Comando::Caminho { nome, .. } => nome.clone(),
+            Comando::MascaraVetorial {
+                camada,
+                antes,
+                depois,
+            } => {
+                let nome = nome(doc, *camada);
+                match (antes.as_deref(), depois.as_deref()) {
+                    (None, _) => format!("Máscara vetorial em {nome}"),
+                    (Some(_), None) => format!("Excluir a máscara vetorial de {nome}"),
+                    (Some(a), Some(d)) if a.ativa != d.ativa => {
+                        let acao = if d.ativa { "Ligar" } else { "Desligar" };
+                        format!("{acao} a máscara vetorial de {nome}")
+                    }
+                    (Some(a), Some(d)) if a.vinculada != d.vinculada => {
+                        let acao = if d.vinculada {
+                            "Vincular"
+                        } else {
+                            "Desvincular"
+                        };
+                        format!("{acao} a máscara vetorial de {nome}")
+                    }
+                    _ => format!("Máscara vetorial de {nome}"),
+                }
+            }
             Comando::MoverCamada { de, para } => {
                 // O nome é o da camada que andou, esteja ela onde estiver agora.
                 let onde = if doc.camadas.get(*para).is_some() {
@@ -232,6 +276,11 @@ impl Comando {
         let ultima = quantas.checked_sub(1)?;
         let i = match self {
             Comando::Selecao { .. } | Comando::Guias { .. } => return None,
+            Comando::Caminho { lugar, .. } => match lugar {
+                LugarDoCaminho::Mascara(i) => *i,
+                _ => return None,
+            },
+            Comando::MascaraVetorial { camada, .. } => *camada,
             // O último aplicado decide: para a frente é o último da lista; para
             // trás, o primeiro.
             Comando::Varios { passos, .. } => {
@@ -345,6 +394,44 @@ impl Comando {
             Comando::Guias { antes, depois, .. } => {
                 doc.guias = if para_frente { depois } else { antes }.clone();
                 Retangulo::default()
+            }
+            Comando::Caminho {
+                lugar,
+                indice,
+                antes,
+                depois,
+                ..
+            } => {
+                let lado = if para_frente { depois } else { antes };
+                doc.definir_caminho(*lugar, *indice, lado.as_deref().cloned())
+            }
+            Comando::MascaraVetorial {
+                camada,
+                antes,
+                depois,
+            } => {
+                let (de, para) = if para_frente {
+                    (antes, depois)
+                } else {
+                    (depois, antes)
+                };
+                let Some(c) = doc.camadas.get_mut(*camada) else {
+                    return Retangulo::default();
+                };
+                c.mascara_vetorial = para.as_deref().cloned();
+                // Ligar, desligar, criar ou excluir pode mudar a camada
+                // inteira (a vazia revela tudo; desligada, a camada aparece
+                // toda): a área da camada, e a caixa das curvas.
+                let caixa = |m: &Option<Box<MascaraVetorial>>| {
+                    m.as_deref().map_or(Retangulo::default(), |m| {
+                        m.caminho.retangulo(largura, altura)
+                    })
+                };
+                if c.visivel {
+                    c.area().uniao(&caixa(de)).uniao(&caixa(para))
+                } else {
+                    Retangulo::default()
+                }
             }
             Comando::Varios { passos, .. } => {
                 let mut sujo = Retangulo::default();
@@ -667,6 +754,24 @@ impl Historico {
             // O salvo estava no meio do que virou um passo só.
             self.salvo_em = None;
         }
+    }
+
+    /// O último passo (aplicado, sem nada para refazer) passa a se chamar
+    /// `nome` no Histórico — um gesto que usa outro por dentro ("Preencher
+    /// caminho" é um traço; "Contornar caminho", pinceladas).
+    pub fn renomear_o_ultimo(&mut self, nome: &str) {
+        if self.posicao == 0 || self.posicao != self.passos.len() {
+            return;
+        }
+        let ultimo = self.passos.pop().expect("posição > 0");
+        let passos = match ultimo {
+            Comando::Varios { passos, .. } => passos,
+            outro => vec![outro],
+        };
+        self.passos.push(Comando::Varios {
+            nome: nome.into(),
+            passos,
+        });
     }
 
     fn respeitar_o_teto(&mut self) {
