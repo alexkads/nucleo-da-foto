@@ -816,10 +816,55 @@ fn o_filtro_tem_previa_passo_unico_e_cancelar() {
     assert!(!s.filtrando());
     assert_eq!(s.historico().posicao(), passos + 1);
     assert_eq!(
-        s.historico().a_desfazer().map(|p| p.descricao(s.documento())),
+        s.historico()
+            .a_desfazer()
+            .map(|p| p.descricao(s.documento())),
         Some("Desfoque gaussiano".to_string())
     );
     assert_eq!(s.camada_ativa().pixels.pixel(60, 60), depois);
     s.desfazer();
     assert_eq!(s.camada_ativa().pixels.pixel(60, 60), antes);
+}
+
+/// Guias: o arrasto não é passo, o soltar é; ⌘Z tira; "Limpar guias" é um
+/// passo; o projeto grava as guias no manifesto, sem passo de guia no
+/// histórico salvo, e reabre com elas.
+#[test]
+fn as_guias_tem_passo_e_vao_no_manifesto() {
+    use crate::documento::Guia;
+    let mut s = sessao();
+    let g = |vertical, posicao| Guia { vertical, posicao };
+    s.guias_ao_vivo(vec![g(true, 100.0)]);
+    let passos = s.historico().posicao();
+    s.guias_ao_vivo(vec![g(true, 120.0)]);
+    assert_eq!(s.historico().posicao(), passos, "o arrasto não é passo");
+    assert!(s.confirmar_guias("Nova guia", Vec::new()));
+    assert!(s.alterado());
+    s.guias_ao_vivo(vec![g(true, 120.0), g(false, 40.5)]);
+    s.confirmar_guias("Nova guia", vec![g(true, 120.0)]);
+    s.desfazer();
+    assert_eq!(s.guias(), [g(true, 120.0)]);
+    s.refazer();
+    assert_eq!(s.guias().len(), 2);
+
+    let pasta = tempfile::tempdir().unwrap();
+    let projeto = projeto(pasta.path());
+    let (doc, hist) = s.instantaneo();
+    projeto.salvar("e1", &base(), &doc, &hist, 1).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(pasta.path().join("e1").join("projeto.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(json["guias"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        json["historico"]["passos"].as_array().map(Vec::len),
+        Some(0)
+    );
+    let aberto = projeto.abrir(&base()).unwrap().unwrap();
+    assert_eq!(aberto.documento.guias, doc.guias);
+
+    assert!(s.limpar_guias());
+    assert!(s.guias().is_empty());
+    s.desfazer();
+    assert_eq!(s.guias().len(), 2);
 }

@@ -439,11 +439,22 @@ pub const NOME_DA_PRIMEIRA: &str = "Pintura";
 /// base").
 pub const NOME_DA_FOTOGRAFIA: &str = "Fotografia";
 
+/// Uma guia do Photoshop: uma linha que não imprime, em pixels da foto.
+/// `vertical` = a linha de cima a baixo (sai da régua da esquerda), na
+/// coluna `posicao`; senão, horizontal, na linha `posicao`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Guia {
+    pub vertical: bool,
+    pub posicao: f32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Documento {
     pub base: BaseRef,
     /// De baixo para cima — a de índice 0 fica logo acima da base.
     pub camadas: Vec<Camada>,
+    /// As guias (não entram na imagem editada nem no `neutro`).
+    pub guias: Vec<Guia>,
 }
 
 impl Documento {
@@ -453,6 +464,7 @@ impl Documento {
         Self {
             base,
             camadas: vec![camada],
+            guias: Vec::new(),
         }
     }
 

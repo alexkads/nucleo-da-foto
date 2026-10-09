@@ -224,6 +224,10 @@ pub struct Manifesto {
     pub historico: HistoricoSalvo,
     /// `None` quando o projeto não tem efeito (C30).
     pub composta: Option<CompostaSalva>,
+    /// As guias (0.1.123). Campo opcional: o formato não muda, e a versão de
+    /// antes só não as lê.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guias: Vec<crate::documento::Guia>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -564,8 +568,8 @@ fn salvar_passo(
                 .map(|p| salvar_passo(p, gravar_tile))
                 .collect::<Result<_, _>>()?,
         },
-        // `Historico::para_gravar` já tirou os passos de seleção.
-        Comando::Selecao { .. } => {
+        // `Historico::para_gravar` já tirou os passos de seleção e de guias.
+        Comando::Selecao { .. } | Comando::Guias { .. } => {
             return Err(ErroDoProjeto::Formato(
                 "passo de seleção não vai para o projeto".into(),
             ))
@@ -908,6 +912,7 @@ impl Projeto {
             camadas,
             historico: HistoricoSalvo { passos, posicao },
             composta,
+            guias: doc.guias.clone(),
         };
         let json = serde_json::to_vec_pretty(&manifesto)
             .map_err(|e| ErroDoProjeto::Formato(e.to_string()))?;
@@ -1068,6 +1073,7 @@ impl Projeto {
             documento: Documento {
                 base: manifesto.base.clone(),
                 camadas,
+                guias: manifesto.guias.clone(),
             },
             // Aberto é salvo: a posição gravada é o ponto de salvamento.
             historico: Historico::de_partes(passos, posicao, Some(posicao)),

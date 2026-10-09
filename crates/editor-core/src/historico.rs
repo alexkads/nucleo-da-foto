@@ -103,6 +103,15 @@ pub enum Comando {
     /// da origem e entra na camada nova), o Mover que leva a seleção junto.
     /// Um desfazer volta todos, do último ao primeiro.
     Varios { nome: String, passos: Vec<Comando> },
+    /// As guias antes e depois ("Nova guia", "Mover guia", "Excluir guia",
+    /// "Limpar guias"). Como a seleção, **não** vai para o histórico do
+    /// projeto: as guias de agora vão no manifesto (`guias`), e o formato não
+    /// muda — a versão de antes só as ignora.
+    Guias {
+        nome: String,
+        antes: Vec<crate::documento::Guia>,
+        depois: Vec<crate::documento::Guia>,
+    },
 }
 
 impl Comando {
@@ -198,7 +207,9 @@ impl Comando {
             Comando::CriarCamada { camada, .. } => format!("Criar {}", camada.nome),
             Comando::ExcluirCamada { camada, .. } => format!("Excluir {}", camada.nome),
             Comando::Mesclar { de_cima, .. } => format!("Mesclar {} para baixo", de_cima.nome),
-            Comando::Selecao { nome, .. } | Comando::Varios { nome, .. } => nome.clone(),
+            Comando::Selecao { nome, .. }
+            | Comando::Varios { nome, .. }
+            | Comando::Guias { nome, .. } => nome.clone(),
             Comando::MoverCamada { de, para } => {
                 // O nome é o da camada que andou, esteja ela onde estiver agora.
                 let onde = if doc.camadas.get(*para).is_some() {
@@ -220,7 +231,7 @@ impl Comando {
     pub fn camada_depois(&self, para_frente: bool, quantas: usize) -> Option<usize> {
         let ultima = quantas.checked_sub(1)?;
         let i = match self {
-            Comando::Selecao { .. } => return None,
+            Comando::Selecao { .. } | Comando::Guias { .. } => return None,
             // O último aplicado decide: para a frente é o último da lista; para
             // trás, o primeiro.
             Comando::Varios { passos, .. } => {
@@ -306,11 +317,11 @@ impl Comando {
         }
     }
 
-    /// O passo sem o que é de seleção — o que vai para o projeto. `None`
+    /// O passo sem o que é de seleção (nem as guias) — o que vai para o projeto. `None`
     /// quando não sobra nada.
     pub fn sem_selecao(&self) -> Option<Comando> {
         match self {
-            Comando::Selecao { .. } => None,
+            Comando::Selecao { .. } | Comando::Guias { .. } => None,
             Comando::Varios { nome, passos } => {
                 let sobra: Vec<Comando> = passos.iter().filter_map(Comando::sem_selecao).collect();
                 // Com um passo só, continua `Varios`: o nome do gesto ("Camada
@@ -331,6 +342,10 @@ impl Comando {
         let (largura, altura) = (doc.largura(), doc.altura());
         match self {
             Comando::Selecao { .. } => Retangulo::default(),
+            Comando::Guias { antes, depois, .. } => {
+                doc.guias = if para_frente { depois } else { antes }.clone();
+                Retangulo::default()
+            }
             Comando::Varios { passos, .. } => {
                 let mut sujo = Retangulo::default();
                 let mut um = |p: &Comando| sujo = sujo.uniao(&p.aplicar(doc, para_frente));

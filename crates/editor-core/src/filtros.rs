@@ -210,10 +210,13 @@ fn desfocar_rgba(rgba: &[u8], largura: u32, altura: u32, sigma: f32) -> Vec<u8> 
 /// diferença passa do limiar. O alfa é o da original.
 fn nitidez(original: &[u8], desfocada: &[u8], quantidade: f32, limiar: u8) -> Vec<u8> {
     let mut saida = original.to_vec();
-    for (px, (o, d)) in saida
-        .chunks_exact_mut(4)
-        .zip(original.chunks_exact(4).zip(desfocada.chunks_exact(4)))
-    {
+    for (px, (o, d)) in saida.as_chunks_mut::<4>().0.iter_mut().zip(
+        original
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(desfocada.as_chunks::<4>().0),
+    ) {
         if o[3] == 0 {
             continue;
         }

@@ -760,6 +760,8 @@ impl Sessao {
                 self.versao_da_selecao += 1;
                 return;
             }
+            // As guias já mudaram no `aplicar`; a escolha fica.
+            Comando::Guias { .. } => return,
             Comando::Varios { passos, .. } => {
                 if para_frente {
                     passos.iter().for_each(|p| self.seguir_o_passo(p, true));
@@ -2184,6 +2186,43 @@ impl Sessao {
         self.refazer_a_vista(&area);
     }
 
+    // --------------------------------------------------------------- guias
+
+    pub fn guias(&self) -> &[crate::documento::Guia] {
+        &self.doc.guias
+    }
+
+    /// As guias mudam **sem passo** — o arrasto de uma guia, ao vivo. O
+    /// passo sai no [`Self::confirmar_guias`], ao soltar.
+    pub fn guias_ao_vivo(&mut self, guias: Vec<crate::documento::Guia>) {
+        if guias != self.doc.guias {
+            self.doc.guias = guias;
+            self.versao += 1;
+        }
+    }
+
+    /// Um passo de `antes` até as guias de agora, com o `nome` do Photoshop
+    /// ("Nova guia", "Mover guia", "Excluir guia", "Limpar guias"). Igual não
+    /// vira passo.
+    pub fn confirmar_guias(&mut self, nome: &str, antes: Vec<crate::documento::Guia>) -> bool {
+        if antes == self.doc.guias {
+            return false;
+        }
+        self.hist.registrar(Comando::Guias {
+            nome: nome.to_string(),
+            antes,
+            depois: self.doc.guias.clone(),
+        });
+        self.versao += 1;
+        true
+    }
+
+    /// Visualizar › Limpar guias.
+    pub fn limpar_guias(&mut self) -> bool {
+        let antes = std::mem::take(&mut self.doc.guias);
+        self.confirmar_guias("Limpar guias", antes)
+    }
+
     // ------------------------------------------------------------- filtros
 
     /// Filtro › Desfoque gaussiano / Máscara de nitidez: abre o diálogo na
@@ -2204,9 +2243,7 @@ impl Sessao {
         }
         let camada = self.ativa();
         let original = self.doc.camadas[camada].alvo(na_mascara).clone();
-        if original.existentes().next().is_none() {
-            return None;
-        }
+        original.existentes().next()?;
         self.filtro = Some((camada, na_mascara, original.clone()));
         Some((original, self.selecao.clone()))
     }
