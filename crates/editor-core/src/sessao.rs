@@ -508,12 +508,16 @@ impl Sessao {
             Exibicao::SoAMascara(i) | Exibicao::Rubi(i) => i,
             // O tratamento de pele: vale enquanto a camada for do papel.
             Exibicao::SoACamada(i) | Exibicao::SemOConjunto(i) => {
-                let vale = self.doc.camadas.get(i).is_some_and(|c| match self.exibicao() {
-                    Exibicao::SemOConjunto(_) => {
-                        matches!(c.retoque, Some(crate::documento::Retoque::Baixa { .. }))
-                    }
-                    _ => c.retoque.is_some(),
-                });
+                let vale = self
+                    .doc
+                    .camadas
+                    .get(i)
+                    .is_some_and(|c| match self.exibicao() {
+                        Exibicao::SemOConjunto(_) => {
+                            matches!(c.retoque, Some(crate::documento::Retoque::Baixa { .. }))
+                        }
+                        _ => c.retoque.is_some(),
+                    });
                 if !vale {
                     self.exibir(Exibicao::Foto);
                 }
@@ -2048,7 +2052,11 @@ impl Sessao {
             ativa,
             // Numa frequência, só a própria camada: a composta levaria tom
             // para a textura (e textura para a baixa).
-            if self.camada_ativa().retoque.is_some_and(|r| r.raio().is_some()) {
+            if self
+                .camada_ativa()
+                .retoque
+                .is_some_and(|r| r.raio().is_some())
+            {
                 crate::carimbo::AmostraDoCarimbo::CamadaAtual
             } else {
                 crate::carimbo::AmostraDoCarimbo::AtualEAbaixo
