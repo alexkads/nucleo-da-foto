@@ -30,6 +30,7 @@
 //! rasterização em cobertura (`cobertura.rs`), as edições (`edicao.rs`) e a
 //! máquina de estados da ferramenta (`caneta.rs`).
 
+pub mod ajuste;
 pub mod caneta;
 pub mod cobertura;
 pub mod edicao;

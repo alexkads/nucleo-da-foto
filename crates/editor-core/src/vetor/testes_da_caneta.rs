@@ -579,3 +579,53 @@ fn a_caneta_de_curvatura_passa_lisa_e_faz_canto_no_duplo_clique() {
     arrastar(&mut k, &mut c, h, h.mais((0.0, 30.0)), NADA);
     assert!(!c.subcaminhos[0].ancoras[0].automatica);
 }
+
+#[test]
+fn a_forma_livre_vira_curvas_e_continua_uma_ponta() {
+    let (mut k, mut c) = novo();
+    k.usar(FerramentaVetorial::FormaLivre);
+    k.apertar(&mut c, p(0.0, 100.0), NADA, M);
+    for i in 1..=100 {
+        let a = std::f64::consts::PI * i as f64 / 100.0;
+        k.arrastar(
+            &mut c,
+            p(100.0 - 100.0 * a.cos(), 100.0 - 100.0 * a.sin()),
+            NADA,
+            M,
+        );
+    }
+    assert_eq!(k.traco_livre().map(|t| t.len()), Some(101));
+    assert!(c.subcaminhos.is_empty(), "o caminho só muda ao soltar");
+    assert_eq!(k.soltar(&mut c, M), Resultado::Passo("Forma livre"));
+    let s = &c.subcaminhos[0];
+    assert!(!s.fechado);
+    assert!(
+        s.ancoras.len() >= 2 && s.ancoras.len() <= 5,
+        "{}",
+        s.ancoras.len()
+    );
+    let topo = s
+        .segmentos()
+        .map(|g| super::geometria::mais_proximo(&g, p(100.0, 0.0)).1)
+        .fold(f64::MAX, f64::min);
+    assert!(topo < 2.5, "a curva passa pelo alto do arco: {topo}");
+    // Começar na ponta final continua o mesmo componente.
+    let n = s.ancoras.len();
+    k.apertar(&mut c, p(200.0, 100.0), NADA, M);
+    for i in 1..=50 {
+        k.arrastar(&mut c, p(200.0 + i as f64 * 2.0, 100.0), NADA, M);
+    }
+    k.soltar(&mut c, M);
+    assert_eq!(c.subcaminhos.len(), 1);
+    assert!(c.subcaminhos[0].ancoras.len() > n);
+    assert_eq!(
+        c.subcaminhos[0].ancoras.last().unwrap().ponto.x.round(),
+        300.0
+    );
+    // Esc no meio do traço não deixa nada.
+    let antes = c.clone();
+    k.apertar(&mut c, p(0.0, 300.0), NADA, M);
+    k.arrastar(&mut c, p(50.0, 320.0), NADA, M);
+    k.esc(&mut c);
+    assert_eq!(c, antes);
+}

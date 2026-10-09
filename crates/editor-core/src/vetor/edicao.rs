@@ -41,6 +41,63 @@ pub fn novo_subcaminho(c: &mut Caminho, ponto: Ponto, operacao: OperacaoDoCompon
     RefAncora { sub, ancora }
 }
 
+/// Um subcaminho novo com as âncoras dadas (o ajuste da forma livre), ids
+/// novos. Devolve o id dele.
+pub fn novo_subcaminho_com(
+    c: &mut Caminho,
+    ancoras: Vec<Ancora>,
+    fechado: bool,
+    operacao: OperacaoDoComponente,
+) -> u64 {
+    let sub = c.gerar_id();
+    let mut s = Subcaminho::novo(sub, operacao);
+    for mut a in ancoras {
+        a.id = c.gerar_id();
+        s.ancoras.push(a);
+    }
+    s.fechado = fechado && s.ancoras.len() >= 2;
+    c.subcaminhos.push(s);
+    sub
+}
+
+/// Continua o subcaminho aberto pela ponta `extremo` com as âncoras dadas,
+/// que começam **na** ponta (a primeira é ela mesma: só a alça de saída dela
+/// entra). Pelo início, as âncoras entram invertidas antes da primeira.
+pub fn continuar_com(c: &mut Caminho, sub: u64, extremo: Extremo, ancoras: Vec<Ancora>) -> bool {
+    let ids: Vec<u64> = (1..ancoras.len()).map(|_| c.gerar_id()).collect();
+    let Some(s) = c.subcaminho_mut(sub) else {
+        return false;
+    };
+    if s.fechado || s.ancoras.is_empty() || ancoras.len() < 2 {
+        return false;
+    }
+    let mut novas: Vec<Ancora> = ancoras;
+    let primeira = novas.remove(0);
+    for (a, id) in novas.iter_mut().zip(ids) {
+        a.id = id;
+    }
+    match extremo {
+        Extremo::Fim => {
+            let ponta = s.ancoras.last_mut().unwrap();
+            ponta.saida = primeira.saida;
+            ponta.ligacao = Ligacao::Canto;
+            ponta.normalizar();
+            s.ancoras.extend(novas);
+        }
+        Extremo::Inicio => {
+            let ponta = &mut s.ancoras[0];
+            ponta.entrada = primeira.saida;
+            ponta.ligacao = Ligacao::Canto;
+            ponta.normalizar();
+            for mut a in novas {
+                std::mem::swap(&mut a.entrada, &mut a.saida);
+                s.ancoras.insert(0, a);
+            }
+        }
+    }
+    true
+}
+
 /// Uma âncora de canto nova na ponta `extremo` do subcaminho aberto.
 pub fn acrescentar(c: &mut Caminho, sub: u64, extremo: Extremo, ponto: Ponto) -> Option<RefAncora> {
     let id = c.gerar_id();

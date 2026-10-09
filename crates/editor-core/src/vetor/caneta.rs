@@ -39,6 +39,9 @@ pub enum FerramentaVetorial {
     /// curva passa lisa; duplo clique (ou ⌥) faz canto; arrastar um ponto o
     /// move e a curva se refaz.
     Curvatura,
+    /// P (⇧P) — a Caneta de forma livre: o traço à mão vira curvas
+    /// ajustadas ("Ajuste da curva" é o erro máximo, em pontos da tela).
+    FormaLivre,
     /// Adicionar ponto de ancoragem (sem letra, como no Photoshop).
     AdicionarPonto,
     /// Excluir ponto de ancoragem (sem letra).
@@ -100,6 +103,9 @@ pub struct OpcoesDaCaneta {
     pub previa: bool,
     /// A operação do próximo componente desenhado.
     pub operacao: OperacaoDoComponente,
+    /// "Ajuste da curva" da forma livre: o erro máximo do ajuste, em pontos
+    /// da tela (o Photoshop vai de 0,5 a 10; o padrão é 2).
+    pub ajuste_da_curva: f64,
 }
 
 impl Default for OpcoesDaCaneta {
@@ -110,6 +116,7 @@ impl Default for OpcoesDaCaneta {
             auto_adicionar_excluir: true,
             previa: false,
             operacao: OperacaoDoComponente::Somar,
+            ajuste_da_curva: 2.0,
         }
     }
 }
@@ -187,6 +194,12 @@ pub enum Estado {
         subs: Vec<u64>,
         inicio: Ponto,
         fontes: Option<Vec<u64>>,
+    },
+    /// O traço à mão da Caneta de forma livre (pontos do documento), que pode
+    /// continuar a ponta de um aberto.
+    DesenhandoLivre {
+        pontos: Vec<Ponto>,
+        continuar: Option<(u64, Extremo)>,
     },
     /// O retângulo de seleção (das âncoras ou dos componentes).
     Retangulo {
@@ -462,6 +475,12 @@ impl Caneta {
         match ferramenta {
             FerramentaVetorial::Caneta => self.decidir_na_caneta(c, p, m, medida),
             FerramentaVetorial::Curvatura => self.decidir_na_curvatura(c, p, m, medida),
+            // Só para o selo: o apertar da forma livre começa o traço.
+            FerramentaVetorial::FormaLivre => match self.alvo(c, p, medida, false) {
+                Some(Alvo::Ancora(r)) => edicao::extremo_de(c, r)
+                    .map_or(Acao::NovoComponente, |extremo| Acao::Retomar { r, extremo }),
+                _ => Acao::NovoComponente,
+            },
             FerramentaVetorial::AdicionarPonto => match self.alvo(c, p, medida, false) {
                 Some(Alvo::Segmento { sub, indice, t }) => Acao::Adicionar { sub, indice, t },
                 _ => Acao::Nada,
@@ -724,6 +743,24 @@ impl Caneta {
         {
             self.estado = Estado::Ocioso;
             self.pontos.clear();
+            return Resultado::Nada;
+        }
+        if ferramenta == FerramentaVetorial::FormaLivre {
+            // Começar numa ponta aberta continua o componente dela.
+            let continuar = match self.alvo(c, p, medida, false) {
+                Some(Alvo::Ancora(r)) => edicao::extremo_de(c, r).map(|e| (r.sub, e)),
+                _ => None,
+            };
+            let inicio = continuar
+                .and_then(|(sub, e)| edicao::ancora_do_extremo(c, sub, e))
+                .and_then(|r| c.ancora(r))
+                .map_or(p, |a| a.ponto);
+            self.comecar_gesto(c, "Forma livre");
+            self.pontos.clear();
+            self.estado = Estado::DesenhandoLivre {
+                pontos: vec![inicio],
+                continuar,
+            };
             return Resultado::Nada;
         }
         let acao = self.decidir(c, p, m, medida);
@@ -1223,6 +1260,19 @@ impl Caneta {
                 }
                 Resultado::AoVivo
             }
+            Estado::DesenhandoLivre {
+                mut pontos,
+                continuar,
+            } => {
+                if pontos
+                    .last()
+                    .is_none_or(|u| u.distancia(p) >= medida.por_ponto)
+                {
+                    pontos.push(p);
+                }
+                self.estado = Estado::DesenhandoLivre { pontos, continuar };
+                Resultado::Nada
+            }
             Estado::Retangulo { inicio, somar, .. } => {
                 self.estado = Estado::Retangulo {
                     inicio,
@@ -1324,6 +1374,25 @@ impl Caneta {
                 } else {
                     Resultado::Nada
                 }
+            }
+            Estado::DesenhandoLivre { pontos, continuar } => {
+                self.estado = Estado::Ocioso;
+                let tolerancia = self.opcoes.ajuste_da_curva.clamp(0.5, 10.0) * medida.por_ponto;
+                let (ancoras, fechado) = super::ajuste::ajustar(&pontos, tolerancia);
+                if ancoras.len() < 2 {
+                    return Resultado::Nada;
+                }
+                match continuar {
+                    Some((sub, extremo)) => {
+                        edicao::continuar_com(c, sub, extremo, ancoras);
+                    }
+                    None => {
+                        let sub =
+                            edicao::novo_subcaminho_com(c, ancoras, fechado, self.opcoes.operacao);
+                        self.componentes = [sub].into();
+                    }
+                }
+                Resultado::Passo("Forma livre")
             }
             Estado::Retangulo {
                 inicio,
@@ -1542,6 +1611,14 @@ impl Caneta {
         }
         let p = if shift { em_45(a.ponto, p) } else { p };
         vec![[a.ponto, a.controle(extremo.alca_para_frente()), p, p]]
+    }
+
+    /// O traço à mão em curso (a Caneta de forma livre), para a tela.
+    pub fn traco_livre(&self) -> Option<&[Ponto]> {
+        match &self.estado {
+            Estado::DesenhandoLivre { pontos, .. } => Some(pontos),
+            _ => None,
+        }
     }
 
     /// O retângulo de seleção em curso, `(x0, y0, x1, y1)`.
