@@ -61,7 +61,23 @@ const EPSILON: f32 = 50.0;
 /// diferente da origem não amplifica a textura sem limite.
 const FATOR_MAXIMO: f32 = 4.0;
 
-/// A cor adaptada de cada pixel livre do retângulo `w × h`.
+/// Como a correção junta a origem ao destino.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Adaptacao {
+    /// A do Photoshop sobre a foto: o fator multiplica a origem (ver o topo).
+    #[default]
+    Multiplicativa,
+    /// Para a **alta frequência** de uma separação (`frequencias.rs`): a
+    /// camada é um resíduo em volta de 127,5, e não uma cor — multiplicar
+    /// mudaria a força da textura conforme o nível. Aqui a correção **soma**:
+    /// `h = D − S` na borda, `R = S + h`. A textura da origem entra com a
+    /// amplitude dela, e o nível médio (o que restou de tom) casa com o
+    /// destino — a baixa frequência não muda.
+    Aditiva,
+}
+
+/// A cor adaptada de cada pixel livre do retângulo `w × h` (a conta
+/// multiplicativa; ver [`adaptar_com`]).
 ///
 /// - `origem`: `S`, a cor que o carimbo copiaria em cada pixel;
 /// - `destino`: `D`, a foto no lugar antes do traço;
@@ -76,13 +92,37 @@ pub fn adaptar(
     h: usize,
     difusao: u8,
 ) -> Vec<[f32; 3]> {
+    adaptar_com(
+        origem,
+        destino,
+        livre,
+        w,
+        h,
+        difusao,
+        Adaptacao::Multiplicativa,
+    )
+}
+
+/// [`adaptar`] com a conta escolhida.
+pub fn adaptar_com(
+    origem: &[[f32; 3]],
+    destino: &[[f32; 3]],
+    livre: &[bool],
+    w: usize,
+    h: usize,
+    difusao: u8,
+    adaptacao: Adaptacao,
+) -> Vec<[f32; 3]> {
     debug_assert_eq!(origem.len(), w * h);
-    // O fator exato em cada pixel fixo.
+    // O fator (ou a diferença) exato em cada pixel fixo.
     let razao = |k: usize| -> [f32; 3] {
         let mut f = [1.0; 3];
         for c in 0..3 {
-            f[c] = ((destino[k][c] + EPSILON) / (origem[k][c] + EPSILON))
-                .clamp(1.0 / FATOR_MAXIMO, FATOR_MAXIMO);
+            f[c] = match adaptacao {
+                Adaptacao::Multiplicativa => ((destino[k][c] + EPSILON) / (origem[k][c] + EPSILON))
+                    .clamp(1.0 / FATOR_MAXIMO, FATOR_MAXIMO),
+                Adaptacao::Aditiva => destino[k][c] - origem[k][c],
+            };
         }
         f
     };
@@ -122,7 +162,11 @@ pub fn adaptar(
             }
             let mut r = [0.0; 3];
             for c in 0..3 {
-                r[c] = ((origem[k][c] + EPSILON) * fator[k][c] - EPSILON).clamp(0.0, 255.0);
+                r[c] = match adaptacao {
+                    Adaptacao::Multiplicativa => (origem[k][c] + EPSILON) * fator[k][c] - EPSILON,
+                    Adaptacao::Aditiva => origem[k][c] + fator[k][c],
+                }
+                .clamp(0.0, 255.0);
             }
             r
         })

@@ -29,6 +29,12 @@ use crate::tiles::CamadaDePixels;
 use crate::transformar::{self, Conteudo, Transformacao};
 use crate::vista::Vista;
 
+mod pele;
+pub use pele::{
+    Frequencia, OrigemDaSeparacao, PedidoDeSeparacao, VistaDaSeparacao, NOME_DO_CLAREAR,
+    NOME_DO_ESCURECER,
+};
+
 /// A tolerância da lata de tinta — o padrão do Photoshop.
 pub const TOLERANCIA_DA_LATA: u8 = 32;
 
@@ -150,6 +156,8 @@ pub struct Sessao {
     /// O filtro com o diálogo aberto: a camada, se é a máscara, e o alvo como
     /// era (a prévia troca os pixels; Cancelar volta a ele).
     filtro: Option<(usize, bool, CamadaDePixels)>,
+    /// A separação de frequências em prévia (`sessao/pele.rs`).
+    separacao: Option<pele::Previa>,
     /// A força do Liquidificar (a "Pressão" do Photoshop), 0..=1.
     pub forca_do_liquido: f32,
     /// O documento como abriu nesta sessão — o "antes" do Antes/Depois.
@@ -267,6 +275,7 @@ impl Sessao {
             base,
             liquido: None,
             filtro: None,
+            separacao: None,
             forca_do_liquido: 0.5,
             doc_inicial: doc.clone(),
             mostrando_antes: false,
@@ -399,7 +408,8 @@ impl Sessao {
                 || self.traco.is_some()
                 || self.selecao_solta.is_some()
                 || self.liquido.is_some()
-                || self.filtro.is_some())
+                || self.filtro.is_some()
+                || self.separacao.is_some())
         {
             return false;
         }
@@ -496,6 +506,19 @@ impl Sessao {
         let indice = match self.exibicao() {
             Exibicao::Foto => return,
             Exibicao::SoAMascara(i) | Exibicao::Rubi(i) => i,
+            // O tratamento de pele: vale enquanto a camada for do papel.
+            Exibicao::SoACamada(i) | Exibicao::SemOConjunto(i) => {
+                let vale = self.doc.camadas.get(i).is_some_and(|c| match self.exibicao() {
+                    Exibicao::SemOConjunto(_) => {
+                        matches!(c.retoque, Some(crate::documento::Retoque::Baixa { .. }))
+                    }
+                    _ => c.retoque.is_some(),
+                });
+                if !vale {
+                    self.exibir(Exibicao::Foto);
+                }
+                return;
+            }
         };
         let vale = indice == self.ativa()
             && self
@@ -531,6 +554,7 @@ impl Sessao {
         self.terminar_de_mover_o_contorno();
         self.aplicar_liquidificacao();
         self.cancelar_filtro();
+        self.cancelar_separacao();
     }
 
     /// Escolhe a camada — os pixels dela, e não a máscara.
@@ -539,6 +563,7 @@ impl Sessao {
             self.fechar_o_que_esta_aberto();
             self.ativa = indice;
             self.na_mascara = false;
+            self.amostra_da_frequencia();
         }
         // A camada de ajuste pinta na máscara.
         self.cores_em_cinza_na_mascara();
@@ -2021,7 +2046,13 @@ impl Sessao {
             self.base.clone(),
             &self.doc,
             ativa,
-            crate::carimbo::AmostraDoCarimbo::AtualEAbaixo,
+            // Numa frequência, só a própria camada: a composta levaria tom
+            // para a textura (e textura para a baixa).
+            if self.camada_ativa().retoque.is_some_and(|r| r.raio().is_some()) {
+                crate::carimbo::AmostraDoCarimbo::CamadaAtual
+            } else {
+                crate::carimbo::AmostraDoCarimbo::AtualEAbaixo
+            },
             (dx, dy),
         );
         let mut origem = Vec::with_capacity(w * h);
@@ -2046,7 +2077,15 @@ impl Sessao {
         if !tem_origem {
             return false;
         }
-        let r = crate::recuperacao::adaptar(&origem, &destino, &livre, w, h, self.pincel.difusao);
+        let r = crate::recuperacao::adaptar_com(
+            &origem,
+            &destino,
+            &livre,
+            w,
+            h,
+            self.pincel.difusao,
+            self.adaptacao_da_recuperacao(),
+        );
         let antes = self.doc.camadas[ativa].pixels.clone();
         let mut nova = antes.clone();
         for y in caixa.y..caixa.baixo() {
@@ -3261,7 +3300,8 @@ impl Sessao {
         let mut traco = Traco::novo(pincel)
             .dentro_de(self.selecao.clone())
             .com_cordao(self.escala_da_tela)
-            .com_alfa_travado(travado);
+            .com_alfa_travado(travado)
+            .com_adaptacao(self.adaptacao_da_recuperacao());
         if self.pincel.ferramenta.le_a_foto() && !self.pincel.ferramenta.copia_da_origem() {
             // Tom e foco: a foto até a camada escolhida, no próprio lugar.
             traco = traco.copiando_de(crate::carimbo::Fonte::nova(
@@ -3393,9 +3433,17 @@ impl Sessao {
     /// O slider da opacidade andou: a camada escolhida muda na hora, o
     /// histórico só no [`Self::confirmar_opacidade`].
     pub fn mover_opacidade(&mut self, valor: f32) {
+        self.mover_opacidade_de(self.ativa(), valor);
+    }
+
+    /// O arrasto da opacidade da camada `indice` (a intensidade do
+    /// tratamento de pele mexe na da baixa sem trocar a escolhida).
+    pub fn mover_opacidade_de(&mut self, indice: usize, valor: f32) {
         self.soltar();
         let valor = valor.clamp(0.0, 1.0);
-        let indice = self.ativa();
+        if indice >= self.doc.camadas.len() {
+            return;
+        }
         // "Bloquear tudo" tranca também a opacidade e o modo.
         if self.doc.camadas[indice].bloqueio.tudo() {
             return;

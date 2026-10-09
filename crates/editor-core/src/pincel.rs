@@ -238,7 +238,7 @@ impl Predefinicao {
 
 /// As predefinições de fábrica — as pontas redondas básicas do Photoshop
 /// (dura, macia) e as de retoque que o balcão mais usa.
-pub const PREDEFINICOES: [Predefinicao; 6] = [
+pub const PREDEFINICOES: [Predefinicao; 7] = [
     Predefinicao {
         nome: "Redondo duro",
         raio: 15.0,
@@ -270,6 +270,14 @@ pub const PREDEFINICOES: [Predefinicao; 6] = [
         opacidade: 0.3,
         fluxo: 1.0,
         espacamento: 0.25,
+    },
+    Predefinicao {
+        nome: "Dodge & Burn (fluxo 5%)",
+        raio: 30.0,
+        dureza: 0.0,
+        opacidade: 1.0,
+        fluxo: 0.05,
+        espacamento: 0.1,
     },
     Predefinicao {
         nome: "Máscara: borda média",
@@ -397,6 +405,8 @@ pub struct Traco {
     /// "Bloquear pixels transparentes": a tinta muda a cor e deixa o alfa de
     /// cada pixel como estava — onde era transparente, nada acontece.
     alfa_travado: bool,
+    /// A conta da recuperação: aditiva na alta frequência.
+    adaptacao: crate::recuperacao::Adaptacao,
 }
 
 impl Traco {
@@ -412,7 +422,14 @@ impl Traco {
             selecao: None,
             fonte: None,
             alfa_travado: false,
+            adaptacao: crate::recuperacao::Adaptacao::Multiplicativa,
         }
+    }
+
+    /// A recuperação com esta conta (a aditiva na alta frequência).
+    pub fn com_adaptacao(mut self, adaptacao: crate::recuperacao::Adaptacao) -> Self {
+        self.adaptacao = adaptacao;
+        self
     }
 
     /// Com a transparência da camada bloqueada (ver [`Traco::alfa_travado`]).
@@ -683,8 +700,15 @@ impl Traco {
                 livre.push(!na_beira && cobertura_em(x, y) > 0);
             }
         }
-        let resultado =
-            crate::recuperacao::adaptar(&origem, &destino, &livre, w, h, self.pincel.difusao);
+        let resultado = crate::recuperacao::adaptar_com(
+            &origem,
+            &destino,
+            &livre,
+            w,
+            h,
+            self.pincel.difusao,
+            self.adaptacao,
+        );
         let opacidade = self.pincel.opacidade.clamp(0.0, 1.0);
         let pincel = self.pincel;
         for (posicao, cob) in &self.cobertura {

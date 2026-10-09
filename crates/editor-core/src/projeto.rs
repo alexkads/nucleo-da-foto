@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use crate::ajuste::Ajuste;
 use crate::composicao;
 use crate::contrato::VersaoEditada;
-use crate::documento::{hex, BaseRef, Bloqueio, Camada, Documento, Mascara};
+use crate::documento::{hex, BaseRef, Bloqueio, Camada, Documento, Mascara, Retoque};
 use crate::historico::{Comando, Historico};
 use crate::mesclagem::Modo;
 use crate::pincel::Mudanca;
@@ -70,7 +70,11 @@ use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 /// - **10** (0.1.117): a camada de ajuste Curvas (`"tipo": "curvas"`, com
 ///   os pontos de cada curva). A 0.1.116 não saberia ler o tipo — recusa com o
 ///   aviso. Os formatos 1–9 se leem como estão.
-pub const FORMATO: u32 = 10;
+/// - **11** (tratamento de pele): o modo `luz_linear` e o papel de retoque da
+///   camada (`retoque`: baixa/alta frequência, clarear/escurecer). A 0.1.124
+///   não saberia ler o modo — recusa com o aviso. Os formatos 1–10 se leem
+///   como estão (sem `retoque`, a camada não tem papel).
+pub const FORMATO: u32 = 11;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -252,6 +256,9 @@ pub struct CamadaSalva {
     /// Formato 9: os cadeados (ausente = nenhum).
     #[serde(default, skip_serializing_if = "sem_bloqueio")]
     pub bloqueio: Bloqueio,
+    /// Formato 11: o papel no tratamento de pele (ausente = nenhum).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retoque: Option<Retoque>,
 }
 
 fn sem_bloqueio(b: &Bloqueio) -> bool {
@@ -414,6 +421,7 @@ fn salvar_camada(
         ajuste: camada.ajuste,
         recortada: camada.recortada,
         bloqueio: camada.bloqueio,
+        retoque: camada.retoque,
     })
 }
 
@@ -1058,6 +1066,7 @@ impl Projeto {
                 ajuste: salva.ajuste,
                 recortada: salva.recortada,
                 bloqueio: salva.bloqueio,
+                retoque: salva.retoque,
             })
         };
         let mut camadas = Vec::with_capacity(manifesto.camadas.len());

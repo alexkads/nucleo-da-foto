@@ -57,6 +57,13 @@ pub enum Filtro {
         gaussiano: bool,
         monocromatico: bool,
     },
+    /// "Suavizar tons…" (Tratamento de pele): o desfoque gaussiano **pesado
+    /// pela seleção** — só os pixels selecionados entram na média, então o
+    /// cabelo, a sobrancelha ou o fundo que ficaram fora da seleção não
+    /// escorrem para a pele (o gaussiano comum os puxaria pela borda). Para a
+    /// baixa frequência: alisa manchas e transições de cor e guarda o volume
+    /// que passa do raio.
+    SuavizarTons { raio: f32 },
 }
 
 /// O raio máximo da Mediana, em px.
@@ -74,6 +81,7 @@ impl Filtro {
             Filtro::AltaFrequencia { .. } => "Alta frequência",
             Filtro::Mediana { .. } => "Mediana",
             Filtro::AdicionarRuido { .. } => "Adicionar ruído",
+            Filtro::SuavizarTons { .. } => "Suavizar tons",
         }
     }
 
@@ -81,7 +89,8 @@ impl Filtro {
         match *self {
             Filtro::DesfoqueGaussiano { raio }
             | Filtro::MascaraDeNitidez { raio, .. }
-            | Filtro::AltaFrequencia { raio } => raio.clamp(0.1, RAIO_MAXIMO),
+            | Filtro::AltaFrequencia { raio }
+            | Filtro::SuavizarTons { raio } => raio.clamp(0.1, RAIO_MAXIMO),
             Filtro::DesfoqueDeSuperficie { raio, .. } => raio.round().clamp(1.0, SUPERFICIE_MAXIMA),
             Filtro::Mediana { raio } => raio.clamp(1, MEDIANA_MAXIMA) as f32,
             Filtro::AdicionarRuido { .. } => 0.0,
@@ -93,7 +102,8 @@ impl Filtro {
         match self {
             Filtro::DesfoqueGaussiano { .. }
             | Filtro::MascaraDeNitidez { .. }
-            | Filtro::AltaFrequencia { .. } => (self.raio() * 3.0).ceil() as u32 + 1,
+            | Filtro::AltaFrequencia { .. }
+            | Filtro::SuavizarTons { .. } => (self.raio() * 3.0).ceil() as u32 + 1,
             Filtro::DesfoqueDeSuperficie { .. } => 2 * self.raio() as u32 + 1,
             Filtro::Mediana { .. } => self.raio() as u32,
             Filtro::AdicionarRuido { .. } => 0,
@@ -103,7 +113,7 @@ impl Filtro {
     /// Não muda nada (raio pequeno demais, nitidez sem quantidade).
     pub fn neutro(&self) -> bool {
         match *self {
-            Filtro::DesfoqueGaussiano { raio } => raio < 0.1,
+            Filtro::DesfoqueGaussiano { raio } | Filtro::SuavizarTons { raio } => raio < 0.1,
             Filtro::MascaraDeNitidez { quantidade, .. }
             | Filtro::AdicionarRuido { quantidade, .. } => quantidade <= 0.0,
             Filtro::DesfoqueDeSuperficie { .. }
@@ -137,8 +147,21 @@ pub fn filtrada(
     filtro: Filtro,
     selecao: Option<&Selecao>,
 ) -> CamadaDePixels {
+    filtrada_com(original, filtro, selecao, 1.0)
+}
+
+/// [`filtrada`] com a **intensidade** (0..=1, o "Atenuar" do Photoshop): o
+/// resultado entra na proporção dela sobre a original, junto da seleção.
+/// Sempre a partir da original — mexer no controle não acumula desfoque.
+pub fn filtrada_com(
+    original: &CamadaDePixels,
+    filtro: Filtro,
+    selecao: Option<&Selecao>,
+    intensidade: f32,
+) -> CamadaDePixels {
     let mut saida = original.clone();
-    if filtro.neutro() {
+    let intensidade = intensidade.clamp(0.0, 1.0);
+    if filtro.neutro() || intensidade <= 0.0 {
         return saida;
     }
     let (largura, altura) = (original.largura(), original.altura());
@@ -188,12 +211,53 @@ pub fn filtrada(
             gaussiano,
             monocromatico,
         } => ruido(&rgba, &dentro, quantidade, gaussiano, monocromatico),
+        Filtro::SuavizarTons { .. } => {
+            let peso: Vec<f32> = (0..(l * a) as usize)
+                .map(|k| {
+                    let (x, y) = (dentro.x + k as u32 % l, dentro.y + k as u32 / l);
+                    selecao.map_or(1.0, |s| s.valor(x, y) as f32 / 255.0)
+                })
+                .collect();
+            suavizar_pesado(&rgba, &peso, l as usize, a as usize, sigma)
+        }
     };
-    escrever(&mut saida, original, &dentro, &fora, &resultado, selecao);
+    escrever(
+        &mut saida,
+        original,
+        &dentro,
+        &fora,
+        &resultado,
+        selecao,
+        intensidade,
+    );
     saida
 }
 
-fn expandido(r: &Retangulo, margem: u32, largura: u32, altura: u32) -> Retangulo {
+/// O desfoque com peso: `Σ g·α·p·cor / Σ g·α·p`, com `p` o peso de cada
+/// pixel (a seleção). Onde nada pesa em volta, a cor fica. O alfa fica.
+fn suavizar_pesado(rgba: &[u8], peso: &[f32], l: usize, a: usize, sigma: f32) -> Vec<u8> {
+    let n = l * a;
+    let caixas = caixas_da_gaussiana(sigma);
+    let base: Vec<f32> = (0..n)
+        .map(|k| rgba[k * 4 + 3] as f32 / 255.0 * peso[k])
+        .collect();
+    let mut w = base.clone();
+    desfocar_plano(&mut w, l, a, &caixas);
+    let mut saida = rgba.to_vec();
+    for c in 0..3 {
+        let mut plano: Vec<f32> = (0..n).map(|k| rgba[k * 4 + c] as f32 * base[k]).collect();
+        desfocar_plano(&mut plano, l, a, &caixas);
+        for k in 0..n {
+            if rgba[k * 4 + 3] == 0 || w[k] <= 1e-4 {
+                continue;
+            }
+            saida[k * 4 + c] = (plano[k] / w[k]).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    saida
+}
+
+pub(crate) fn expandido(r: &Retangulo, margem: u32, largura: u32, altura: u32) -> Retangulo {
     let x0 = r.x.saturating_sub(margem);
     let y0 = r.y.saturating_sub(margem);
     let x1 = (r.direita() + margem).min(largura);
@@ -213,7 +277,7 @@ fn intersecao(a: &Retangulo, b: &Retangulo) -> Retangulo {
 }
 
 /// Os pixels RGBA de `r`, linha a linha (o transparente onde não há tile).
-fn ler(camada: &CamadaDePixels, r: &Retangulo) -> Vec<u8> {
+pub(crate) fn ler(camada: &CamadaDePixels, r: &Retangulo) -> Vec<u8> {
     let (l, a) = (r.largura as usize, r.altura as usize);
     let mut saida = vec![0u8; l * a * 4];
     for posicao in camada.tiles_do_retangulo(r) {
@@ -484,7 +548,7 @@ fn linhas_de_trabalho() -> usize {
 }
 
 /// As três caixas, nas linhas e depois nas colunas, com a borda repetida.
-fn desfocar_plano(plano: &mut [f32], l: usize, a: usize, caixas: &[usize]) {
+pub(crate) fn desfocar_plano(plano: &mut [f32], l: usize, a: usize, caixas: &[usize]) {
     if l == 0 || a == 0 {
         return;
     }
@@ -594,6 +658,7 @@ fn escrever(
     fora: &Retangulo,
     resultado: &[u8],
     selecao: Option<&Selecao>,
+    intensidade: f32,
 ) {
     let l = dentro.largura as usize;
     for posicao in original.tiles_do_retangulo(fora) {
@@ -614,6 +679,7 @@ fn escrever(
                     Ok(t) => t[(ly * LADO_DO_TILE + lx) as usize],
                     Err(v) => *v,
                 } as u32;
+                let v = (v as f32 * intensidade).round() as u32;
                 if v == 0 {
                     continue;
                 }

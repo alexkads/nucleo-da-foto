@@ -20,6 +20,7 @@ pub mod deformar;
 pub mod difusao;
 pub mod documento;
 pub mod filtros;
+pub mod frequencias;
 pub mod historico;
 pub mod liquidificar;
 pub mod mesclagem;
@@ -45,6 +46,8 @@ mod testes_do_carimbo;
 #[cfg(test)]
 mod testes_do_retoque;
 #[cfg(test)]
+mod testes_do_tratamento_de_pele;
+#[cfg(test)]
 mod testes_dos_controles;
 #[cfg(test)]
 mod testes_fora_da_foto;
@@ -54,15 +57,15 @@ pub use carimbo::AmostraDoCarimbo;
 pub use composicao::Exibicao;
 pub use contrato::VersaoEditada;
 pub use deformar::Malha;
-pub use documento::{BaseRef, Bloqueio, Camada, Documento, Mascara};
+pub use documento::{BaseRef, Bloqueio, Camada, Documento, Mascara, Retoque};
 pub use historico::{Comando, Historico};
 pub use mesclagem::Modo;
 pub use pincel::{Ferramenta, Pincel};
 pub use retangulo::Retangulo;
 pub use selecao::{Acabamento, Amostra, Estilo, Forma, Molde, Operacao, Selecao};
 pub use sessao::{
-    AmostraDaVarinha, Cadeado, OpcoesDaVarinha, OpcoesDoCarimbo, SaidaDoPreenchimento, Sessao,
-    VarinhaRecusada,
+    AmostraDaVarinha, Cadeado, Frequencia, OpcoesDaVarinha, OpcoesDoCarimbo, OrigemDaSeparacao,
+    PedidoDeSeparacao, SaidaDoPreenchimento, Sessao, VarinhaRecusada, VistaDaSeparacao,
 };
 pub use tiles::{CamadaDePixels, LADO_DO_TILE};
 pub use transformar::{Caixa, Transformacao};

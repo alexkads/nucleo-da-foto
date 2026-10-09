@@ -1,4 +1,4 @@
-//! Os modos de mesclagem de uma camada — os 16 do Photoshop, com as contas da
+//! Os modos de mesclagem de uma camada — 17 do Photoshop, com as contas da
 //! especificação de composição do W3C (*Compositing and Blending Level 1*),
 //! que é a mesma família de fórmulas.
 //!
@@ -29,6 +29,9 @@ pub enum Modo {
     Sobrepor,
     LuzSuave,
     LuzDireta,
+    /// *Linear Light*: `b + 2c − 1` — a recomposição da separação de
+    /// frequências (`frequencias.rs`). Não é a Luz Direta (*Hard Light*).
+    LuzLinear,
     Diferenca,
     Exclusao,
     Matiz,
@@ -39,7 +42,7 @@ pub enum Modo {
 
 impl Modo {
     /// Na ordem do menu do Photoshop, com os grupos dele.
-    pub const TODOS: [Modo; 16] = [
+    pub const TODOS: [Modo; 17] = [
         Modo::Normal,
         Modo::Escurecer,
         Modo::Multiplicacao,
@@ -50,6 +53,7 @@ impl Modo {
         Modo::Sobrepor,
         Modo::LuzSuave,
         Modo::LuzDireta,
+        Modo::LuzLinear,
         Modo::Diferenca,
         Modo::Exclusao,
         Modo::Matiz,
@@ -71,6 +75,7 @@ impl Modo {
             Modo::Sobrepor => "Sobrepor",
             Modo::LuzSuave => "Luz Suave",
             Modo::LuzDireta => "Luz Direta",
+            Modo::LuzLinear => "Luz Linear",
             Modo::Diferenca => "Diferença",
             Modo::Exclusao => "Exclusão",
             Modo::Matiz => "Matiz",
@@ -93,6 +98,7 @@ impl Modo {
             Modo::Sobrepor => "sobrepor",
             Modo::LuzSuave => "luz_suave",
             Modo::LuzDireta => "luz_direta",
+            Modo::LuzLinear => "luz_linear",
             Modo::Diferenca => "diferenca",
             Modo::Exclusao => "exclusao",
             Modo::Matiz => "matiz",
@@ -147,6 +153,9 @@ impl Modo {
                 }
             }),
             Modo::LuzDireta => canal(luz_direta),
+            // Sem corte aqui: quem compõe corta em 0..=1 (o W3C não tem este
+            // modo; é o do Photoshop e o do PDF 2.0 de fora da lista).
+            Modo::LuzLinear => canal(|b, c| b + 2.0 * c - 1.0),
             Modo::Diferenca => canal(|b, c| (b - c).abs()),
             Modo::Exclusao => canal(|b, c| b + c - 2.0 * b * c),
             Modo::Matiz => com_lum(com_sat(c, sat(b)), lum(b)),
@@ -366,6 +375,62 @@ mod testes {
             mesclar_em_camada([0; 4], C, 0.5, Modo::Multiplicacao),
             [60, 180, 240, 128]
         );
+    }
+
+    #[test]
+    fn luz_linear_e_b_mais_2c_menos_1_e_nao_e_a_luz_direta() {
+        // c = 60/255: 200 + 120 − 255 = 65 · 100 + 120 − 255 < 0 → 0 · 30 + 120 − 255 → 0.
+        assert_eq!(
+            mesclar(B, [60, 60, 60, 255], 1.0, Modo::LuzLinear),
+            [65, 0, 0]
+        );
+        // c = 240/255: 200 + 480 − 255 > 255 → 255 · 100 + 225 = 325 → 255 · 30 + 225 = 255.
+        assert_eq!(
+            mesclar(B, [240, 240, 240, 255], 1.0, Modo::LuzLinear),
+            [255, 255, 255]
+        );
+        // c = 140: b + 25.
+        assert_eq!(
+            mesclar(B, [140, 140, 140, 255], 1.0, Modo::LuzLinear),
+            [225, 125, 55]
+        );
+        // A Luz Direta no mesmo par dá outra coisa.
+        assert_ne!(
+            mesclar(B, [140, 140, 140, 255], 1.0, Modo::LuzDireta),
+            [225, 125, 55]
+        );
+        // Opacidade e alfa entram como em todo modo: metade do caminho.
+        assert_eq!(
+            mesclar(B, [140, 140, 140, 255], 0.5, Modo::LuzLinear),
+            [213, 113, 43]
+        );
+        assert_eq!(
+            mesclar(B, [140, 140, 140, 128], 1.0, Modo::LuzLinear),
+            [213, 113, 43]
+        );
+        // Sobre camada transparente entra a de cima como está.
+        assert_eq!(
+            mesclar_em_camada([0; 4], [140, 140, 140, 255], 1.0, Modo::LuzLinear),
+            [140, 140, 140, 255]
+        );
+        assert_eq!(Modo::da_chave("luz_linear"), Some(Modo::LuzLinear));
+        assert_eq!(Modo::LuzLinear.nome(), "Luz Linear");
+    }
+
+    #[test]
+    fn luz_linear_recompoe_a_separacao_exata_em_todo_par_de_8_bits() {
+        // A conta da separação (`frequencias.rs`): com I − L ímpar,
+        // h = (I − L + 255)/2 é inteiro e L + 2h − 255 = I.
+        for l in 0..=255i32 {
+            for i in 0..=255i32 {
+                if (i - l).rem_euclid(2) == 0 {
+                    continue;
+                }
+                let h = ((i - l + 255) / 2) as u8;
+                let r = mesclar([l as u8; 3], [h, h, h, 255], 1.0, Modo::LuzLinear);
+                assert_eq!(r, [i as u8; 3], "L {l} I {i} h {h}");
+            }
+        }
     }
 
     #[test]

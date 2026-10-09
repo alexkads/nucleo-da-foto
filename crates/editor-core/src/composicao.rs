@@ -87,7 +87,7 @@ pub fn compor(base: &RgbImage, doc: &Documento) -> RgbImage {
 /// milhões de buscas no mapa. Aqui é uma busca por tile e por camada.
 pub fn compor_regiao(base: &RgbImage, doc: &Documento, ret: &Retangulo, saida: &mut RgbImage) {
     let largura_da_saida = saida.width();
-    compor_deslocado(base, doc, ret, saida, largura_da_saida, (0, 0));
+    compor_deslocado(base, doc, ret, saida, largura_da_saida, (0, 0), None);
 }
 
 /// Só o recorte `ret`, numa imagem do tamanho dele — a vista usa isto para não
@@ -95,7 +95,15 @@ pub fn compor_regiao(base: &RgbImage, doc: &Documento, ret: &Retangulo, saida: &
 pub fn compor_recorte(base: &RgbImage, doc: &Documento, ret: &Retangulo) -> RgbImage {
     let ret = ret.limitado(base.width(), base.height());
     let mut saida = RgbImage::new(ret.largura, ret.altura);
-    compor_deslocado(base, doc, &ret, &mut saida, ret.largura, (ret.x, ret.y));
+    compor_deslocado(
+        base,
+        doc,
+        &ret,
+        &mut saida,
+        ret.largura,
+        (ret.x, ret.y),
+        None,
+    );
     saida
 }
 
@@ -129,7 +137,8 @@ fn tile_na_composicao<'a>(
 }
 
 /// Compõe `ret` e escreve em `destino`, onde o pixel `(x, y)` da foto mora em
-/// `(x − origem.0, y − origem.1)`.
+/// `(x − origem.0, y − origem.1)`. `sem` (índices do documento, inclusive)
+/// fica de fora — o "original" do tratamento de pele, só na tela.
 ///
 /// 🔑 **Máscara de corte** (`Papel::Base` seguida de `Papel::Recortada`): as
 /// recortadas se mesclam **na cor da base**, com a transparência dela travada
@@ -148,6 +157,7 @@ fn compor_deslocado(
     destino: &mut [u8],
     largura_do_destino: u32,
     origem: (u32, u32),
+    sem: Option<(usize, usize)>,
 ) {
     let (largura, altura) = (base.width(), base.height());
     let ret = ret.limitado(largura, altura);
@@ -160,7 +170,9 @@ fn compor_deslocado(
         .camadas
         .iter()
         .zip(papeis)
-        .filter(|(_, p)| *p != Papel::Fora)
+        .enumerate()
+        .filter(|(i, (_, p))| *p != Papel::Fora && sem.is_none_or(|(a, b)| *i < a || *i > b))
+        .map(|(_, par)| par)
         .collect();
     // A conta de cada ajuste, montada uma vez (as tabelas de 256).
     let preparados: Vec<Option<Preparado>> = camadas
@@ -264,6 +276,12 @@ pub enum Exibicao {
     Foto,
     SoAMascara(usize),
     Rubi(usize),
+    /// Só os pixels da camada, sobre cinza 50% onde ela é transparente — a
+    /// baixa ou a alta frequência isolada para inspeção.
+    SoACamada(usize),
+    /// A foto sem o conjunto de recorte que começa na camada (ela e as
+    /// recortadas nela) — o "original" do tratamento de pele.
+    SemOConjunto(usize),
 }
 
 /// O vermelho da sobreposição e quanto ele cobre onde a máscara esconde tudo
@@ -282,6 +300,30 @@ pub fn compor_recorte_exibindo(
         Exibicao::Foto => None,
         Exibicao::SoAMascara(i) | Exibicao::Rubi(i) => {
             doc.camadas.get(i).and_then(|c| c.mascara.as_ref())
+        }
+        Exibicao::SoACamada(i) => {
+            let Some(c) = doc.camadas.get(i) else {
+                return compor_recorte(base, doc, ret);
+            };
+            return so_a_camada(&c.pixels, &ret.limitado(base.width(), base.height()));
+        }
+        Exibicao::SemOConjunto(i) => {
+            if i >= doc.camadas.len() {
+                return compor_recorte(base, doc, ret);
+            }
+            let ret = ret.limitado(base.width(), base.height());
+            let mut saida = RgbImage::new(ret.largura, ret.altura);
+            let fim = doc.fim_do_conjunto(i);
+            compor_deslocado(
+                base,
+                doc,
+                &ret,
+                &mut saida,
+                ret.largura,
+                (ret.x, ret.y),
+                Some((i, fim)),
+            );
+            return saida;
         }
     };
     let Some(mascara) = mascara else {
@@ -305,6 +347,32 @@ pub fn compor_recorte_exibindo(
         }
     }
     foto
+}
+
+/// Os pixels de uma camada sozinha em `ret`, sobre cinza 50% — tile a tile.
+fn so_a_camada(pixels: &CamadaDePixels, ret: &Retangulo) -> RgbImage {
+    let mut saida = RgbImage::from_pixel(ret.largura, ret.altura, image::Rgb([128; 3]));
+    for posicao in pixels.tiles_do_retangulo(ret) {
+        let Some(tile) = pixels.tile(posicao) else {
+            continue;
+        };
+        let pedaco = interseccao(
+            &retangulo_do_tile(posicao, pixels.largura(), pixels.altura()),
+            ret,
+        );
+        for y in pedaco.y..pedaco.baixo() {
+            for x in pedaco.x..pedaco.direita() {
+                let j = indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
+                let p = sobre(
+                    [128; 3],
+                    [tile[j], tile[j + 1], tile[j + 2], tile[j + 3]],
+                    1.0,
+                );
+                saida.put_pixel(x - ret.x, y - ret.y, image::Rgb(p));
+            }
+        }
+    }
+    saida
 }
 
 /// O valor da máscara (com a densidade e a difusão) em cada pixel de `ret`,

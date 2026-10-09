@@ -295,6 +295,44 @@ pub struct Camada {
     pub recortada: bool,
     /// Os cadeados do painel Camadas (etapa 16).
     pub bloqueio: Bloqueio,
+    /// O papel da camada no tratamento de pele (formato 11): a baixa e a
+    /// alta frequência de uma separação, ou uma das camadas do Dodge & Burn.
+    /// Só identifica — a composição não olha para isto.
+    pub retoque: Option<Retoque>,
+}
+
+/// O papel de uma camada no tratamento de pele (`frequencias.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "papel", rename_all = "snake_case")]
+pub enum Retoque {
+    /// A baixa frequência (cor e tom), base da máscara de corte; `raio` é o
+    /// σ do desfoque que a gerou, em pixels da foto.
+    Baixa { raio: f32 },
+    /// A alta frequência (textura), recortada na baixa, em Luz Linear.
+    Alta { raio: f32 },
+    /// Dodge & Burn: a Curva que clareia, em Luminosidade, máscara preta.
+    Clarear,
+    /// Dodge & Burn: a Curva que escurece.
+    Escurecer,
+}
+
+impl Retoque {
+    pub fn nome(self) -> &'static str {
+        match self {
+            Retoque::Baixa { .. } => "Baixa frequência",
+            Retoque::Alta { .. } => "Alta frequência",
+            Retoque::Clarear => "Clarear",
+            Retoque::Escurecer => "Escurecer",
+        }
+    }
+
+    /// O σ da separação (as duas frequências).
+    pub fn raio(self) -> Option<f32> {
+        match self {
+            Retoque::Baixa { raio } | Retoque::Alta { raio } => Some(raio),
+            _ => None,
+        }
+    }
 }
 
 /// Os bloqueios da camada ("Bloquear:" no painel Camadas do Photoshop).
@@ -343,6 +381,7 @@ impl Camada {
             ajuste: None,
             recortada: false,
             bloqueio: Bloqueio::default(),
+            retoque: None,
         }
     }
 
