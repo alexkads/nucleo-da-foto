@@ -565,3 +565,26 @@ fn transformar_caminho_com_a_caixa_do_cmd_t() {
     );
     assert!(c.subcaminhos[1].ancoras[0].ponto.distancia(p(375.0, 30.0)) < 1e-3);
 }
+
+#[test]
+fn preencher_com_cor_difusao_e_contornar_com_a_borracha() {
+    let mut s = sessao();
+    camada_vermelha(&mut s);
+    quadrado(&mut s);
+    // Branco com difusão 8: a borda vira rampa.
+    assert!(s.preencher_caminho_com([255, 255, 255], 1.0, 8));
+    let c = &s.documento().camadas[0].pixels;
+    assert_eq!(c.pixel(200, 200), [255, 255, 255, 255]);
+    let borda = c.pixel(100, 200);
+    assert!(borda[1] > 20 && borda[1] < 235, "rampa: {borda:?}");
+    // Contornar com a borracha apaga ao longo da curva; o pincel volta.
+    s.pincel.raio = 4.0;
+    s.pincel.ferramenta = crate::pincel::Ferramenta::Pincel;
+    assert!(s.contornar_caminho_com(crate::pincel::Ferramenta::Borracha));
+    let alfa: Vec<u8> = (290..311)
+        .map(|x| s.documento().camadas[0].pixels.pixel(x, 200)[3])
+        .collect();
+    assert!(alfa[10] < 60, "{alfa:?}");
+    assert_eq!(s.pincel.ferramenta, crate::pincel::Ferramenta::Pincel);
+    assert_eq!(nome_do_ultimo(&s), "Contornar caminho");
+}

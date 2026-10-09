@@ -868,6 +868,14 @@ impl Sessao {
     /// a `opacidade` — um passo de pixels, com os cadeados respeitados. O
     /// caminho não muda.
     pub fn preencher_caminho(&mut self, opacidade: f32) -> bool {
+        let cor = self.pincel.cor;
+        self.preencher_caminho_com(cor, opacidade, 0)
+    }
+
+    /// "Preencher caminho…" com as opções do diálogo: a cor (frente, fundo,
+    /// preto, branco, 50% cinza), a opacidade e o raio de difusão da borda
+    /// (a borda antisserrilhada sempre).
+    pub fn preencher_caminho_com(&mut self, cor: [u8; 3], opacidade: f32, difusao: u32) -> bool {
         self.terminar_gesto_vetorial();
         self.fechar_o_que_esta_aberto();
         let camada = self.ativa();
@@ -877,6 +885,9 @@ impl Sessao {
         let Some(mut area) = self.cobertura_do_caminho(true) else {
             return false;
         };
+        if difusao > 0 {
+            area = area.difusa(difusao);
+        }
         if let Some(sel) = self.selecao.as_deref() {
             area.combinar(sel, Operacao::Intersecao);
         }
@@ -891,7 +902,7 @@ impl Sessao {
         let mudanca = operacoes::preencher(
             self.doc.camadas[camada].alvo_mut(na_mascara),
             Some(&area),
-            self.pincel.cor,
+            cor,
         );
         if !self.registrar_mudanca(camada, na_mascara, mudanca) {
             return false;
@@ -910,6 +921,9 @@ impl Sessao {
             return false;
         };
         let antes = self.hist.posicao();
+        // O traço segue a curva exata: sem a suavização do pincel (o cordão
+        // atrasaria o traço nas curvas).
+        let suavizacao = std::mem::replace(&mut self.pincel.suavizacao, 0.0);
         for s in &c.subcaminhos {
             let pontos = crate::vetor::geometria::achatar(s, 0.25, s.fechado);
             let Some(primeiro) = pontos.first() else {
@@ -923,6 +937,7 @@ impl Sessao {
             }
             self.soltar();
         }
+        self.pincel.suavizacao = suavizacao;
         let feitos = self.hist.posicao().saturating_sub(antes);
         match feitos {
             0 => false,
@@ -935,6 +950,17 @@ impl Sessao {
                 true
             }
         }
+    }
+
+    /// "Contornar caminho…" com a ferramenta escolhida no diálogo (pincel,
+    /// borracha, desfoque, nitidez, subexposição, superexposição), com o
+    /// tamanho e as opções de agora; a ferramenta na mão volta depois.
+    pub fn contornar_caminho_com(&mut self, ferramenta: crate::pincel::Ferramenta) -> bool {
+        let antes = self.pincel.ferramenta;
+        self.pincel.ferramenta = ferramenta;
+        let ok = self.contornar_caminho();
+        self.pincel.ferramenta = antes;
+        ok
     }
 
     /// O último passo ganha o nome do gesto (um traço de pincel vira
