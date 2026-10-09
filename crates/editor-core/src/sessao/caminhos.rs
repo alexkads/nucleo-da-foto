@@ -17,7 +17,9 @@ use crate::historico::Comando;
 use crate::operacoes;
 use crate::retangulo::Retangulo;
 use crate::selecao::{Operacao, Selecao};
-use crate::vetor::caneta::{FerramentaVetorial, Medida, Modificadores, Resultado};
+use crate::vetor::caneta::{
+    Acao, FerramentaVetorial, Medida, Modificadores, ModoDaCaneta, Resultado,
+};
 use crate::vetor::cobertura::{self, Opcoes};
 use crate::vetor::{edicao, Caminho, LugarDoCaminho, MascaraVetorial, Ponto, NOME_DO_TRABALHO};
 
@@ -227,6 +229,10 @@ impl Sessao {
     pub fn caneta_apertar(&mut self, p: Ponto, m: Modificadores, medida: Medida) -> bool {
         self.fechar_o_que_esta_aberto();
         let efetiva = self.caneta.ferramenta_efetiva(m);
+        self.forma_do_gesto = None;
+        if self.caneta.opcoes.modo == ModoDaCaneta::Forma && efetiva.desenha() {
+            self.talvez_nova_camada_de_forma(p, m, medida);
+        }
         let (lugar, base, antes) = match self.alvo_vetorial() {
             Some(l) => {
                 let c = self.doc.caminho(l).cloned();
@@ -275,6 +281,82 @@ impl Sessao {
         true
     }
 
+    /// O modo Forma: um clique que começaria um componente novo cria uma
+    /// camada de forma (Cor sólida com a cor de frente e máscara vetorial que
+    /// esconde tudo enquanto não há área), logo acima da escolhida, e o
+    /// desenho vai na máscara dela — ⇧ soma à forma escolhida, como o
+    /// "Combinar formas" do Photoshop. Desenhando (ou numa ponta, num
+    /// segmento…), segue na forma de agora.
+    fn talvez_nova_camada_de_forma(&mut self, p: Ponto, m: Modificadores, medida: Medida) {
+        let na_forma = self
+            .alvo_vetorial()
+            .is_some_and(|l| matches!(l, LugarDoCaminho::Mascara(i) if self.e_camada_de_forma(i)));
+        let vazio = Caminho::novo(0, "");
+        let c = if na_forma {
+            self.caminho_alvo()
+                .cloned()
+                .unwrap_or_else(|| vazio.clone())
+        } else {
+            vazio.clone()
+        };
+        let acao = self.caneta.decidir(&c, p, m, medida);
+        let nova = acao == Acao::NovoComponente && !(m.shift && na_forma);
+        if !nova && na_forma {
+            return;
+        }
+        let (l, a) = (self.doc.largura(), self.doc.altura());
+        let numero = self
+            .doc
+            .camadas
+            .iter()
+            .filter_map(|c| c.nome.strip_prefix("Forma ")?.trim().parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut camada = crate::documento::Camada::nova(&format!("Forma {numero}"), l, a);
+        camada.ajuste = Some(crate::ajuste::Ajuste::CorSolida {
+            cor: self.pincel.cor,
+        });
+        let mut mascara = MascaraVetorial::nova(Caminho::novo(0, "Forma"));
+        mascara.revela_vazia = false;
+        camada.mascara_vetorial = Some(mascara);
+        let indice = (self.ativa() + 1).min(self.doc.camadas.len());
+        self.executar(Comando::CriarCamada {
+            indice,
+            camada: Box::new(camada),
+        });
+        self.alvo_vetorial = Some(LugarDoCaminho::Mascara(indice));
+        self.caneta.conferir(None);
+        self.forma_do_gesto = Some(indice);
+    }
+
+    /// A camada `i` é de forma (Cor sólida com máscara vetorial).
+    pub fn e_camada_de_forma(&self, i: usize) -> bool {
+        self.doc.camadas.get(i).is_some_and(|c| {
+            matches!(c.ajuste, Some(crate::ajuste::Ajuste::CorSolida { .. }))
+                && c.mascara_vetorial.is_some()
+        })
+    }
+
+    /// A camada de forma criada pelo gesto que terminou sem nada (Esc, ou um
+    /// clique que não ficou): sai, e o histórico volta ao de antes dela.
+    fn largar_forma_vazia(&mut self) {
+        let Some(i) = self.forma_do_gesto.take() else {
+            return;
+        };
+        let vazia = self
+            .doc
+            .caminho(LugarDoCaminho::Mascara(i))
+            .is_none_or(|c| c.vazio());
+        let ultimo_e_ela = matches!(
+            self.hist.a_desfazer(),
+            Some(Comando::CriarCamada { indice, .. }) if *indice == i
+        );
+        if vazia && ultimo_e_ela {
+            self.desfazer();
+        }
+    }
+
     /// O caminho de trabalho novo, vazio.
     fn caminho_novo_de_trabalho(&mut self) -> Caminho {
         let id = self.doc.caminhos.gerar_id();
@@ -316,6 +398,7 @@ impl Sessao {
         match r {
             Resultado::Passo(nome) => {
                 self.registrar_caminho(nome, g.lugar, g.indice, g.antes);
+                self.forma_do_gesto = None;
             }
             _ => {
                 // Nada mudou: o caminho de trabalho criado por este clique
@@ -323,6 +406,7 @@ impl Sessao {
                 if c.vazio() && g.antes.as_ref().is_none_or(|a| a.vazio()) {
                     self.doc.definir_caminho(g.lugar, g.indice, g.antes);
                 }
+                self.largar_forma_vazia();
             }
         }
         true
@@ -350,6 +434,7 @@ impl Sessao {
             }
             self.doc.definir_caminho(g.lugar, g.indice, g.antes);
             self.versao += 1;
+            self.largar_forma_vazia();
             return true;
         }
         let tinha = self.caneta.construindo().is_some()

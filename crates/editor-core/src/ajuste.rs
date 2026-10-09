@@ -36,6 +36,10 @@ pub enum Ajuste {
         verde: Curva,
         azul: Curva,
     },
+    /// A camada de preenchimento "Cor sólida": a cor no lugar do que está
+    /// embaixo, com a opacidade, o modo e as máscaras da camada. Com uma
+    /// máscara vetorial, é a camada de forma do Photoshop.
+    CorSolida { cor: [u8; 3] },
 }
 
 /// Quantos pontos uma curva aceita — os 14 do Photoshop.
@@ -287,6 +291,7 @@ impl Ajuste {
             Ajuste::MatizSaturacao { .. } => "Matiz/Saturação",
             Ajuste::Inverter => "Inverter",
             Ajuste::Curvas { .. } => "Curvas",
+            Ajuste::CorSolida { .. } => "Cor sólida",
         }
     }
 
@@ -298,6 +303,7 @@ impl Ajuste {
             Ajuste::MatizSaturacao { .. } => "matiz",
             Ajuste::Inverter => "inverter",
             Ajuste::Curvas { .. } => "curvas",
+            Ajuste::CorSolida { .. } => "cor",
         }
     }
 
@@ -319,7 +325,7 @@ impl Ajuste {
                 saturacao,
                 luminosidade,
             } => matiz == 0.0 && saturacao == 0.0 && luminosidade == 0.0,
-            Ajuste::Inverter => false,
+            Ajuste::Inverter | Ajuste::CorSolida { .. } => false,
             Ajuste::Curvas {
                 rgb,
                 vermelho,
@@ -358,6 +364,7 @@ impl Ajuste {
                 luminosidade: luminosidade.clamp(-100.0, 100.0),
             },
             Ajuste::Inverter => Ajuste::Inverter,
+            cor @ Ajuste::CorSolida { .. } => cor,
             // A curva já nasce dentro dos limites (u8 e em ordem).
             curvas @ Ajuste::Curvas { .. } => curvas,
         }
@@ -401,6 +408,7 @@ impl Ajuste {
                 }))
             }
             Ajuste::Inverter => Preparado::Tabela(tabela(&|x| 1.0 - x)),
+            Ajuste::CorSolida { cor } => Preparado::Cor(cor),
             Ajuste::Curvas {
                 rgb,
                 vermelho,
@@ -443,6 +451,8 @@ pub enum Preparado {
         saturacao: f32,
         luminosidade: f32,
     },
+    /// A cor sólida, seja o que for embaixo.
+    Cor([u8; 3]),
 }
 
 impl Preparado {
@@ -451,6 +461,7 @@ impl Preparado {
         match self {
             Preparado::Tabela(t) => [t[p[0] as usize], t[p[1] as usize], t[p[2] as usize]],
             Preparado::Tabelas([r, g, b]) => [r[p[0] as usize], g[p[1] as usize], b[p[2] as usize]],
+            Preparado::Cor(c) => *c,
             Preparado::Hsl {
                 matiz,
                 saturacao,

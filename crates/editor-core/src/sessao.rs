@@ -240,6 +240,8 @@ pub struct Sessao {
     vetorial_antes: Option<(usize, crate::vetor::MascaraVetorial)>,
     /// "Transformar caminho" em curso (o ⌘T de um caminho).
     caminho_solto: Option<caminhos::CaminhoSolto>,
+    /// A camada de forma que o gesto de agora criou (o Esc a tira).
+    forma_do_gesto: Option<usize>,
 }
 
 /// O arrasto do Mover sem seleção: a camada e cada alvo que anda (os pixels,
@@ -335,6 +337,7 @@ impl Sessao {
             gesto_vetorial: None,
             vetorial_antes: None,
             caminho_solto: None,
+            forma_do_gesto: None,
         }
     }
 

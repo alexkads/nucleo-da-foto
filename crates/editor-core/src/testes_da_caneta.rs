@@ -588,3 +588,62 @@ fn preencher_com_cor_difusao_e_contornar_com_a_borracha() {
     assert_eq!(s.pincel.ferramenta, crate::pincel::Ferramenta::Pincel);
     assert_eq!(nome_do_ultimo(&s), "Contornar caminho");
 }
+
+#[test]
+fn o_modo_forma_cria_a_camada_de_forma_e_shift_soma() {
+    use crate::vetor::caneta::ModoDaCaneta;
+    let mut s = sessao();
+    let base = s.base().clone();
+    s.caneta.opcoes.modo = ModoDaCaneta::Forma;
+    s.pincel.cor = [0, 0, 255];
+    quadrado(&mut s);
+    assert_eq!(s.documento().camadas.len(), 2);
+    let forma = &s.documento().camadas[1];
+    assert_eq!(forma.nome, "Forma 1");
+    assert!(s.e_camada_de_forma(1));
+    assert_eq!(s.alvo_vetorial(), Some(LugarDoCaminho::Mascara(1)));
+    let foto = s.compor();
+    assert_eq!(
+        foto.get_pixel(200, 200).0,
+        [0, 0, 255],
+        "a forma pinta a cor"
+    );
+    assert_eq!(
+        foto.get_pixel(20, 20).0,
+        base.get_pixel(20, 20).0,
+        "fora, a foto"
+    );
+    // Um clique novo no vazio: outra camada de forma.
+    s.caneta.encerrar();
+    for q in [p(400.0, 50.0), p(500.0, 50.0), p(450.0, 150.0)] {
+        clicar(&mut s, q);
+    }
+    clicar(&mut s, p(400.0, 50.0));
+    assert_eq!(s.documento().camadas.len(), 3);
+    assert_eq!(s.documento().camadas[2].nome, "Forma 2");
+    // Com ⇧, soma à forma escolhida.
+    let shift = Modificadores {
+        shift: true,
+        ..NADA
+    };
+    s.caneta_apertar(p(500.0, 300.0), shift, M);
+    s.caneta_soltar(M);
+    for q in [p(580.0, 300.0), p(540.0, 380.0)] {
+        clicar(&mut s, q);
+    }
+    clicar(&mut s, p(500.0, 300.0));
+    assert_eq!(s.documento().camadas.len(), 3);
+    assert_eq!(s.caminho_alvo().unwrap().subcaminhos.len(), 2);
+    // Esc no meio do primeiro arrasto de uma forma nova: a camada não fica.
+    s.caneta.encerrar();
+    s.caneta_apertar(p(30.0, 300.0), NADA, M);
+    s.caneta_arrastar(p(60.0, 330.0), NADA, M);
+    assert_eq!(s.documento().camadas.len(), 4);
+    s.caneta_esc();
+    assert_eq!(s.documento().camadas.len(), 3);
+    // Trocar a cor da forma é um passo de ajuste; o caminho fica.
+    s.escolher_camada(1);
+    s.mover_ajuste(crate::ajuste::Ajuste::CorSolida { cor: [0, 255, 0] });
+    s.confirmar_ajuste();
+    assert_eq!(s.compor().get_pixel(200, 200).0, [0, 255, 0]);
+}

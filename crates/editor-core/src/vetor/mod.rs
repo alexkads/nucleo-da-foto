@@ -693,6 +693,11 @@ pub struct MascaraVetorial {
     /// A corrente com a camada: o Mover e o ⌘T levam o caminho junto.
     #[serde(default = "verdadeiro")]
     pub vinculada: bool,
+    /// Sem componente com área, revela tudo (a máscara vetorial criada vazia,
+    /// o "Revelar tudo"); falso na camada de forma, que nasce sem nada à
+    /// vista até a forma ter área.
+    #[serde(default = "verdadeiro", skip_serializing_if = "Clone::clone")]
+    pub revela_vazia: bool,
     /// `0..=1`: quanto o lado de fora esconde (as Propriedades da máscara
     /// vetorial). Com 0,5, fora da curva a camada aparece pela metade.
     #[serde(default = "um_f32", skip_serializing_if = "e_um")]
@@ -732,6 +737,7 @@ impl PartialEq for MascaraVetorial {
             && self.vinculada == outra.vinculada
             && self.densidade == outra.densidade
             && self.difusao == outra.difusao
+            && self.revela_vazia == outra.revela_vazia
     }
 }
 
@@ -788,6 +794,7 @@ impl MascaraVetorial {
             caminho,
             ativa: true,
             vinculada: true,
+            revela_vazia: true,
             densidade: 1.0,
             difusao: 0.0,
             cache: CacheDaCobertura::default(),
@@ -802,6 +809,7 @@ impl MascaraVetorial {
             self.caminho.assinatura().hash(&mut h);
             self.densidade.to_bits().hash(&mut h);
             self.difusao.to_bits().hash(&mut h);
+            self.revela_vazia.hash(&mut h);
             h.finish()
         };
         let mut guarda = self.cache.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -820,8 +828,10 @@ impl MascaraVetorial {
                 altura,
                 &cobertura::Opcoes::da_mascara(),
             )
-        } else {
+        } else if self.revela_vazia {
             Selecao::tudo(largura, altura)
+        } else {
+            Selecao::vazia(largura, altura)
         });
         let s = self.acabada(s);
         *guarda = Some((assinatura, largura, altura, s.clone()));

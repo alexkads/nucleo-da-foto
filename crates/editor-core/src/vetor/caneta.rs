@@ -55,6 +55,16 @@ pub enum FerramentaVetorial {
 }
 
 impl FerramentaVetorial {
+    /// Desenha caminho novo (a Caneta, a de curvatura, a de forma livre).
+    pub fn desenha(self) -> bool {
+        matches!(
+            self,
+            FerramentaVetorial::Caneta
+                | FerramentaVetorial::Curvatura
+                | FerramentaVetorial::FormaLivre
+        )
+    }
+
     pub fn e_de_selecao(self) -> bool {
         matches!(
             self,
@@ -103,6 +113,8 @@ pub struct OpcoesDaCaneta {
     pub previa: bool,
     /// A operação do próximo componente desenhado.
     pub operacao: OperacaoDoComponente,
+    /// Caminho ou Forma (a barra de opções).
+    pub modo: ModoDaCaneta,
     /// "Ajuste da curva" da forma livre: o erro máximo do ajuste, em pontos
     /// da tela (o Photoshop vai de 0,5 a 10; o padrão é 2).
     pub ajuste_da_curva: f64,
@@ -116,9 +128,19 @@ impl Default for OpcoesDaCaneta {
             auto_adicionar_excluir: true,
             previa: false,
             operacao: OperacaoDoComponente::Somar,
+            modo: ModoDaCaneta::Caminho,
             ajuste_da_curva: 2.0,
         }
     }
+}
+
+/// O que as ferramentas de desenho (Caneta, curvatura, forma livre) fazem: um
+/// caminho, ou uma camada de forma (Cor sólida com máscara vetorial).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ModoDaCaneta {
+    #[default]
+    Caminho,
+    Forma,
 }
 
 /// O que vem depois de soltar a âncora que está sendo puxada.
