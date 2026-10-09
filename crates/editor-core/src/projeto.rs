@@ -34,6 +34,7 @@ use crate::historico::{Comando, Historico};
 use crate::mesclagem::Modo;
 use crate::pincel::Mudanca;
 use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
+use crate::vetor::{Caminho, Caminhos, LugarDoCaminho, MascaraVetorial};
 
 /// A versão do formato do projeto. Maior que esta é recusado — quem abre não
 /// sabe ler, e não grava por cima.
@@ -70,7 +71,13 @@ use crate::tiles::{CamadaDePixels, Posicao, Tile, BYTES_DO_TILE};
 /// - **10** (0.1.117): a camada de ajuste Curvas (`"tipo": "curvas"`, com
 ///   os pontos de cada curva). A 0.1.116 não saberia ler o tipo — recusa com o
 ///   aviso. Os formatos 1–9 se leem como estão.
-pub const FORMATO: u32 = 10;
+/// - **11** (a Caneta): os caminhos (`caminhos` no manifesto: o de trabalho e
+///   os nomeados, com ids, subcaminhos, alças e ligações), a máscara vetorial
+///   da camada (`mascara_vetorial`) e os passos `caminho` e
+///   `mascara_vetorial`. A 0.1.124 comporia a camada sem a máscara vetorial
+///   — recusa com o aviso. Os formatos 1–10 se leem como estão (sem
+///   caminhos).
+pub const FORMATO: u32 = 11;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
@@ -228,6 +235,10 @@ pub struct Manifesto {
     /// antes só não as lê.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guias: Vec<crate::documento::Guia>,
+    /// Formato 11: os caminhos do painel — o de trabalho também, para a
+    /// recuperação do projeto.
+    #[serde(default, skip_serializing_if = "Caminhos::vazio")]
+    pub caminhos: Caminhos,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -252,6 +263,9 @@ pub struct CamadaSalva {
     /// Formato 9: os cadeados (ausente = nenhum).
     #[serde(default, skip_serializing_if = "sem_bloqueio")]
     pub bloqueio: Bloqueio,
+    /// Formato 11: a máscara vetorial (o caminho, ligada, vinculada).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mascara_vetorial: Option<MascaraVetorial>,
 }
 
 fn sem_bloqueio(b: &Bloqueio) -> bool {
@@ -371,6 +385,21 @@ pub enum PassoSalvo {
         nome: String,
         passos: Vec<PassoSalvo>,
     },
+    /// Formato 11: um caminho antes e depois (um gesto da Caneta).
+    Caminho {
+        nome: String,
+        lugar: LugarDoCaminho,
+        #[serde(default)]
+        indice: usize,
+        antes: Option<Caminho>,
+        depois: Option<Caminho>,
+    },
+    /// Formato 11: a máscara vetorial antes e depois.
+    MascaraVetorial {
+        camada: usize,
+        antes: Option<MascaraVetorial>,
+        depois: Option<MascaraVetorial>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -414,6 +443,7 @@ fn salvar_camada(
         ajuste: camada.ajuste,
         recortada: camada.recortada,
         bloqueio: camada.bloqueio,
+        mascara_vetorial: camada.mascara_vetorial.clone(),
     })
 }
 
@@ -567,6 +597,28 @@ fn salvar_passo(
                 .iter()
                 .map(|p| salvar_passo(p, gravar_tile))
                 .collect::<Result<_, _>>()?,
+        },
+        Comando::Caminho {
+            nome,
+            lugar,
+            indice,
+            antes,
+            depois,
+        } => PassoSalvo::Caminho {
+            nome: nome.clone(),
+            lugar: *lugar,
+            indice: *indice,
+            antes: antes.as_deref().cloned(),
+            depois: depois.as_deref().cloned(),
+        },
+        Comando::MascaraVetorial {
+            camada,
+            antes,
+            depois,
+        } => PassoSalvo::MascaraVetorial {
+            camada: *camada,
+            antes: antes.as_deref().cloned(),
+            depois: depois.as_deref().cloned(),
         },
         // `Historico::para_gravar` já tirou os passos de seleção e de guias.
         Comando::Selecao { .. } | Comando::Guias { .. } => {
@@ -744,6 +796,28 @@ fn ler_passo(
                 .map(|p| ler_passo(p, &mut *ler_tile, ler_camada, ler_mascara))
                 .collect::<Result<_, _>>()?,
         },
+        PassoSalvo::Caminho {
+            nome,
+            lugar,
+            indice,
+            antes,
+            depois,
+        } => Comando::Caminho {
+            nome: nome.clone(),
+            lugar: *lugar,
+            indice: *indice,
+            antes: antes.clone().map(Box::new),
+            depois: depois.clone().map(Box::new),
+        },
+        PassoSalvo::MascaraVetorial {
+            camada,
+            antes,
+            depois,
+        } => Comando::MascaraVetorial {
+            camada: *camada,
+            antes: antes.clone().map(Box::new),
+            depois: depois.clone().map(Box::new),
+        },
     })
 }
 
@@ -913,6 +987,7 @@ impl Projeto {
             historico: HistoricoSalvo { passos, posicao },
             composta,
             guias: doc.guias.clone(),
+            caminhos: doc.caminhos.clone(),
         };
         let json = serde_json::to_vec_pretty(&manifesto)
             .map_err(|e| ErroDoProjeto::Formato(e.to_string()))?;
@@ -1058,6 +1133,7 @@ impl Projeto {
                 ajuste: salva.ajuste,
                 recortada: salva.recortada,
                 bloqueio: salva.bloqueio,
+                mascara_vetorial: salva.mascara_vetorial.clone(),
             })
         };
         let mut camadas = Vec::with_capacity(manifesto.camadas.len());
@@ -1074,6 +1150,7 @@ impl Projeto {
                 base: manifesto.base.clone(),
                 camadas,
                 guias: manifesto.guias.clone(),
+                caminhos: manifesto.caminhos.clone(),
             },
             // Aberto é salvo: a posição gravada é o ponto de salvamento.
             historico: Historico::de_partes(passos, posicao, Some(posicao)),

@@ -1030,14 +1030,27 @@ impl Selecao {
 
     /// Junta `outra` a esta, conforme a operação.
     pub fn combinar(&mut self, outra: &Selecao, operacao: Operacao) {
-        let juntar = |a: u8, b: u8| -> u8 {
+        self.combinar_com(outra, |a: u8, b: u8| -> u8 {
             match operacao {
                 Operacao::Nova => b,
                 Operacao::Somar => a.max(b),
                 Operacao::Subtrair => ((a as u32 * (255 - b as u32) + 127) / 255) as u8,
                 Operacao::Intersecao => a.min(b),
             }
-        };
+        });
+    }
+
+    /// A seleção de uma máscara densa do recorte `ret` (um byte por pixel,
+    /// linha a linha) — 0 fora dele. É como o caminho rasterizado entra.
+    pub fn do_recorte(largura: u32, altura: u32, ret: &Retangulo, densa: &[u8]) -> Self {
+        let mut s = Self::vazia(largura, altura);
+        s.carregar_recorte(ret, densa);
+        s
+    }
+
+    /// Junta `outra` a esta pixel a pixel com `juntar(esta, outra)` — as
+    /// operações da seleção e as dos componentes do caminho.
+    pub fn combinar_com(&mut self, outra: &Selecao, juntar: impl Fn(u8, u8) -> u8) {
         let posicoes: std::collections::BTreeSet<Posicao> = self
             .tiles
             .keys()

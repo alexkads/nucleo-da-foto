@@ -8,6 +8,7 @@ use crate::difusao::{Guarda, MapaDifuso, DIFUSAO_MAXIMA};
 use crate::mesclagem::Modo;
 use crate::retangulo::Retangulo;
 use crate::tiles::{retangulo_do_tile, CamadaDePixels};
+use crate::vetor::{Caminho, Caminhos, LugarDoCaminho, MascaraVetorial};
 
 /// O perfil dos pixels da base e da imagem editada (C29): sRGB codificado, 8
 /// bits por canal. Um formato novo (16 bits) terá outro nome.
@@ -207,6 +208,11 @@ impl Mascara {
 
 /// O valor da máscara num tile da composição.
 pub enum MascaraNoTile<'a> {
+    /// A cobertura da máscara vetorial: um byte por pixel do tile.
+    Cobertura(&'a [u8]),
+    /// A máscara de pixels vezes a cobertura da vetorial (`Err` = o tile
+    /// inteiro da vetorial vale o mesmo).
+    Produto(Box<MascaraNoTile<'a>>, Result<&'a [u8], u8>),
     /// O tile inteiro vale o mesmo (já com a densidade).
     Constante(u8),
     Pixels {
@@ -227,6 +233,17 @@ impl MascaraNoTile<'_> {
     pub fn valor(&self, j: usize) -> u8 {
         match self {
             MascaraNoTile::Constante(v) => *v,
+            MascaraNoTile::Cobertura(t) => t[j / 4],
+            MascaraNoTile::Produto(m, v) => {
+                let b = match v {
+                    Ok(t) => t[j / 4],
+                    Err(v) => *v,
+                };
+                if b == 0 {
+                    return 0;
+                }
+                multiplicar(m.valor(j), b)
+            }
             MascaraNoTile::Pixels {
                 tile,
                 fundo,
@@ -246,6 +263,41 @@ impl MascaraNoTile<'_> {
                 let lado = crate::tiles::LADO_DO_TILE as i64;
                 tabela[mapa.valor(origem.0 + p % lado, origem.1 + p / lado) as usize]
             }
+        }
+    }
+}
+
+/// `a · b / 255`, arredondado.
+#[inline]
+fn multiplicar(a: u8, b: u8) -> u8 {
+    ((a as u32 * b as u32 + 127) / 255) as u8
+}
+
+/// As máscaras da camada prontas para serem lidas tile a tile: a de pixels e
+/// a cobertura da vetorial.
+pub struct LeitorDasMascaras<'a> {
+    raster: Option<LeitorDaMascara<'a>>,
+    vetor: Option<std::sync::Arc<crate::selecao::Selecao>>,
+}
+
+impl LeitorDasMascaras<'_> {
+    pub fn no_tile(&self, posicao: crate::tiles::Posicao) -> MascaraNoTile<'_> {
+        let r = self.raster.as_ref().map(|l| l.no_tile(posicao));
+        let v = self.vetor.as_ref().map(|s| s.do_tile(posicao));
+        match (r, v) {
+            (Some(r), None) => r,
+            (None, None) => MascaraNoTile::Constante(255),
+            (None, Some(Err(c))) => MascaraNoTile::Constante(c),
+            (None, Some(Ok(t))) => MascaraNoTile::Cobertura(t),
+            (Some(MascaraNoTile::Constante(a)), Some(Err(b))) => {
+                MascaraNoTile::Constante(multiplicar(a, b))
+            }
+            (Some(MascaraNoTile::Constante(0)), _) | (_, Some(Err(0))) => {
+                MascaraNoTile::Constante(0)
+            }
+            (Some(r), Some(Err(255))) => r,
+            (Some(MascaraNoTile::Constante(255)), Some(Ok(t))) => MascaraNoTile::Cobertura(t),
+            (Some(r), Some(v)) => MascaraNoTile::Produto(Box::new(r), v),
         }
     }
 }
@@ -295,6 +347,9 @@ pub struct Camada {
     pub recortada: bool,
     /// Os cadeados do painel Camadas (etapa 16).
     pub bloqueio: Bloqueio,
+    /// A máscara vetorial (a Caneta): um caminho que recorta a camada sem
+    /// tocar nos pixels. Entra na composição **vezes** a máscara de pixels.
+    pub mascara_vetorial: Option<MascaraVetorial>,
 }
 
 /// Os bloqueios da camada ("Bloquear:" no painel Camadas do Photoshop).
@@ -343,6 +398,7 @@ impl Camada {
             ajuste: None,
             recortada: false,
             bloqueio: Bloqueio::default(),
+            mascara_vetorial: None,
         }
     }
 
@@ -359,6 +415,24 @@ impl Camada {
     /// desligada.
     pub fn mascara_ativa(&self) -> Option<&Mascara> {
         self.mascara.as_ref().filter(|m| m.ativa)
+    }
+
+    /// A máscara vetorial que vale na composição — `None` sem ela ou com ela
+    /// desligada.
+    pub fn mascara_vetorial_ativa(&self) -> Option<&MascaraVetorial> {
+        self.mascara_vetorial.as_ref().filter(|m| m.ativa)
+    }
+
+    /// Quem lê as máscaras da camada na composição — a de pixels (com
+    /// densidade e difusão) **vezes** a cobertura da vetorial. `None` quando
+    /// nenhuma vale. A cobertura da vetorial é rasterizada aqui, uma vez por
+    /// geometria (`MascaraVetorial::cobertura`).
+    pub fn leitor_das_mascaras(&self) -> Option<LeitorDasMascaras<'_>> {
+        let raster = self.mascara_ativa().map(Mascara::leitor);
+        let vetor = self
+            .mascara_vetorial_ativa()
+            .map(|m| m.cobertura(self.pixels.largura(), self.pixels.altura()));
+        (raster.is_some() || vetor.is_some()).then_some(LeitorDasMascaras { raster, vetor })
     }
 
     /// Os pixels onde se pinta: os da máscara ou os da camada.
@@ -455,6 +529,9 @@ pub struct Documento {
     pub camadas: Vec<Camada>,
     /// As guias (não entram na imagem editada nem no `neutro`).
     pub guias: Vec<Guia>,
+    /// O caminho de trabalho e os nomeados (painel Caminhos). Não mudam
+    /// pixel nenhum; as máscaras vetoriais moram nas camadas.
+    pub caminhos: Caminhos,
 }
 
 impl Documento {
@@ -465,11 +542,82 @@ impl Documento {
             base,
             camadas: vec![camada],
             guias: Vec::new(),
+            caminhos: Caminhos::novo(),
         }
     }
 
     pub fn largura(&self) -> u32 {
         self.base.largura
+    }
+
+    /// O caminho que mora em `lugar`.
+    pub fn caminho(&self, lugar: LugarDoCaminho) -> Option<&Caminho> {
+        match lugar {
+            LugarDoCaminho::Trabalho => self.caminhos.trabalho.as_ref(),
+            LugarDoCaminho::Nomeado(id) => self.caminhos.nomeado(id),
+            LugarDoCaminho::Mascara(i) => self
+                .camadas
+                .get(i)
+                .and_then(|c| c.mascara_vetorial.as_ref())
+                .map(|m| &m.caminho),
+        }
+    }
+
+    /// Coloca (ou tira, com `None`) o caminho em `lugar`; o nomeado novo
+    /// entra na posição `indice` da lista. Devolve onde a foto mudou — só a
+    /// máscara vetorial muda pixel na tela.
+    pub fn definir_caminho(
+        &mut self,
+        lugar: LugarDoCaminho,
+        indice: usize,
+        caminho: Option<Caminho>,
+    ) -> Retangulo {
+        let (largura, altura) = (self.largura(), self.altura());
+        match lugar {
+            LugarDoCaminho::Trabalho => {
+                self.caminhos.trabalho = caminho;
+                Retangulo::default()
+            }
+            LugarDoCaminho::Nomeado(id) => {
+                let onde = self.caminhos.indice_do_nomeado(id);
+                match (onde, caminho) {
+                    (Some(i), Some(c)) => self.caminhos.nomeados[i] = c,
+                    (Some(i), None) => {
+                        self.caminhos.nomeados.remove(i);
+                    }
+                    (None, Some(c)) => {
+                        let i = indice.min(self.caminhos.nomeados.len());
+                        self.caminhos.nomeados.insert(i, c);
+                    }
+                    (None, None) => {}
+                }
+                Retangulo::default()
+            }
+            LugarDoCaminho::Mascara(i) => {
+                let Some(camada) = self.camadas.get_mut(i) else {
+                    return Retangulo::default();
+                };
+                let Some(m) = camada.mascara_vetorial.as_mut() else {
+                    return Retangulo::default();
+                };
+                let Some(novo) = caminho else {
+                    return Retangulo::default();
+                };
+                let sujo = m
+                    .caminho
+                    .retangulo(largura, altura)
+                    .uniao(&novo.retangulo(largura, altura));
+                // Vazia (revela tudo) ou começando por subtrair, a máscara muda
+                // a foto também fora da caixa da curva.
+                let inteira = !m.caminho.alcanca_so_a_caixa() || !novo.alcanca_so_a_caixa();
+                m.caminho = novo;
+                match (m.ativa && camada.visivel, inteira) {
+                    (false, _) => Retangulo::default(),
+                    (true, true) => Retangulo::inteiro(largura, altura),
+                    (true, false) => sujo,
+                }
+            }
+        }
     }
 
     pub fn altura(&self) -> u32 {

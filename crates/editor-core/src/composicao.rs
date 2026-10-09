@@ -14,7 +14,7 @@
 use image::RgbImage;
 
 use crate::ajuste::{Ajuste, Preparado};
-use crate::documento::{Camada, Documento, LeitorDaMascara, MascaraNoTile, Papel};
+use crate::documento::{Camada, Documento, LeitorDasMascaras, MascaraNoTile, Papel};
 use crate::mesclagem::{mesclar, Modo};
 use crate::retangulo::Retangulo;
 use crate::tiles::{indice, retangulo_do_tile, CamadaDePixels, LADO_DO_TILE};
@@ -103,7 +103,7 @@ pub fn compor_recorte(base: &RgbImage, doc: &Documento, ret: &Retangulo) -> RgbI
 /// nele (sem pixels ali, ou a máscara esconde o tile inteiro).
 fn tile_na_composicao<'a>(
     c: &'a Camada,
-    leitor: Option<&'a LeitorDaMascara<'a>>,
+    leitor: Option<&'a LeitorDasMascaras<'a>>,
     preparado: Option<&'a Preparado>,
     posicao: crate::tiles::Posicao,
     papel: Papel,
@@ -167,10 +167,11 @@ fn compor_deslocado(
         .iter()
         .map(|(c, _)| c.ajuste.as_ref().map(Ajuste::preparar))
         .collect();
-    // A máscara de cada uma, pronta (o mapa da difusão, a densidade).
-    let leitores: Vec<Option<LeitorDaMascara>> = camadas
+    // As máscaras de cada uma, prontas (o mapa da difusão, a densidade, a
+    // cobertura da vetorial).
+    let leitores: Vec<Option<LeitorDasMascaras>> = camadas
         .iter()
-        .map(|(c, _)| c.mascara_ativa().map(|m| m.leitor()))
+        .map(|(c, _)| c.leitor_das_mascaras())
         .collect();
     let referencia = CamadaDePixels::nova(largura, altura);
     let fonte = base.as_raw();
