@@ -176,6 +176,11 @@ pub struct Sessao {
     pub pincel: Pincel,
     /// Alinhado e amostra do carimbo — opções da ferramenta, fora do desfazer.
     pub carimbo: OpcoesDoCarimbo,
+    /// As opções do Pincel misturador (umidade, carga, mistura…).
+    pub misturador: crate::misturador::OpcoesDoMisturador,
+    /// A tinta do Pincel misturador entre um traço e outro ("Carregar",
+    /// "Limpar" e a sujeira que ficou).
+    pub tinta: crate::misturador::Tinta,
     /// Pontos da tela por pixel da foto, o zoom de agora — a suavização do
     /// pincel é medida na tela (ver `Traco::com_cordao`). A janela atualiza.
     pub escala_da_tela: f32,
@@ -287,6 +292,8 @@ impl Sessao {
             pedidos: 0,
             pincel: Pincel::default(),
             carimbo: OpcoesDoCarimbo::default(),
+            misturador: Default::default(),
+            tinta: Default::default(),
             escala_da_tela: 1.0,
             ativa,
             na_mascara: false,
@@ -3310,7 +3317,26 @@ impl Sessao {
             .com_cordao(self.escala_da_tela)
             .com_alfa_travado(travado)
             .com_adaptacao(self.adaptacao_da_recuperacao());
-        if self.pincel.ferramenta.le_a_foto() && !self.pincel.ferramenta.copia_da_origem() {
+        if self.pincel.ferramenta == crate::pincel::Ferramenta::Misturador {
+            // O pincel limpo e carregado a cada traço, se pedido; a amostra
+            // da foto composta é um instantâneo do começo do traço.
+            if self.misturador.limpar_apos {
+                self.tinta.limpar();
+            }
+            if self.misturador.carregar_apos {
+                self.tinta.carregar(self.pincel.cor);
+            }
+            traco = traco.misturando(self.tinta.clone(), self.misturador);
+            if self.misturador.todas_as_camadas {
+                traco = traco.copiando_de(crate::carimbo::Fonte::da_amostra(
+                    self.base.clone(),
+                    &self.doc,
+                    ativa,
+                    crate::carimbo::AmostraDoCarimbo::Todas,
+                    (0.0, 0.0),
+                ));
+            }
+        } else if self.pincel.ferramenta.le_a_foto() && !self.pincel.ferramenta.copia_da_origem() {
             // Tom e foco: a foto até a camada escolhida, no próprio lugar.
             traco = traco.copiando_de(crate::carimbo::Fonte::nova(
                 self.base.clone(),
@@ -3382,6 +3408,9 @@ impl Sessao {
             self.refazer_a_vista(&sujo);
         }
         let ferramenta = traco.pincel().ferramenta;
+        if let Some(tinta) = traco.tinta() {
+            self.tinta = tinta.clone();
+        }
         match traco.terminar(self.doc.camadas[camada].alvo_mut(na_mascara)) {
             Some(mudanca) => {
                 let passo = Comando::Traco {
@@ -3394,6 +3423,7 @@ impl Sessao {
                 let nome = match ferramenta {
                     crate::pincel::Ferramenta::Recuperacao => Some("Pincel de recuperação"),
                     crate::pincel::Ferramenta::Carimbo => Some("Carimbo"),
+                    crate::pincel::Ferramenta::Misturador => Some("Pincel misturador"),
                     _ => None,
                 };
                 self.hist.registrar(match nome {

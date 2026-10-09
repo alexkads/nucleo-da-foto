@@ -55,6 +55,9 @@ pub enum Ferramenta {
     Desfoque,
     /// Realça o detalhe (⇧R).
     Nitidez,
+    /// O Pincel misturador (B, no grupo do pincel): a tinta do reservatório
+    /// se mistura com a cor da tela (`misturador.rs`).
+    Misturador,
 }
 
 impl Ferramenta {
@@ -407,6 +410,11 @@ pub struct Traco {
     alfa_travado: bool,
     /// A conta da recuperação: aditiva na alta frequência.
     adaptacao: crate::recuperacao::Adaptacao,
+    /// O Pincel misturador: a tinta que ele carrega e as opções.
+    misturador: Option<(
+        crate::misturador::Tinta,
+        crate::misturador::OpcoesDoMisturador,
+    )>,
 }
 
 impl Traco {
@@ -423,7 +431,24 @@ impl Traco {
             fonte: None,
             alfa_travado: false,
             adaptacao: crate::recuperacao::Adaptacao::Multiplicativa,
+            misturador: None,
         }
+    }
+
+    /// O Pincel misturador com esta tinta e estas opções; `fonte` é a foto
+    /// composta ("Amostrar todas as camadas"), ou nada (a própria camada).
+    pub fn misturando(
+        mut self,
+        tinta: crate::misturador::Tinta,
+        opcoes: crate::misturador::OpcoesDoMisturador,
+    ) -> Self {
+        self.misturador = Some((tinta, opcoes));
+        self
+    }
+
+    /// A tinta como o traço a deixou (o pincel sujo segue para o próximo).
+    pub fn tinta(&self) -> Option<&crate::misturador::Tinta> {
+        self.misturador.as_ref().map(|(t, _)| t)
     }
 
     /// A recuperação com esta conta (a aditiva na alta frequência).
@@ -524,6 +549,9 @@ impl Traco {
     }
 
     fn carimbar(&mut self, camada: &mut CamadaDePixels, cx: f32, cy: f32) -> Retangulo {
+        if self.pincel.ferramenta == Ferramenta::Misturador {
+            return self.carimbar_misturando(camada, cx, cy);
+        }
         let raio = self.tabela.alcance;
         let (largura, altura) = (camada.largura(), camada.altura());
         let x0 = (cx - raio).floor().max(0.0) as u32;
@@ -637,6 +665,74 @@ impl Traco {
             }
         }
         area
+    }
+
+    /// Um carimbo do Pincel misturador: a ponta inteira lê a tela de agora
+    /// (a camada, com o que este traço já pintou — é o que borra) ou a foto
+    /// do começo do traço, e a [`crate::misturador::Tinta`] decide cada pixel.
+    fn carimbar_misturando(&mut self, camada: &mut CamadaDePixels, cx: f32, cy: f32) -> Retangulo {
+        let Some((mut tinta, opcoes)) = self.misturador.take() else {
+            return Retangulo::default();
+        };
+        let r = self.tabela.alcance.ceil() as i64;
+        let lado = (2 * r + 1) as usize;
+        let (ox, oy) = (cx.floor() as i64 - r, cy.floor() as i64 - r);
+        let (largura, altura) = (camada.largura() as i64, camada.altura() as i64);
+        let forca = self.pincel.fluxo.clamp(0.0, 1.0) * self.pincel.opacidade.clamp(0.0, 1.0);
+        let mut cobertura = vec![0f32; lado * lado];
+        let mut amostra = vec![None; lado * lado];
+        let mut tela = vec![None; lado * lado];
+        for j in 0..lado * lado {
+            let (x, y) = (ox + (j % lado) as i64, oy + (j / lado) as i64);
+            if x < 0 || y < 0 || x >= largura || y >= altura {
+                continue;
+            }
+            let (x, y) = (x as u32, y as u32);
+            let atual = camada.pixel(x, y);
+            tela[j] = Some(atual);
+            amostra[j] = match self.fonte.as_mut() {
+                Some(f) => f.no_lugar(x, y),
+                None => Some(atual),
+            };
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            let c = self.tabela.em(dx * dx + dy * dy) as f32 / 255.0;
+            let m = self
+                .selecao
+                .as_ref()
+                .map_or(1.0, |s| s.valor(x, y) as f32 / 255.0);
+            cobertura[j] = c * m * forca;
+        }
+        let antes = tela.clone();
+        tinta.carimbar(
+            &opcoes,
+            lado,
+            &cobertura,
+            &amostra,
+            &mut tela,
+            self.alfa_travado,
+        );
+        self.misturador = Some((tinta, opcoes));
+        let mut sujo = Retangulo::default();
+        for j in 0..lado * lado {
+            let (Some(novo), Some(velho)) = (tela[j], antes[j]) else {
+                continue;
+            };
+            if novo == velho {
+                continue;
+            }
+            let (x, y) = (
+                (ox + (j % lado) as i64) as u32,
+                (oy + (j / lado) as i64) as u32,
+            );
+            let posicao = crate::tiles::tile_de(x, y);
+            self.antes
+                .entry(posicao)
+                .or_insert_with(|| camada.tile(posicao).cloned());
+            let i = indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
+            camada.tile_mut(posicao)[i..i + 4].copy_from_slice(&novo);
+            sujo = sujo.uniao(&Retangulo::novo(x, y, 1, 1));
+        }
+        sujo
     }
 
     /// A recuperação (`Ferramenta::Recuperacao`), no soltar: o traço já

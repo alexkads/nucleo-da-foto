@@ -578,3 +578,119 @@ fn o_projeto_do_formato_10_abre_igual_e_sem_papel() {
     assert_eq!(aberto.documento, doc);
     assert!(aberto.documento.camadas.iter().all(|c| c.retoque.is_none()));
 }
+
+// ------------------------------------------------- Pincel misturador
+
+#[test]
+fn o_misturador_na_baixa_borra_a_mancha_num_passo_e_respeita_a_selecao() {
+    let mut s = sessao();
+    separar_na_sessao(&mut s, OrigemDaSeparacao::Visivel, 4.0);
+    assert!(s.escolher_frequencia(Frequencia::Baixa));
+    let alta = s.documento().camadas[2].pixels.clone();
+    let baixa = s.documento().camadas[1].pixels.clone();
+    let (mx, my, _) = MANCHA;
+    // Só a metade de cima da mancha está selecionada.
+    s.selecionar(
+        &Forma::Retangulo(Retangulo::novo(300, 0, 340, my as u32)),
+        Operacao::Nova,
+    );
+    let posicao = s.historico().posicao();
+    s.pincel.ferramenta = Ferramenta::Misturador;
+    s.pincel.raio = 18.0;
+    s.pincel.dureza = 0.0;
+    s.pincel.fluxo = 0.6;
+    // Carregado com a cor da pele limpa (o conta-gotas), meio a meio com a
+    // tela — o uso do retoque.
+    let pele = baixa.pixel(mx as u32 + 60, my as u32);
+    s.pincel.cor = [pele[0], pele[1], pele[2]];
+    s.misturador = crate::misturador::OpcoesDoMisturador::default();
+    // Da pele clara para dentro da mancha, num traço só.
+    s.apertar(mx + 50.0, my - 8.0);
+    for i in 0..30 {
+        let t = i as f32 / 29.0;
+        s.arrastar(mx + 50.0 - 50.0 * t, my - 8.0);
+    }
+    s.soltar();
+    assert_eq!(s.historico().posicao(), posicao + 1, "um gesto, um passo");
+    assert_eq!(
+        s.historico().a_desfazer().unwrap().descricao(s.documento()),
+        "Pincel misturador"
+    );
+    let depois = &s.documento().camadas[1].pixels;
+    assert_eq!(s.documento().camadas[2].pixels, alta, "a alta não muda");
+    let (cx, cy) = (mx as u32, my as u32 - 8);
+    assert!(
+        depois.pixel(cx, cy)[0] >= baixa.pixel(cx, cy)[0] + 8,
+        "a mancha clareou com a pele arrastada: {:?} → {:?}",
+        baixa.pixel(cx, cy),
+        depois.pixel(cx, cy)
+    );
+    // Fora da seleção (abaixo de my), nada.
+    for y in [my as u32 + 1, my as u32 + 6] {
+        assert_eq!(depois.pixel(cx, y), baixa.pixel(cx, y));
+    }
+    assert!(s.desfazer());
+    assert_eq!(s.documento().camadas[1].pixels, baixa);
+}
+
+#[test]
+fn o_misturador_amostrando_todas_as_camadas_pinta_numa_camada_vazia() {
+    let mut s = sessao();
+    // A "Pintura" vazia é a escolhida.
+    assert!(s.documento().camadas[0].pixels.vazia());
+    s.pincel.ferramenta = Ferramenta::Misturador;
+    s.pincel.raio = 10.0;
+    s.pincel.dureza = 1.0;
+    s.pincel.fluxo = 1.0;
+    s.misturador = crate::misturador::OpcoesDoMisturador {
+        umidade: 1.0,
+        mistura: 1.0,
+        carregar_apos: false,
+        todas_as_camadas: true,
+        ..Default::default()
+    };
+    let foto = s.compor();
+    s.apertar(200.0, 200.0);
+    s.arrastar(260.0, 200.0);
+    s.soltar();
+    let camada = &s.documento().camadas[0].pixels;
+    assert!(!camada.vazia());
+    // A camada ganhou a foto recolhida, opaca no caminho: a composição é a
+    // foto arrastada — o mesmo tom em média.
+    assert_eq!(camada.pixel(230, 200)[3], 255);
+    let r = Retangulo::novo(215, 196, 30, 8);
+    let agora = s.compor();
+    for c in 0..3 {
+        let (m0, m1) = (media(&foto, &r, c), media(&agora, &r, c));
+        assert!((m0 - m1).abs() < 4.0, "canal {c}: {m0} → {m1}");
+    }
+    // Só a camada atual, sem "todas": numa camada vazia não há o que borrar.
+    let mut s = sessao();
+    s.pincel.ferramenta = Ferramenta::Misturador;
+    s.misturador.carregar_apos = false;
+    s.apertar(200.0, 200.0);
+    s.arrastar(260.0, 200.0);
+    s.soltar();
+    assert!(s.documento().camadas[0].pixels.vazia());
+}
+
+#[test]
+fn o_pincel_sujo_segue_para_o_proximo_traco_sem_limpar() {
+    let mut s = sessao();
+    s.pincel.ferramenta = Ferramenta::Misturador;
+    s.pincel.cor = [0, 200, 0];
+    s.misturador.limpar_apos = false;
+    s.misturador.carregar_apos = false;
+    s.tinta.carregar([0, 200, 0]);
+    s.misturador.carga = 1.0;
+    s.misturador.mistura = 0.0;
+    s.apertar(100.0, 100.0);
+    s.soltar();
+    assert_eq!(s.tinta.cor, Some([0, 200, 0]), "o reservatório ficou");
+    s.apertar(300.0, 300.0);
+    s.soltar();
+    let p = s.documento().camadas[0].pixels.pixel(300, 300);
+    assert_eq!(p, [0, 200, 0, 255], "o segundo traço ainda tinha tinta");
+    s.tinta.limpar();
+    assert!(s.tinta.limpa());
+}

@@ -24,6 +24,7 @@ pub mod frequencias;
 pub mod historico;
 pub mod liquidificar;
 pub mod mesclagem;
+pub mod misturador;
 pub mod operacoes;
 pub mod pincel;
 pub mod projeto;
