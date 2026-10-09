@@ -544,12 +544,23 @@ impl Sessao {
     /// revela tudo até se desenhar nela. A máscara fica escolhida no painel
     /// Caminhos: o próximo desenho é nela.
     pub fn criar_mascara_vetorial(&mut self) -> bool {
+        let caminho = self.caminho_alvo().cloned();
+        self.criar_mascara_vetorial_com(caminho)
+    }
+
+    /// "Revelar tudo": a máscara vetorial vazia, mesmo com um caminho
+    /// escolhido.
+    pub fn criar_mascara_vetorial_vazia(&mut self) -> bool {
+        self.criar_mascara_vetorial_com(None)
+    }
+
+    fn criar_mascara_vetorial_com(&mut self, caminho: Option<Caminho>) -> bool {
         self.terminar_gesto_vetorial();
         let i = self.ativa();
         if self.doc.camadas[i].mascara_vetorial.is_some() {
             return false;
         }
-        let caminho = match self.caminho_alvo() {
+        let caminho = match caminho {
             Some(c) => {
                 let mut c = c.clone();
                 c.nome = "Máscara vetorial".into();
