@@ -98,6 +98,7 @@ pub fn puxar_alcas(c: &mut Caminho, r: RefAncora, lado: Lado, alvo: Ponto) -> bo
     *a.alca_mut(lado) = Some(alvo);
     *a.alca_mut(lado.oposto()) = Some(alvo.espelhado_em(a.ponto));
     a.ligacao = Ligacao::Suave;
+    a.automatica = false;
     true
 }
 
@@ -109,6 +110,7 @@ pub fn puxar_uma_alca(c: &mut Caminho, r: RefAncora, lado: Lado, alvo: Option<Po
     };
     *a.alca_mut(lado) = alvo;
     a.ligacao = Ligacao::Canto;
+    a.automatica = false;
     a.normalizar();
     true
 }
@@ -128,6 +130,7 @@ pub fn mover_alca(
     if independente {
         a.ligacao = Ligacao::Canto;
     }
+    a.automatica = false;
     a.mover_alca(lado, alvo, independente);
     true
 }
@@ -144,6 +147,7 @@ pub fn converter_em_canto(c: &mut Caminho, r: RefAncora) -> bool {
     a.entrada = None;
     a.saida = None;
     a.ligacao = Ligacao::Canto;
+    a.automatica = false;
     true
 }
 
@@ -158,6 +162,7 @@ pub fn tirar_alca(c: &mut Caminho, r: RefAncora, lado: Lado) -> bool {
     }
     *a.alca_mut(lado) = None;
     a.ligacao = Ligacao::Canto;
+    a.automatica = false;
     true
 }
 
@@ -170,6 +175,7 @@ pub fn definir_ligacao(c: &mut Caminho, r: RefAncora, ligacao: Ligacao) -> bool 
     };
     let antes = a.clone();
     a.ligacao = ligacao;
+    a.automatica = false;
     match ligacao {
         Ligacao::Canto => {}
         Ligacao::Suave => a.aplicar_ligacao_a_partir_de(Lado::Saida),
@@ -210,6 +216,7 @@ pub fn inserir_ancora(c: &mut Caminho, sub: u64, indice: usize, t: f64) -> Optio
             entrada: Some(a[2]),
             saida: Some(b[1]),
             ligacao: Ligacao::Suave,
+            automatica: false,
         };
         nova.normalizar();
         if nova.entrada.is_none() || nova.saida.is_none() {
@@ -405,10 +412,83 @@ pub fn dobrar_segmento(c: &mut Caminho, sub: u64, indice: usize, t: f64, d: (f64
     let p2 = seg.p[2].mais((d.0 * a1, d.1 * a1));
     s.ancoras[seg.de].saida = Some(p1);
     s.ancoras[seg.ate].entrada = Some(p2);
+    s.ancoras[seg.de].automatica = false;
+    s.ancoras[seg.ate].automatica = false;
     s.ancoras[seg.de].aplicar_ligacao_a_partir_de(Lado::Saida);
     s.ancoras[seg.ate].aplicar_ligacao_a_partir_de(Lado::Entrada);
     s.ancoras[seg.de].normalizar();
     s.ancoras[seg.ate].normalizar();
+    true
+}
+
+// ------------------------------------------------- a Caneta de curvatura
+
+/// Quanto da distância ao vizinho vira alça na âncora automática — um
+/// terço, a proporção da Catmull-Rom (`(próximo − anterior) / 6` nas âncoras
+/// igualmente espaçadas).
+const PUXO_DA_CURVATURA: f64 = 1.0 / 3.0;
+
+/// Refaz as alças das âncoras automáticas (a Caneta de curvatura): numa
+/// suave, a tangente é a direção do vizinho de trás ao da frente e cada alça
+/// tem um terço da distância ao vizinho do lado dela — a curva passa lisa
+/// pelos pontos; numa de canto, sem alças. A ponta de um aberto (um vizinho
+/// só) fica sem alça. As âncoras feitas à mão não mudam. Devolve se mudou.
+pub fn recalcular_automaticas(c: &mut Caminho) -> bool {
+    let mut mudou = false;
+    for s in &mut c.subcaminhos {
+        let n = s.ancoras.len();
+        if !s.ancoras.iter().any(|a| a.automatica) {
+            continue;
+        }
+        let pontos: Vec<Ponto> = s.ancoras.iter().map(|a| a.ponto).collect();
+        for i in 0..n {
+            if !s.ancoras[i].automatica {
+                continue;
+            }
+            let anterior = (i > 0 || s.fechado).then(|| pontos[(i + n - 1) % n]);
+            let proximo = (i + 1 < n || s.fechado).then(|| pontos[(i + 1) % n]);
+            let a = &mut s.ancoras[i];
+            let (entrada, saida) = match (a.ligacao, anterior, proximo) {
+                (Ligacao::Canto, _, _) | (_, None, _) | (_, _, None) => (None, None),
+                (_, Some(ant), Some(prox)) if n >= 2 && ant != prox => {
+                    let (dx, dy) = prox.menos(ant);
+                    let l = dx.hypot(dy);
+                    if l < ALCA_NULA {
+                        (None, None)
+                    } else {
+                        let (ux, uy) = (dx / l, dy / l);
+                        let li = a.ponto.distancia(ant) * PUXO_DA_CURVATURA;
+                        let lo = a.ponto.distancia(prox) * PUXO_DA_CURVATURA;
+                        (
+                            Some(a.ponto.mais((-ux * li, -uy * li))),
+                            Some(a.ponto.mais((ux * lo, uy * lo))),
+                        )
+                    }
+                }
+                _ => (None, None),
+            };
+            if a.entrada != entrada || a.saida != saida {
+                a.entrada = entrada;
+                a.saida = saida;
+                mudou = true;
+            }
+        }
+    }
+    mudou
+}
+
+/// Marca a âncora como automática (a Caneta de curvatura): suave, ou canto
+/// com `canto`. As alças saem no próximo [`recalcular_automaticas`].
+pub fn tornar_automatica(c: &mut Caminho, r: RefAncora, canto: bool) -> bool {
+    let Some(a) = c.ancora_mut(r) else {
+        return false;
+    };
+    a.automatica = true;
+    a.ligacao = if canto {
+        Ligacao::Canto
+    } else {
+        Ligacao::Suave
+    };
     true
 }
 
@@ -554,6 +634,7 @@ pub fn elipse_em_caminho(cx: f64, cy: f64, rx: f64, ry: f64) -> Caminho {
             entrada: Some(p.mais((-dx, -dy))),
             saida: Some(p.mais((dx, dy))),
             ligacao: Ligacao::Simetrico,
+            automatica: false,
         });
     }
     s.fechado = true;
@@ -822,6 +903,40 @@ mod testes {
         }
         dobrar_segmento(&mut c, sub, 0, 0.8, (0.0, -20.0));
         assert!(c.ancora(r).unwrap().alcas_colineares());
+    }
+
+    #[test]
+    fn a_curvatura_passa_lisa_pelos_pontos_e_respeita_o_canto() {
+        let mut c = Caminho::novo(1, "t");
+        let r0 = novo_subcaminho(&mut c, Ponto::novo(0.0, 0.0), OperacaoDoComponente::Somar);
+        let r1 = acrescentar(&mut c, r0.sub, Extremo::Fim, Ponto::novo(50.0, 40.0)).unwrap();
+        let r2 = acrescentar(&mut c, r0.sub, Extremo::Fim, Ponto::novo(100.0, 0.0)).unwrap();
+        for r in [r0, r1, r2] {
+            tornar_automatica(&mut c, r, false);
+        }
+        assert!(recalcular_automaticas(&mut c));
+        let a = c.ancora(r1).unwrap();
+        assert!(a.alcas_colineares());
+        // Tangente paralela ao vizinho de trás → da frente (horizontal).
+        assert!((a.saida.unwrap().y - 40.0).abs() < 1e-9);
+        // As pontas do aberto não têm alça.
+        assert!(c.ancora(r0).unwrap().saida.is_none());
+        // A curva passa pelos três pontos (âncoras) e é lisa no do meio.
+        // Mexer no vizinho refaz.
+        mover_ancoras(&mut c, &[r2], (0.0, 80.0));
+        assert!(recalcular_automaticas(&mut c));
+        let a = c.ancora(r1).unwrap();
+        assert!(a.saida.unwrap().y > 40.0);
+        // Canto: sem alças.
+        tornar_automatica(&mut c, r1, true);
+        recalcular_automaticas(&mut c);
+        assert!(c.ancora(r1).unwrap().saida.is_none());
+        // A alça mexida à mão solta a âncora da regra.
+        tornar_automatica(&mut c, r1, false);
+        recalcular_automaticas(&mut c);
+        mover_alca(&mut c, r1, Lado::Saida, Ponto::novo(90.0, 10.0), false);
+        assert!(!c.ancora(r1).unwrap().automatica);
+        assert!(!recalcular_automaticas(&mut c), "não volta sozinha");
     }
 
     #[test]

@@ -35,6 +35,10 @@ use super::{Caminho, Lado, OperacaoDoComponente, Ponto, RefAncora};
 pub enum FerramentaVetorial {
     /// P — a Caneta clássica.
     Caneta,
+    /// P (⇧P) — a Caneta de curvatura: cada clique é um ponto por onde a
+    /// curva passa lisa; duplo clique (ou ⌥) faz canto; arrastar um ponto o
+    /// move e a curva se refaz.
+    Curvatura,
     /// Adicionar ponto de ancoragem (sem letra, como no Photoshop).
     AdicionarPonto,
     /// Excluir ponto de ancoragem (sem letra).
@@ -63,6 +67,8 @@ pub struct Modificadores {
     pub shift: bool,
     pub alt: bool,
     pub comando: bool,
+    /// O segundo clique de um duplo clique (a Caneta de curvatura faz canto).
+    pub duplo: bool,
 }
 
 /// Pixels do documento por ponto da tela — o que torna as tolerâncias de
@@ -147,6 +153,9 @@ pub enum Estado {
     MovendoAncoras {
         refs: Vec<RefAncora>,
         inicio: Ponto,
+        /// Para onde volta ao soltar (a Caneta de curvatura continua
+        /// desenhando depois de pôr ou mover um ponto).
+        voltar: Option<(u64, Extremo)>,
     },
     /// Uma alça andando — com a ligação da âncora, ou sozinha
     /// (`independente`, o ⌥).
@@ -241,6 +250,8 @@ pub enum Acao {
         indice: usize,
         t: f64,
     },
+    /// Duplo clique numa âncora com a Caneta de curvatura: suave ↔ canto.
+    AlternarCanto(RefAncora),
     MoverComponente(u64),
     /// Arrastar no vazio: o retângulo.
     Retangulo,
@@ -450,6 +461,7 @@ impl Caneta {
         let ferramenta = self.ferramenta_efetiva(m);
         match ferramenta {
             FerramentaVetorial::Caneta => self.decidir_na_caneta(c, p, m, medida),
+            FerramentaVetorial::Curvatura => self.decidir_na_curvatura(c, p, m, medida),
             FerramentaVetorial::AdicionarPonto => match self.alvo(c, p, medida, false) {
                 Some(Alvo::Segmento { sub, indice, t }) => Acao::Adicionar { sub, indice, t },
                 _ => Acao::Nada,
@@ -497,6 +509,49 @@ impl Caneta {
                 }
                 None => Acao::Retangulo,
             },
+        }
+    }
+
+    fn decidir_na_curvatura(
+        &self,
+        c: &Caminho,
+        p: Ponto,
+        m: Modificadores,
+        medida: Medida,
+    ) -> Acao {
+        let alvo = self.alvo(c, p, medida, false);
+        if let Some((sub, extremo)) = self.construindo() {
+            let outra = edicao::ancora_do_extremo(
+                c,
+                sub,
+                match extremo {
+                    Extremo::Fim => Extremo::Inicio,
+                    Extremo::Inicio => Extremo::Fim,
+                },
+            );
+            let tamanho = c.subcaminho(sub).map_or(0, |s| s.ancoras.len());
+            return match alvo {
+                Some(Alvo::Ancora(r)) if m.duplo => Acao::AlternarCanto(r),
+                Some(Alvo::Ancora(r)) if Some(r) == outra && tamanho >= 2 => Acao::Fechar {
+                    sub,
+                    primeira: r,
+                    extremo,
+                },
+                Some(Alvo::Ancora(r)) => Acao::MoverAncoras(r),
+                Some(Alvo::Segmento { sub: s, indice, t }) => Acao::Adicionar { sub: s, indice, t },
+                _ => Acao::Continuar { sub, extremo },
+            };
+        }
+        match alvo {
+            Some(Alvo::Ancora(r)) if m.duplo => Acao::AlternarCanto(r),
+            Some(Alvo::Ancora(r)) => Acao::MoverAncoras(r),
+            Some(Alvo::Alca(r, lado)) => Acao::MoverAlca {
+                r,
+                lado,
+                independente: m.alt,
+            },
+            Some(Alvo::Segmento { sub, indice, t }) => Acao::Adicionar { sub, indice, t },
+            _ => Acao::NovoComponente,
         }
     }
 
@@ -586,6 +641,56 @@ impl Caneta {
         }
     }
 
+    /// O botão desceu em `p`.
+    pub fn apertar(
+        &mut self,
+        c: &mut Caminho,
+        p: Ponto,
+        m: Modificadores,
+        medida: Medida,
+    ) -> Resultado {
+        let r = self.apertar_cru(c, p, m, medida);
+        edicao::recalcular_automaticas(c);
+        r
+    }
+
+    /// O ponteiro andou (com ou sem o botão).
+    pub fn arrastar(
+        &mut self,
+        c: &mut Caminho,
+        p: Ponto,
+        m: Modificadores,
+        medida: Medida,
+    ) -> Resultado {
+        let r = self.arrastar_cru(c, p, m, medida);
+        edicao::recalcular_automaticas(c);
+        r
+    }
+
+    /// O botão subiu.
+    pub fn soltar(&mut self, c: &mut Caminho, medida: Medida) -> Resultado {
+        // 🔑 As âncoras automáticas (a Caneta de curvatura) se refazem antes
+        // de comparar com o caminho de antes do gesto.
+        edicao::recalcular_automaticas(c);
+        let r = self.soltar_cru(c, medida);
+        edicao::recalcular_automaticas(c);
+        r
+    }
+
+    /// Delete / ⌫ (ver [`Self::excluir_cru`]).
+    pub fn excluir(&mut self, c: &mut Caminho) -> Resultado {
+        let r = self.excluir_cru(c);
+        edicao::recalcular_automaticas(c);
+        r
+    }
+
+    /// As setas (ver [`Self::empurrar_cru`]).
+    pub fn empurrar(&mut self, c: &mut Caminho, d: (f64, f64)) -> Resultado {
+        let r = self.empurrar_cru(c, d);
+        edicao::recalcular_automaticas(c);
+        r
+    }
+
     fn comecar_gesto(&mut self, c: &Caminho, nome: &'static str) {
         self.gesto = Some(Gesto {
             antes: c.clone(),
@@ -597,7 +702,7 @@ impl Caneta {
     }
 
     /// O botão desceu em `p`.
-    pub fn apertar(
+    fn apertar_cru(
         &mut self,
         c: &mut Caminho,
         p: Ponto,
@@ -622,6 +727,11 @@ impl Caneta {
             return Resultado::Nada;
         }
         let acao = self.decidir(c, p, m, medida);
+        if ferramenta == FerramentaVetorial::Curvatura {
+            if let Some(r) = self.apertar_na_curvatura(c, p, m, acao) {
+                return r;
+            }
+        }
         match acao {
             Acao::Nada | Acao::Encerrar => Resultado::Nada,
             Acao::NovoComponente => {
@@ -799,6 +909,7 @@ impl Caneta {
                 self.estado = Estado::MovendoAncoras {
                     refs: self.pontos.iter().copied().collect(),
                     inicio: p,
+                    voltar: None,
                 };
                 Resultado::Nada
             }
@@ -825,6 +936,7 @@ impl Caneta {
                 };
                 Resultado::Nada
             }
+            Acao::AlternarCanto(_) => Resultado::Nada,
             Acao::MoverComponente(sub) => {
                 if m.shift {
                     if !self.componentes.insert(sub) {
@@ -876,8 +988,92 @@ impl Caneta {
         }
     }
 
+    /// O apertar da Caneta de curvatura: ponto novo (suave, ou canto com ⌥)
+    /// que já se arrasta, ponto existente que anda, duplo clique que alterna
+    /// canto, clique no segmento que insere, clique no primeiro que fecha.
+    /// `None`: o resto é como na Caneta (as alças, o nada).
+    fn apertar_na_curvatura(
+        &mut self,
+        c: &mut Caminho,
+        p: Ponto,
+        m: Modificadores,
+        acao: Acao,
+    ) -> Option<Resultado> {
+        Some(match acao {
+            Acao::NovoComponente => {
+                self.comecar_gesto(c, "Ponto de curvatura");
+                let r = edicao::novo_subcaminho(c, p, self.opcoes.operacao);
+                edicao::tornar_automatica(c, r, m.alt);
+                self.pontos = [r].into();
+                self.componentes.clear();
+                self.estado = Estado::MovendoAncoras {
+                    refs: vec![r],
+                    inicio: p,
+                    voltar: Some((r.sub, Extremo::Fim)),
+                };
+                Resultado::AoVivo
+            }
+            Acao::Continuar { sub, extremo } => {
+                self.comecar_gesto(c, "Ponto de curvatura");
+                let Some(r) = edicao::acrescentar(c, sub, extremo, p) else {
+                    self.gesto = None;
+                    return Some(Resultado::Nada);
+                };
+                edicao::tornar_automatica(c, r, m.alt);
+                self.pontos = [r].into();
+                self.estado = Estado::MovendoAncoras {
+                    refs: vec![r],
+                    inicio: p,
+                    voltar: Some((sub, extremo)),
+                };
+                Resultado::AoVivo
+            }
+            Acao::Fechar { sub, .. } => {
+                if edicao::fechar(c, sub) {
+                    edicao::recalcular_automaticas(c);
+                    self.estado = Estado::Ocioso;
+                    self.pontos.clear();
+                    Resultado::Passo("Fechar caminho")
+                } else {
+                    Resultado::Nada
+                }
+            }
+            Acao::Adicionar { sub, indice, t } => match edicao::inserir_ancora(c, sub, indice, t) {
+                Some(r) => {
+                    edicao::tornar_automatica(c, r, false);
+                    self.pontos = [r].into();
+                    Resultado::Passo("Ponto de curvatura")
+                }
+                None => Resultado::Nada,
+            },
+            Acao::MoverAncoras(r) => {
+                let voltar = self
+                    .construindo()
+                    .or_else(|| edicao::extremo_de(c, r).map(|e| (r.sub, e)));
+                self.pontos = [r].into();
+                self.comecar_gesto(c, "Mover pontos");
+                self.estado = Estado::MovendoAncoras {
+                    refs: vec![r],
+                    inicio: p,
+                    voltar,
+                };
+                Resultado::Nada
+            }
+            Acao::AlternarCanto(r) => {
+                let canto = c
+                    .ancora(r)
+                    .is_some_and(|a| a.automatica && a.ligacao != super::Ligacao::Canto);
+                edicao::tornar_automatica(c, r, canto);
+                edicao::recalcular_automaticas(c);
+                self.pontos = [r].into();
+                Resultado::Passo("Converter ponto")
+            }
+            _ => return None,
+        })
+    }
+
     /// O ponteiro andou (com ou sem o botão).
-    pub fn arrastar(
+    fn arrastar_cru(
         &mut self,
         c: &mut Caminho,
         p: Ponto,
@@ -981,7 +1177,7 @@ impl Caneta {
                 edicao::mover_alca(c, r, lado, alvo, independente || m.alt);
                 Resultado::AoVivo
             }
-            Estado::MovendoAncoras { refs, inicio } => {
+            Estado::MovendoAncoras { refs, inicio, .. } => {
                 let mut d = p.menos(inicio);
                 if m.shift {
                     let q = em_45(inicio, p);
@@ -1040,7 +1236,7 @@ impl Caneta {
     }
 
     /// O botão subiu.
-    pub fn soltar(&mut self, c: &mut Caminho, medida: Medida) -> Resultado {
+    fn soltar_cru(&mut self, c: &mut Caminho, medida: Medida) -> Resultado {
         let Some(gesto) = self.gesto.take() else {
             return Resultado::Nada;
         };
@@ -1111,9 +1307,13 @@ impl Caneta {
                     Resultado::Nada
                 }
             }
-            Estado::MovendoAncoras { .. } => {
+            Estado::MovendoAncoras { voltar, .. } => {
+                self.estado = voltar.map_or(Estado::Ocioso, |(sub, extremo)| Estado::Construindo {
+                    sub,
+                    extremo,
+                });
                 if mudou {
-                    Resultado::Passo("Mover pontos")
+                    Resultado::Passo(gesto.nome)
                 } else {
                     Resultado::Nada
                 }
@@ -1219,7 +1419,7 @@ impl Caneta {
     /// âncoras escolhidas, exclui-as (o fechado abre, o aberto parte); com
     /// componentes escolhidos, exclui-os. Sem nada disso, não faz nada (e
     /// devolve [`Resultado::Nada`] — a janela segue com o Delete de sempre).
-    pub fn excluir(&mut self, c: &mut Caminho) -> Resultado {
+    fn excluir_cru(&mut self, c: &mut Caminho) -> Resultado {
         if self.gesto.is_some() {
             return Resultado::Nada;
         }
@@ -1260,7 +1460,7 @@ impl Caneta {
 
     /// As setas: as âncoras escolhidas (ou os componentes) andam `d` pixels
     /// do documento — um passo cada toque.
-    pub fn empurrar(&mut self, c: &mut Caminho, d: (f64, f64)) -> Resultado {
+    fn empurrar_cru(&mut self, c: &mut Caminho, d: (f64, f64)) -> Resultado {
         if self.gesto.is_some() {
             return Resultado::Nada;
         }
@@ -1302,19 +1502,46 @@ impl Caneta {
     }
 
     /// A faixa elástica: o próximo segmento, da ponta em construção até o
-    /// ponteiro (com a alça da frente dela), se a opção está ligada.
-    pub fn previa(&self, c: &Caminho, shift: bool) -> Option<[Ponto; 4]> {
-        if !self.opcoes.previa || self.gesto.is_some() {
-            return None;
+    /// ponteiro (com a alça da frente dela), se a opção está ligada. Na
+    /// Caneta de curvatura, sempre: os dois últimos segmentos como ficariam
+    /// com um ponto no ponteiro (a curva já dobra antes do clique).
+    pub fn previa(&self, c: &Caminho, shift: bool) -> Vec<[Ponto; 4]> {
+        let curvatura = self.ferramenta == FerramentaVetorial::Curvatura;
+        if (!self.opcoes.previa && !curvatura) || self.gesto.is_some() {
+            return Vec::new();
         }
         let Estado::Construindo { sub, extremo } = self.estado else {
-            return None;
+            return Vec::new();
         };
-        let r = edicao::ancora_do_extremo(c, sub, extremo)?;
-        let a = c.ancora(r)?;
-        let p = self.ponteiro?;
+        let (Some(r), Some(p)) = (edicao::ancora_do_extremo(c, sub, extremo), self.ponteiro) else {
+            return Vec::new();
+        };
+        let Some(a) = c.ancora(r) else {
+            return Vec::new();
+        };
+        if curvatura {
+            let mut t = c.clone();
+            let Some(novo) = edicao::acrescentar(&mut t, sub, extremo, p) else {
+                return Vec::new();
+            };
+            edicao::tornar_automatica(&mut t, novo, false);
+            edicao::recalcular_automaticas(&mut t);
+            let Some(s) = t.subcaminho(sub) else {
+                return Vec::new();
+            };
+            let n = s.quantos_segmentos();
+            let ultimos: Vec<usize> = match extremo {
+                Extremo::Fim => (n.saturating_sub(2)..n).collect(),
+                Extremo::Inicio => (0..n.min(2)).collect(),
+            };
+            return ultimos
+                .into_iter()
+                .filter_map(|i| s.segmento(i))
+                .map(|g| g.p)
+                .collect();
+        }
         let p = if shift { em_45(a.ponto, p) } else { p };
-        Some([a.ponto, a.controle(extremo.alca_para_frente()), p, p])
+        vec![[a.ponto, a.controle(extremo.alca_para_frente()), p, p]]
     }
 
     /// O retângulo de seleção em curso, `(x0, y0, x1, y1)`.

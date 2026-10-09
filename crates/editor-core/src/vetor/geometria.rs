@@ -270,6 +270,7 @@ mod testes {
             entrada: None,
             saida: Some(p[1]),
             ligacao: Ligacao::Canto,
+            automatica: false,
         });
         s.ancoras.push(Ancora {
             id: 2,
@@ -277,6 +278,7 @@ mod testes {
             entrada: Some(p[2]),
             saida: None,
             ligacao: Ligacao::Canto,
+            automatica: false,
         });
         let seg = s.segmento(0).unwrap();
         let alvo = avaliar(&p, 0.42);

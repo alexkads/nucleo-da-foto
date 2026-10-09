@@ -21,6 +21,7 @@ const NADA: Modificadores = Modificadores {
     shift: false,
     alt: false,
     comando: false,
+    duplo: false,
 };
 
 fn base() -> Arc<RgbImage> {

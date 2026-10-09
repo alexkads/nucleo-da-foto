@@ -122,6 +122,11 @@ pub struct Ancora {
     pub saida: Option<Ponto>,
     #[serde(default)]
     pub ligacao: Ligacao,
+    /// Feita pela Caneta de curvatura: as alças saem dos vizinhos (a curva
+    /// passa lisa pelos pontos) e se refazem quando eles andam. Mexer à mão
+    /// numa alça a solta da regra.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automatica: bool,
 }
 
 /// Qual alça.
@@ -151,6 +156,7 @@ impl Ancora {
             entrada: None,
             saida: None,
             ligacao: Ligacao::Canto,
+            automatica: false,
         }
     }
 

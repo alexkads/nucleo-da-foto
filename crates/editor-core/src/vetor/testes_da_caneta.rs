@@ -10,21 +10,25 @@ const NADA: Modificadores = Modificadores {
     shift: false,
     alt: false,
     comando: false,
+    duplo: false,
 };
 const ALT: Modificadores = Modificadores {
     shift: false,
     alt: true,
     comando: false,
+    duplo: false,
 };
 const SHIFT: Modificadores = Modificadores {
     shift: true,
     alt: false,
     comando: false,
+    duplo: false,
 };
 const CMD: Modificadores = Modificadores {
     shift: false,
     alt: false,
     comando: true,
+    duplo: false,
 };
 
 fn p(x: f64, y: f64) -> Ponto {
@@ -435,9 +439,9 @@ fn a_faixa_elastica_vai_da_alca_da_ponta_ate_o_ponteiro() {
     clicar(&mut k, &mut c, p(0.0, 0.0), NADA);
     arrastar(&mut k, &mut c, p(100.0, 0.0), p(120.0, 0.0), NADA);
     k.arrastar(&mut c, p(200.0, 50.0), NADA, M);
-    assert_eq!(k.previa(&c, false), None, "desligada por padrão");
+    assert!(k.previa(&c, false).is_empty(), "desligada por padrão");
     k.opcoes.previa = true;
-    let s = k.previa(&c, false).unwrap();
+    let s = k.previa(&c, false)[0];
     assert_eq!(
         s,
         [p(100.0, 0.0), p(120.0, 0.0), p(200.0, 50.0), p(200.0, 50.0)]
@@ -504,4 +508,74 @@ fn selecao_direta_dobra_a_curva_pelo_meio_e_move_a_reta_inteira() {
     assert_eq!(r, Resultado::Passo("Mover pontos"));
     assert_eq!(c.subcaminhos[0].ancoras[0].ponto, p(0.0, -10.0));
     assert_eq!(c.subcaminhos[0].ancoras[1].ponto, p(100.0, -10.0));
+}
+
+#[test]
+fn a_caneta_de_curvatura_passa_lisa_e_faz_canto_no_duplo_clique() {
+    let (mut k, mut c) = novo();
+    k.usar(FerramentaVetorial::Curvatura);
+    for q in [p(0.0, 0.0), p(50.0, 40.0)] {
+        assert_eq!(
+            clicar(&mut k, &mut c, q, NADA),
+            Resultado::Passo("Ponto de curvatura")
+        );
+    }
+    // A prévia já curva antes do terceiro clique (dois segmentos).
+    k.arrastar(&mut c, p(100.0, 0.0), NADA, M);
+    let previa = k.previa(&c, false);
+    assert_eq!(previa.len(), 2);
+    assert_ne!(
+        previa[0][2], previa[0][3],
+        "o segmento até o do meio já é curvo"
+    );
+    clicar(&mut k, &mut c, p(100.0, 0.0), NADA);
+    let s = &c.subcaminhos[0];
+    assert_eq!(s.ancoras.len(), 3);
+    assert!(s.ancoras.iter().all(|a| a.automatica));
+    assert!(s.ancoras[1].alcas_colineares(), "lisa no ponto do meio");
+    assert!(
+        s.ancoras[0].saida.is_none(),
+        "a ponta do aberto não tem alça"
+    );
+    // Duplo clique no do meio: canto.
+    let duplo = Modificadores {
+        duplo: true,
+        ..NADA
+    };
+    assert_eq!(
+        clicar(&mut k, &mut c, p(50.0, 40.0), duplo),
+        Resultado::Passo("Converter ponto")
+    );
+    assert!(c.subcaminhos[0].ancoras[1].saida.is_none());
+    // De novo: suave.
+    clicar(&mut k, &mut c, p(50.0, 40.0), duplo);
+    assert!(c.subcaminhos[0].ancoras[1].alcas_colineares());
+    // Arrastar o do meio: ele anda e a curva se refaz; o desenho continua.
+    let antes = c.subcaminhos[0].ancoras[2].clone();
+    assert_eq!(
+        arrastar(&mut k, &mut c, p(50.0, 40.0), p(50.0, 80.0), NADA),
+        Resultado::Passo("Mover pontos")
+    );
+    assert_eq!(c.subcaminhos[0].ancoras[1].ponto, p(50.0, 80.0));
+    assert!(c.subcaminhos[0].ancoras[1].alcas_colineares());
+    assert_eq!(c.subcaminhos[0].ancoras[2].ponto, antes.ponto);
+    assert!(matches!(k.estado(), Estado::Construindo { .. }));
+    // ⌥ + clique: um ponto de canto.
+    clicar(&mut k, &mut c, p(150.0, 40.0), ALT);
+    let novo = &c.subcaminhos[0].ancoras[3];
+    assert!(novo.automatica && novo.ligacao == Ligacao::Canto);
+    // Fechar no primeiro: as pontas ganham vizinhos e alças.
+    assert_eq!(
+        clicar(&mut k, &mut c, p(0.0, 0.0), NADA),
+        Resultado::Passo("Fechar caminho")
+    );
+    let s = &c.subcaminhos[0];
+    assert!(s.fechado);
+    assert!(s.ancoras[0].alcas_colineares());
+    // A Seleção direta mexendo numa alça solta a âncora da regra.
+    k.usar(FerramentaVetorial::SelecaoDireta);
+    clicar(&mut k, &mut c, p(0.0, 0.0), NADA);
+    let h = c.subcaminhos[0].ancoras[0].saida.unwrap();
+    arrastar(&mut k, &mut c, h, h.mais((0.0, 30.0)), NADA);
+    assert!(!c.subcaminhos[0].ancoras[0].automatica);
 }
