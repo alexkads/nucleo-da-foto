@@ -251,6 +251,14 @@ impl Comando {
                         };
                         format!("{acao} a máscara vetorial de {nome}")
                     }
+                    (Some(a), Some(d)) if a.densidade != d.densidade => format!(
+                        "Densidade da máscara vetorial de {nome} ({}%)",
+                        (d.densidade * 100.0).round()
+                    ),
+                    (Some(a), Some(d)) if a.difusao != d.difusao => format!(
+                        "Difusão da máscara vetorial de {nome} ({:.1} px)",
+                        d.difusao
+                    ),
                     _ => format!("Máscara vetorial de {nome}"),
                 }
             }

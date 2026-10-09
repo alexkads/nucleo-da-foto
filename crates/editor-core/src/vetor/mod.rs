@@ -686,6 +686,14 @@ pub struct MascaraVetorial {
     /// A corrente com a camada: o Mover e o ⌘T levam o caminho junto.
     #[serde(default = "verdadeiro")]
     pub vinculada: bool,
+    /// `0..=1`: quanto o lado de fora esconde (as Propriedades da máscara
+    /// vetorial). Com 0,5, fora da curva a camada aparece pela metade.
+    #[serde(default = "um_f32", skip_serializing_if = "e_um")]
+    pub densidade: f32,
+    /// A difusão da borda, em pixels do documento — a borda da curva vira
+    /// rampa sem mudar o caminho.
+    #[serde(default, skip_serializing_if = "e_zero")]
+    pub difusao: f32,
     #[serde(skip)]
     cache: CacheDaCobertura,
 }
@@ -694,16 +702,34 @@ fn verdadeiro() -> bool {
     true
 }
 
+fn um_f32() -> f32 {
+    1.0
+}
+
+fn e_um(v: &f32) -> bool {
+    *v == 1.0
+}
+
+fn e_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+
+/// A maior difusão da máscara vetorial, em pixels (a do Photoshop é 1000;
+/// aqui, a da seleção).
+pub const DIFUSAO_MAXIMA_VETORIAL: f32 = 250.0;
+
 impl PartialEq for MascaraVetorial {
     fn eq(&self, outra: &Self) -> bool {
         self.caminho == outra.caminho
             && self.ativa == outra.ativa
             && self.vinculada == outra.vinculada
+            && self.densidade == outra.densidade
+            && self.difusao == outra.difusao
     }
 }
 
-/// A cobertura guardada: a assinatura do caminho, o tamanho da foto e a
-/// máscara. Dividida entre as cópias da máscara (o histórico guarda cópias):
+/// A cobertura guardada: a assinatura do caminho (com densidade e
+/// difusão), o tamanho da foto e a máscara. Dividida entre as cópias da máscara (o histórico guarda cópias):
 /// cada uma confere a assinatura antes de usar.
 #[derive(Clone, Debug, Default)]
 struct CacheDaCobertura(Arc<Mutex<Option<CoberturaGuardada>>>);
@@ -712,11 +738,51 @@ struct CacheDaCobertura(Arc<Mutex<Option<CoberturaGuardada>>>);
 type CoberturaGuardada = (u64, u32, u32, Arc<Selecao>);
 
 impl MascaraVetorial {
+    /// A cobertura com a difusão (a borda vira rampa) e a densidade (o fora
+    /// esconde só `densidade`): `255 − densidade · (255 − v)`.
+    fn acabada(&self, s: Arc<Selecao>) -> Arc<Selecao> {
+        let mut s = s;
+        let raio = self.difusao.clamp(0.0, DIFUSAO_MAXIMA_VETORIAL).round() as u32;
+        if raio > 0 {
+            s = Arc::new(s.difusa(raio));
+        }
+        let d = self.densidade.clamp(0.0, 1.0);
+        if d < 1.0 {
+            let mut t = s.as_ref().clone();
+            let vazia = Selecao::vazia(t.largura(), t.altura());
+            t.combinar_com(&vazia, |v, _| 255 - ((255 - v) as f32 * d).round() as u8);
+            s = Arc::new(t);
+        }
+        s
+    }
+
+    /// Quanto uma mudança da curva em `caixa` muda a foto: a difusão leva a
+    /// rampa além da curva; com densidade abaixo de 100% ou máscara que vale
+    /// fora da caixa, a foto inteira.
+    pub fn alcance(&self, caixa: Retangulo, largura: u32, altura: u32) -> Retangulo {
+        if self.densidade < 1.0 || !self.caminho.alcanca_so_a_caixa() {
+            return Retangulo::inteiro(largura, altura);
+        }
+        if caixa.vazio() || self.difusao <= 0.0 {
+            return caixa;
+        }
+        let m = (3.0 * self.difusao.min(DIFUSAO_MAXIMA_VETORIAL)).ceil() as u32 + 2;
+        Retangulo::novo(
+            caixa.x.saturating_sub(m),
+            caixa.y.saturating_sub(m),
+            caixa.largura + 2 * m,
+            caixa.altura + 2 * m,
+        )
+        .limitado(largura, altura)
+    }
+
     pub fn nova(caminho: Caminho) -> Self {
         Self {
             caminho,
             ativa: true,
             vinculada: true,
+            densidade: 1.0,
+            difusao: 0.0,
             cache: CacheDaCobertura::default(),
         }
     }
@@ -724,7 +790,13 @@ impl MascaraVetorial {
     /// A cobertura do caminho na foto `largura × altura`, de 0 (esconde) a
     /// 255 (revela). Rasterizada só quando a geometria mudou.
     pub fn cobertura(&self, largura: u32, altura: u32) -> Arc<Selecao> {
-        let assinatura = self.caminho.assinatura();
+        let assinatura = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.caminho.assinatura().hash(&mut h);
+            self.densidade.to_bits().hash(&mut h);
+            self.difusao.to_bits().hash(&mut h);
+            h.finish()
+        };
         let mut guarda = self.cache.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((a, l, h, s)) = guarda.as_ref() {
             if *a == assinatura && *l == largura && *h == altura {
@@ -744,6 +816,7 @@ impl MascaraVetorial {
         } else {
             Selecao::tudo(largura, altura)
         });
+        let s = self.acabada(s);
         *guarda = Some((assinatura, largura, altura, s.clone()));
         s
     }

@@ -376,6 +376,42 @@ pub fn inverter(s: &mut Subcaminho) {
     }
 }
 
+/// Dobra o segmento `indice` arrastando o ponto da curva em `t` por `d`: as
+/// duas alças do segmento mudam e as pontas ficam (a conta do "arrastar a
+/// curva" do Inkscape — o peso de cada alça segue o `t`, então agarrar perto
+/// de uma ponta mexe sobretudo na alça dela). Depois, as âncoras suaves e
+/// simétricas acertam a alça do outro lado, para a emenda continuar lisa.
+pub fn dobrar_segmento(c: &mut Caminho, sub: u64, indice: usize, t: f64, d: (f64, f64)) -> bool {
+    let Some(s) = c.subcaminho_mut(sub) else {
+        return false;
+    };
+    let Some(seg) = s.segmento(indice) else {
+        return false;
+    };
+    let t = t.clamp(0.02, 0.98);
+    let peso = if t <= 1.0 / 6.0 {
+        0.0
+    } else if t <= 0.5 {
+        ((6.0 * t - 1.0) / 2.0).powi(3) / 2.0
+    } else if t <= 5.0 / 6.0 {
+        1.0 - ((6.0 * (1.0 - t) - 1.0) / 2.0).powi(3) / 2.0
+    } else {
+        1.0
+    };
+    let u = 1.0 - t;
+    let a0 = (1.0 - peso) / (3.0 * t * u * u);
+    let a1 = peso / (3.0 * t * t * u);
+    let p1 = seg.p[1].mais((d.0 * a0, d.1 * a0));
+    let p2 = seg.p[2].mais((d.0 * a1, d.1 * a1));
+    s.ancoras[seg.de].saida = Some(p1);
+    s.ancoras[seg.ate].entrada = Some(p2);
+    s.ancoras[seg.de].aplicar_ligacao_a_partir_de(Lado::Saida);
+    s.ancoras[seg.ate].aplicar_ligacao_a_partir_de(Lado::Entrada);
+    s.ancoras[seg.de].normalizar();
+    s.ancoras[seg.ate].normalizar();
+    true
+}
+
 /// As âncoras andam `d` (com as alças).
 pub fn mover_ancoras(c: &mut Caminho, refs: &[RefAncora], d: (f64, f64)) -> bool {
     let mut mudou = false;
@@ -739,6 +775,36 @@ mod testes {
         assert_eq!(c.subcaminhos[1].ancoras[0].ponto, Ponto::novo(5.0, 5.0));
         assert!(excluir_subcaminhos(&mut c, &[sub]));
         assert_eq!(c.subcaminhos.len(), 1);
+    }
+
+    #[test]
+    fn dobrar_o_segmento_leva_o_ponto_agarrado_e_deixa_as_pontas() {
+        let (mut c, sub) = curva_simples();
+        let antes = c.clone();
+        let seg = antes.subcaminho(sub).unwrap().segmento(0).unwrap();
+        for t in [0.3, 0.5, 0.7] {
+            let mut c2 = antes.clone();
+            let q = avaliar(&seg.p, t);
+            assert!(dobrar_segmento(&mut c2, sub, 0, t, (5.0, 12.0)));
+            let novo = c2.subcaminho(sub).unwrap().segmento(0).unwrap();
+            let q2 = avaliar(&novo.p, t);
+            assert!(q2.distancia(q.mais((5.0, 12.0))) < 1e-9, "t={t}: {q2:?}");
+            assert_eq!(novo.p[0], seg.p[0]);
+            assert_eq!(novo.p[3], seg.p[3]);
+        }
+        // Âncora suave na ponta: a alça do outro lado gira junto.
+        let r = RefAncora {
+            sub,
+            ancora: c.subcaminho(sub).unwrap().ancoras[1].id,
+        };
+        acrescentar(&mut c, sub, Extremo::Fim, Ponto::novo(300.0, 100.0));
+        {
+            let a = c.ancora_mut(r).unwrap();
+            a.saida = Some(Ponto::novo(230.0, 190.0));
+            a.ligacao = Ligacao::Suave;
+        }
+        dobrar_segmento(&mut c, sub, 0, 0.8, (0.0, -20.0));
+        assert!(c.ancora(r).unwrap().alcas_colineares());
     }
 
     #[test]

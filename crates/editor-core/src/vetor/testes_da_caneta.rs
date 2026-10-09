@@ -481,3 +481,27 @@ fn trocar_de_ferramenta_preserva_a_geometria() {
     ));
     let _ = Lado::Saida;
 }
+
+#[test]
+fn selecao_direta_dobra_a_curva_pelo_meio_e_move_a_reta_inteira() {
+    let (mut k, mut c) = novo();
+    clicar(&mut k, &mut c, p(0.0, 0.0), NADA);
+    arrastar(&mut k, &mut c, p(100.0, 0.0), p(130.0, 0.0), NADA);
+    k.encerrar();
+    k.usar(FerramentaVetorial::SelecaoDireta);
+    let seg = c.subcaminhos[0].segmento(0).unwrap();
+    let meio = super::geometria::avaliar(&seg.p, 0.5);
+    let r = arrastar(&mut k, &mut c, meio, meio.mais((0.0, 20.0)), NADA);
+    assert_eq!(r, Resultado::Passo("Dobrar curva"));
+    let s = &c.subcaminhos[0];
+    assert_eq!(s.ancoras[0].ponto, p(0.0, 0.0));
+    assert_eq!(s.ancoras[1].ponto, p(100.0, 0.0));
+    let novo = s.segmento(0).unwrap();
+    assert!(super::geometria::avaliar(&novo.p, 0.5).distancia(meio.mais((0.0, 20.0))) < 1e-6);
+    // Numa reta, o arrasto do segmento leva as duas pontas.
+    let mut c = super::edicao::retangulo_em_caminho(0.0, 0.0, 100.0, 100.0);
+    let r = arrastar(&mut k, &mut c, p(50.0, 0.0), p(50.0, -10.0), NADA);
+    assert_eq!(r, Resultado::Passo("Mover pontos"));
+    assert_eq!(c.subcaminhos[0].ancoras[0].ponto, p(0.0, -10.0));
+    assert_eq!(c.subcaminhos[0].ancoras[1].ponto, p(100.0, -10.0));
+}

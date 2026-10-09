@@ -451,3 +451,54 @@ fn exportar_nao_leva_o_caminho_nem_muda_a_base() {
     assert_eq!(foto.get_pixel(99, 150).0, base.get_pixel(99, 150).0);
     assert_eq!(s.base().as_raw(), base.as_raw());
 }
+
+#[test]
+fn densidade_e_difusao_da_mascara_vetorial_sem_mexer_no_caminho() {
+    let mut s = sessao();
+    camada_vermelha(&mut s);
+    quadrado(&mut s);
+    assert!(s.criar_mascara_vetorial());
+    let base = s.base().clone();
+    let caminho = s.documento().camadas[0]
+        .mascara_vetorial
+        .clone()
+        .unwrap()
+        .caminho;
+    // Densidade 50%: fora do quadrado, meia camada.
+    s.mover_propriedades_da_mascara_vetorial(0, Some(0.5), None);
+    s.mover_propriedades_da_mascara_vetorial(0, Some(0.5), None);
+    s.confirmar_mascara_vetorial();
+    assert_eq!(
+        nome_do_ultimo(&s),
+        "Densidade da máscara vetorial de Pintura (50%)"
+    );
+    let fora = s.compor().get_pixel(20, 20).0;
+    let b = base.get_pixel(20, 20).0;
+    assert!(
+        (fora[0] as i32 - (b[0] as i32 + 250) / 2).abs() <= 2,
+        "{fora:?} × {b:?}"
+    );
+    // A vista incremental acompanhou (a foto inteira mudou).
+    let zero = crate::vista::Vista::nova(s.base(), s.documento(), 300);
+    assert_eq!(s.vista().imagem().as_raw(), zero.imagem().as_raw());
+    s.desfazer();
+    assert_eq!(s.compor().get_pixel(20, 20).0, b);
+    // Difusão 10 px: a borda vira rampa; o caminho não muda.
+    s.mover_propriedades_da_mascara_vetorial(0, None, Some(10.0));
+    s.confirmar_mascara_vetorial();
+    let borda = s.compor().get_pixel(100, 200).0;
+    assert!(
+        borda[0] > b[0].min(250) && borda[0] < 250,
+        "rampa: {borda:?}"
+    );
+    assert_eq!(
+        s.documento().camadas[0]
+            .mascara_vetorial
+            .as_ref()
+            .unwrap()
+            .caminho,
+        caminho
+    );
+    let zero = crate::vista::Vista::nova(s.base(), s.documento(), 300);
+    assert_eq!(s.vista().imagem().as_raw(), zero.imagem().as_raw());
+}

@@ -235,6 +235,9 @@ pub struct Sessao {
     alvo_vetorial: Option<crate::vetor::LugarDoCaminho>,
     /// O gesto vetorial com o botão apertado (o antes, para o passo).
     gesto_vetorial: Option<caminhos::GestoVetorial>,
+    /// A máscara vetorial de quando o arrasto da densidade ou da difusão
+    /// dela começou.
+    vetorial_antes: Option<(usize, crate::vetor::MascaraVetorial)>,
 }
 
 /// O arrasto do Mover sem seleção: a camada e cada alvo que anda (os pixels,
@@ -328,6 +331,7 @@ impl Sessao {
             caneta: crate::vetor::caneta::Caneta::nova(),
             alvo_vetorial: None,
             gesto_vetorial: None,
+            vetorial_antes: None,
         }
     }
 
@@ -572,6 +576,7 @@ impl Sessao {
     /// próprio traço ou o próprio slider.
     fn fechar_o_que_esta_aberto(&mut self) {
         self.terminar_gesto_vetorial();
+        self.confirmar_mascara_vetorial();
         self.soltar();
         self.confirmar_opacidade();
         self.confirmar_ajuste();
@@ -3644,6 +3649,7 @@ impl Sessao {
             || self.opacidade_antes.is_some()
             || self.ajuste_antes.is_some()
             || self.mascara_antes.is_some()
+            || self.vetorial_antes.is_some()
             || self.movendo.is_some()
             || self.flutuante.is_some()
     }

@@ -121,12 +121,17 @@ impl Sessao {
             return Retangulo::default();
         }
         let (l, a) = (self.doc.largura(), self.doc.altura());
+        let Some(m) = c.mascara_vetorial_ativa() else {
+            return Retangulo::default();
+        };
         let so_a_caixa = |c: Option<&Caminho>| c.is_none_or(|c| c.alcanca_so_a_caixa());
-        if !so_a_caixa(antes) || !so_a_caixa(depois) {
-            return Retangulo::inteiro(l, a);
-        }
         let caixa = |c: Option<&Caminho>| c.map_or(Retangulo::default(), |c| c.retangulo(l, a));
-        caixa(antes).uniao(&caixa(depois))
+        let sujo = if !so_a_caixa(antes) || !so_a_caixa(depois) {
+            Retangulo::inteiro(l, a)
+        } else {
+            m.alcance(caixa(antes).uniao(&caixa(depois)), l, a)
+        };
+        crate::composicao::interseccao(&sujo, &c.area())
     }
 
     /// Registra um passo de caminho **já aplicado** no documento.
@@ -626,6 +631,66 @@ impl Sessao {
             self.caneta.conferir(None);
         }
         ok
+    }
+
+    /// As Propriedades da máscara vetorial ao vivo (o arrasto do slider): a
+    /// densidade (`0..=1`) e a difusão (px). O passo sai no
+    /// [`Self::confirmar_mascara_vetorial`], com o arrasto inteiro.
+    pub fn mover_propriedades_da_mascara_vetorial(
+        &mut self,
+        i: usize,
+        densidade: Option<f32>,
+        difusao: Option<f32>,
+    ) {
+        let Some(m) = self
+            .doc
+            .camadas
+            .get(i)
+            .and_then(|c| c.mascara_vetorial.clone())
+        else {
+            return;
+        };
+        if self.vetorial_antes.is_none() {
+            self.vetorial_antes = Some((i, m.clone()));
+        }
+        let mut nova = m.clone();
+        if let Some(d) = densidade {
+            nova.densidade = d.clamp(0.0, 1.0);
+        }
+        if let Some(r) = difusao {
+            nova.difusao = r.clamp(0.0, crate::vetor::DIFUSAO_MAXIMA_VETORIAL);
+        }
+        if nova == m {
+            return;
+        }
+        let (l, a) = (self.doc.largura(), self.doc.altura());
+        let caixa = m.caminho.retangulo(l, a);
+        let sujo = m.alcance(caixa, l, a).uniao(&nova.alcance(caixa, l, a));
+        let camada = &mut self.doc.camadas[i];
+        camada.mascara_vetorial = Some(nova);
+        let sujo = crate::composicao::interseccao(&sujo, &camada.area());
+        self.refazer_a_vista(&sujo);
+    }
+
+    /// O arrasto das Propriedades da máscara vetorial terminou: um passo.
+    pub fn confirmar_mascara_vetorial(&mut self) {
+        let Some((i, antes)) = self.vetorial_antes.take() else {
+            return;
+        };
+        let depois = self
+            .doc
+            .camadas
+            .get(i)
+            .and_then(|c| c.mascara_vetorial.clone());
+        if depois.as_ref() == Some(&antes) {
+            return;
+        }
+        self.hist.registrar(Comando::MascaraVetorial {
+            camada: i,
+            antes: Some(Box::new(antes)),
+            depois: depois.map(Box::new),
+        });
+        self.versao += 1;
     }
 
     /// O caminho da máscara vetorial anda com a camada (o Mover, o ⌘T): a

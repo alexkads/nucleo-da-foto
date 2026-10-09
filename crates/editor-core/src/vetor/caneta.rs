@@ -164,6 +164,13 @@ pub enum Estado {
         arrastou: bool,
         voltar: Option<(u64, Extremo)>,
     },
+    /// Um segmento curvo dobrando pelo ponto agarrado em `t`.
+    DobrandoSegmento {
+        sub: u64,
+        indice: usize,
+        t: f64,
+        inicio: Ponto,
+    },
     /// Componentes inteiros andando (a Seleção de caminho). Com `fontes`,
     /// o ⌥ + arrasto: as cópias delas é que andam (refeitas a cada movimento a
     /// partir do caminho de antes, com os mesmos ids).
@@ -227,6 +234,13 @@ pub enum Acao {
         independente: bool,
     },
     MoverAncoras(RefAncora),
+    /// Arrastar um segmento curvo com a Seleção direta: a curva dobra pelo
+    /// ponto agarrado (as duas alças do segmento mudam; as pontas ficam).
+    DobrarSegmento {
+        sub: u64,
+        indice: usize,
+        t: f64,
+    },
     MoverComponente(u64),
     /// Arrastar no vazio: o retângulo.
     Retangulo,
@@ -460,14 +474,19 @@ impl Caneta {
                     independente: m.alt,
                 },
                 Some(Alvo::Ancora(r)) => Acao::MoverAncoras(r),
-                Some(Alvo::Segmento { sub, indice, .. }) => c
+                Some(Alvo::Segmento { sub, indice, t }) => c
                     .subcaminho(sub)
                     .and_then(|s| s.segmento(indice))
                     .map_or(Acao::Retangulo, |seg| {
-                        Acao::MoverAncoras(RefAncora {
-                            sub,
-                            ancora: c.subcaminho(sub).unwrap().ancoras[seg.de].id,
-                        })
+                        if seg.reto() {
+                            // A reta anda inteira (as duas pontas), como lá.
+                            Acao::MoverAncoras(RefAncora {
+                                sub,
+                                ancora: c.subcaminho(sub).unwrap().ancoras[seg.de].id,
+                            })
+                        } else {
+                            Acao::DobrarSegmento { sub, indice, t }
+                        }
                     }),
                 _ => Acao::Retangulo,
             },
@@ -783,6 +802,29 @@ impl Caneta {
                 };
                 Resultado::Nada
             }
+            Acao::DobrarSegmento { sub, indice, t } => {
+                // As pontas ficam escolhidas (as alças delas aparecem).
+                if let Some(seg) = c.subcaminho(sub).and_then(|s| s.segmento(indice)) {
+                    let s = c.subcaminho(sub).unwrap();
+                    if !m.shift {
+                        self.pontos.clear();
+                    }
+                    for k in [seg.de, seg.ate] {
+                        self.pontos.insert(RefAncora {
+                            sub,
+                            ancora: s.ancoras[k].id,
+                        });
+                    }
+                }
+                self.comecar_gesto(c, "Dobrar curva");
+                self.estado = Estado::DobrandoSegmento {
+                    sub,
+                    indice,
+                    t,
+                    inicio: p,
+                };
+                Resultado::Nada
+            }
             Acao::MoverComponente(sub) => {
                 if m.shift {
                     if !self.componentes.insert(sub) {
@@ -949,6 +991,19 @@ impl Caneta {
                 edicao::mover_ancoras(c, &refs, d);
                 Resultado::AoVivo
             }
+            Estado::DobrandoSegmento {
+                sub,
+                indice,
+                t,
+                inicio,
+            } => {
+                if p.distancia(inicio) < medida.arrasto() && *c == gesto.antes {
+                    return Resultado::Nada;
+                }
+                *c = gesto.antes.clone();
+                edicao::dobrar_segmento(c, sub, indice, t, p.menos(inicio));
+                Resultado::AoVivo
+            }
             Estado::MovendoComponentes {
                 subs,
                 inicio,
@@ -1063,7 +1118,7 @@ impl Caneta {
                     Resultado::Nada
                 }
             }
-            Estado::MovendoComponentes { .. } => {
+            Estado::MovendoComponentes { .. } | Estado::DobrandoSegmento { .. } => {
                 if mudou {
                     Resultado::Passo(gesto.nome)
                 } else {

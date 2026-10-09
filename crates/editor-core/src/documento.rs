@@ -642,18 +642,20 @@ impl Documento {
                 let Some(novo) = caminho else {
                     return Retangulo::default();
                 };
-                let sujo = m
+                let caixa = m
                     .caminho
                     .retangulo(largura, altura)
                     .uniao(&novo.retangulo(largura, altura));
-                // Vazia (revela tudo) ou começando por subtrair, a máscara muda
-                // a foto também fora da caixa da curva.
-                let inteira = !m.caminho.alcanca_so_a_caixa() || !novo.alcanca_so_a_caixa();
+                // Vazia (revela tudo), começando por subtrair, com densidade ou
+                // difusão, a máscara muda a foto além da caixa da curva — mas
+                // nunca fora do que a camada tem.
+                let mut sujo = m.alcance(caixa, largura, altura);
                 m.caminho = novo;
-                match (m.ativa && camada.visivel, inteira) {
-                    (false, _) => Retangulo::default(),
-                    (true, true) => Retangulo::inteiro(largura, altura),
-                    (true, false) => sujo,
+                sujo = sujo.uniao(&m.alcance(caixa, largura, altura));
+                if m.ativa && camada.visivel {
+                    crate::composicao::interseccao(&sujo, &camada.area())
+                } else {
+                    Retangulo::default()
                 }
             }
         }
