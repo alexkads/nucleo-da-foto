@@ -81,7 +81,12 @@ use crate::vetor::{Caminho, Caminhos, LugarDoCaminho, MascaraVetorial};
 ///   camada (`retoque`: baixa/alta frequência, clarear/escurecer). Quem lê
 ///   até o 11 não saberia ler o modo — recusa com o aviso. Os formatos 1–11
 ///   se leem como estão (sem `retoque`, a camada não tem papel).
-pub const FORMATO: u32 = 12;
+/// - **13** (a Caneta, segunda rodada): a camada de preenchimento/forma
+///   (`"tipo": "cor_solida"` no ajuste), densidade, difusão e `revela_vazia`
+///   da máscara vetorial e as âncoras `automatica` (a Caneta de curvatura).
+///   A 0.1.125 não saberia ler o tipo e comporia a máscara sem densidade nem
+///   difusão — recusa com o aviso. Os formatos 1–12 se leem como estão.
+pub const FORMATO: u32 = 13;
 
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
