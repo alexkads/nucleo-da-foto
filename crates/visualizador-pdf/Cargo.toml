@@ -1,0 +1,18 @@
+[package]
+name = "visualizador-pdf"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "As páginas de um PDF desenhadas em pixels, para o app mostrar o fotolivro sem sair dele — sem tela e sem GPU"
+
+[dependencies]
+# 🖨️ O rasterizador de PDF em Rust puro (Apache-2.0 OU MIT), o mesmo que o
+# PdfCraft usa por baixo (`crates/render`). Pede Rust 1.92: é ele que põe o
+# piso do instalador dos balcões.
+hayro = "0.7.1"
+
+[dev-dependencies]
+# O livro de verdade, para o teste desenhar o que o balcão vai abrir.
+fotolivro = { path = "../fotolivro" }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
