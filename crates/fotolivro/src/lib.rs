@@ -14,15 +14,22 @@
 //! - **A levada sai limpa; a disponível sai com a marca d'água do sistema** —
 //!   a mesma que o cliente vê em `/meus-ensaios`, gravada pelo servidor (C27).
 //!   Quem decide é o estado da foto, e não uma escolha no modal.
-//! - **É diagramado como livro**: páginas deitadas (o livro aberto), e cada
-//!   página escolhe um molde pela orientação das fotos — uma foto grande sobre
-//!   o fundo escuro, duas em composição de revista, um trio, o retrato com o
-//!   texto ao lado ([`diagramar`]). Títulos em serifa, legendas discretas.
+//! - **A ordem do livro é a do dono** (09/10/2026): a capa; o conteúdo, **uma
+//!   foto por página em fundo preto**; a **galeria** na antepenúltima; **"Leve
+//!   o seu ensaio"** na penúltima; **"Até a próxima viagem"** na última
+//!   ([`Plano`]). Páginas deitadas (o livro aberto), títulos em serifa,
+//!   legendas discretas.
 //! - 🖼️ **Cada foto numa moldura de álbum antigo** (dono: *"coloque uma
 //!   moldura vintage em cada foto, vale a pena gastarmos tempo na qualidade
 //!   desse book"*): a margem creme do papel fotográfico, o filete sépia, a
 //!   sombra no papel e as cantoneiras pretas nos quatro cantos —
 //!   [`Moldura`]. As cantoneiras seguram a margem, **não a foto**.
+//! - 🛡️ **A não levada entra em baixíssima qualidade**, além da marca d'água
+//!   (dono: *"as fotos que ele não levou com marca d'água em baixíssima
+//!   qualidade de forma que a IA não consiga fazer nada"*): reduzida a
+//!   [`LADO_DA_PROTEGIDA`] px e recomprimida em JPEG ruim
+//!   ([`protegida`]) antes de entrar no PDF. Dá para ver a foto e querer
+//!   comprá-la; não dá para tirar a marca e imprimi-la.
 //! - 🚨 **Nenhuma foto é cortada** (dono: *"normalmente usamos 4x3 e numa
 //!   foto de família alguma pessoa pode ficar cortada"*). A moldura do molde
 //!   é só o lugar; a foto entra **inteira**, na proporção dela
@@ -50,9 +57,9 @@
 //!
 //! ## O corte deste arquivo
 //!
-//! [`diagramar`] decide os moldes e [`Plano`] numera as páginas — é o que os
-//! links internos usam, e o defeito possível (link para a página errada) mora
-//! nos dois, testáveis sem escrever um byte. [`gerar`] desenha.
+//! [`Plano`] numera as páginas — é o que os links internos usam, e o defeito
+//! possível (link para a página errada) mora todo nele, testável sem escrever
+//! um byte. [`gerar`] desenha.
 
 use image::DynamicImage;
 use printpdf::{
@@ -94,7 +101,6 @@ pub struct Capa {
 /// do computador mostram inteira.
 const PAPEL: (f32, f32) = (297.0, 210.0);
 const MARGEM: f32 = 16.0;
-const VAO: f32 = 8.0;
 /// A linha da legenda embaixo das fotos.
 const LEGENDA: f32 = 10.0;
 /// Miniaturas por página no sumário.
@@ -102,127 +108,47 @@ const SUMARIO_COLUNAS: usize = 6;
 const SUMARIO_LINHAS: usize = 3;
 pub const POR_SUMARIO: usize = SUMARIO_COLUNAS * SUMARIO_LINHAS;
 
-/// Em pé é abaixo disto; deitada, acima.
-fn em_pe(aspecto: f32) -> bool {
-    aspecto < 0.95
-}
-
-/// Os moldes de página do fotolivro. Os números são os índices das fotos.
+/// As páginas do álbum, numeradas a partir de 1 (a régua do PDF): a capa,
+/// uma página por foto, a galeria (uma ou mais páginas), "Leve o seu
+/// ensaio" e "Até a próxima viagem".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Molde {
-    /// Uma foto deitada sangrando na página inteira.
-    Destaque(usize),
-    /// Duas em pé, lado a lado.
-    DuplaEmPe(usize, usize),
-    /// Duas deitadas em composição assimétrica: uma grande no alto, a outra
-    /// menor embaixo, do outro lado — o lado alterna a cada página
-    /// (`true` = a grande à direita).
-    DuplaDeitada(usize, usize, bool),
-    /// Uma em pé grande à esquerda e duas deitadas empilhadas à direita.
-    Trio(usize, usize, usize),
-    /// A em pé sozinha, com o número e o convite ao lado.
-    RetratoComTexto(usize),
-}
-
-impl Molde {
-    pub fn fotos(&self) -> Vec<usize> {
-        match *self {
-            Molde::Destaque(a) | Molde::RetratoComTexto(a) => vec![a],
-            Molde::DuplaEmPe(a, b) | Molde::DuplaDeitada(a, b, _) => vec![a, b],
-            Molde::Trio(a, b, c) => vec![a, b, c],
-        }
-    }
-}
-
-/// A diagramação: as fotos, **na ordem do ensaio**, distribuídas em moldes.
-///
-/// 🔑 A ordem nunca muda — é a ordem em que o cliente as viu no balcão. O que
-/// varia é o molde: duas em pé seguidas viram dupla; uma em pé seguida de duas
-/// deitadas, trio; as deitadas alternam entre o destaque sangrado e a dupla,
-/// para o livro ter ritmo e não ser uma grade.
-pub fn diagramar(aspectos: &[f32]) -> Vec<Molde> {
-    let mut moldes = Vec::new();
-    let mut i = 0;
-    let mut deitadas = 0usize;
-    let mut duplas = 0usize;
-    let pe = |k: usize| aspectos.get(k).is_some_and(|&a| em_pe(a));
-    let deitada = |k: usize| aspectos.get(k).is_some_and(|&a| !em_pe(a));
-    while i < aspectos.len() {
-        if pe(i) {
-            if pe(i + 1) {
-                moldes.push(Molde::DuplaEmPe(i, i + 1));
-                i += 2;
-            } else if deitada(i + 1) && deitada(i + 2) {
-                moldes.push(Molde::Trio(i, i + 1, i + 2));
-                i += 3;
-            } else {
-                moldes.push(Molde::RetratoComTexto(i));
-                i += 1;
-            }
-        } else {
-            if !deitadas.is_multiple_of(3) && deitada(i + 1) {
-                moldes.push(Molde::DuplaDeitada(i, i + 1, duplas.is_multiple_of(2)));
-                duplas += 1;
-                i += 2;
-            } else {
-                moldes.push(Molde::Destaque(i));
-                i += 1;
-            }
-            deitadas += 1;
-        }
-    }
-    moldes
-}
-
-/// As páginas do álbum, numeradas a partir de 1 (a régua do PDF): a capa, o
-/// sumário, as páginas diagramadas e o fim.
-#[derive(Debug, Clone, PartialEq)]
 pub struct Plano {
     pub fotos: usize,
-    pub moldes: Vec<Molde>,
 }
 
 impl Plano {
-    pub fn de(aspectos: &[f32]) -> Self {
-        Self {
-            fotos: aspectos.len(),
-            moldes: diagramar(aspectos),
-        }
+    pub fn de(fotos: usize) -> Self {
+        Self { fotos }
     }
 
-    pub fn paginas_de_sumario(&self) -> usize {
-        self.fotos.div_ceil(POR_SUMARIO).max(1)
-    }
-
-    pub fn primeira_do_sumario(&self) -> usize {
-        2
-    }
-
-    /// A página do sumário onde a foto `i` aparece.
-    pub fn sumario_da_foto(&self, i: usize) -> usize {
-        2 + i / POR_SUMARIO
-    }
-
-    /// A página do livro onde a foto `i` (de 0) está.
+    /// A página só da foto `i` (de 0).
     pub fn pagina_da_foto(&self, i: usize) -> usize {
-        let molde = self
-            .moldes
-            .iter()
-            .position(|m| m.fotos().contains(&i))
-            .unwrap_or(0);
-        self.primeira_do_livro() + molde
+        2 + i
     }
 
     pub fn primeira_do_livro(&self) -> usize {
-        1 + self.paginas_de_sumario() + 1
+        2
     }
 
-    /// O fim: baixar todas e comprar as disponíveis.
+    pub fn paginas_da_galeria(&self) -> usize {
+        self.fotos.div_ceil(POR_SUMARIO).max(1)
+    }
+
+    pub fn primeira_da_galeria(&self) -> usize {
+        2 + self.fotos
+    }
+
+    /// A página da galeria onde a foto `i` aparece em miniatura.
+    pub fn galeria_da_foto(&self, i: usize) -> usize {
+        self.primeira_da_galeria() + i / POR_SUMARIO
+    }
+
+    /// "Leve o seu ensaio": baixar todas e comprar as disponíveis.
     pub fn pagina_final(&self) -> usize {
-        self.primeira_do_livro() + self.moldes.len()
+        self.primeira_da_galeria() + self.paginas_da_galeria()
     }
 
-    /// A despedida: mostrar aos amigos e voltar.
+    /// "Até a próxima viagem".
     pub fn despedida(&self) -> usize {
         self.pagina_final() + 1
     }
@@ -252,69 +178,15 @@ impl Caixa {
     }
 }
 
-/// As molduras de um molde, na ordem das fotos dele.
-pub fn molduras(molde: &Molde) -> Vec<Caixa> {
-    let (l, alto) = PAPEL;
-    let util_l = l - 2. * MARGEM;
-    let base = MARGEM + LEGENDA;
-    let util_a = alto - 2. * MARGEM - LEGENDA;
-    match molde {
-        // A faixa da legenda fica embaixo, fora da foto.
-        Molde::Destaque(_) => vec![Caixa::nova(8., 16., l - 16., alto - 22.)],
-        Molde::DuplaEmPe(..) => {
-            let largura = (util_l - VAO) / 2.;
-            vec![
-                Caixa::nova(MARGEM, base, largura, util_a),
-                Caixa::nova(MARGEM + largura + VAO, base, largura, util_a),
-            ]
-        }
-        Molde::DuplaDeitada(_, _, a_direita) => {
-            let grande = Caixa::nova(0., 0., 168., 112.);
-            let pequena_l = util_l - grande.largura - VAO;
-            let pequena = Caixa::nova(0., base, pequena_l, pequena_l * 0.75);
-            let topo = alto - MARGEM - grande.altura;
-            if !a_direita {
-                vec![
-                    Caixa {
-                        x: MARGEM,
-                        y: topo,
-                        ..grande
-                    },
-                    Caixa {
-                        x: MARGEM + grande.largura + VAO,
-                        ..pequena
-                    },
-                ]
-            } else {
-                vec![
-                    Caixa {
-                        x: l - MARGEM - grande.largura,
-                        y: topo,
-                        ..grande
-                    },
-                    Caixa {
-                        x: MARGEM,
-                        ..pequena
-                    },
-                ]
-            }
-        }
-        Molde::Trio(..) => {
-            let esquerda = util_a * 0.75;
-            let direita = util_l - esquerda - VAO;
-            let meia = (util_a - VAO - LEGENDA) / 2.;
-            let x = MARGEM + esquerda + VAO;
-            vec![
-                Caixa::nova(MARGEM, base, esquerda, util_a),
-                Caixa::nova(x, base + meia + VAO + LEGENDA, direita, meia),
-                Caixa::nova(x, base, direita, meia),
-            ]
-        }
-        Molde::RetratoComTexto(_) => {
-            let altura = alto - 2. * MARGEM;
-            vec![Caixa::nova(MARGEM, MARGEM, altura * 0.75, altura)]
-        }
-    }
+/// O lugar da foto na página dela: o papel inteiro menos a margem e a faixa
+/// da legenda embaixo — a foto entra inteira, e o que sobra é o preto.
+pub fn lugar_da_foto() -> Caixa {
+    Caixa::nova(
+        MARGEM,
+        MARGEM + LEGENDA,
+        PAPEL.0 - 2. * MARGEM,
+        PAPEL.1 - 2. * MARGEM - LEGENDA,
+    )
 }
 
 /// A foto inteira dentro da caixa, sem esticar e centrada.
@@ -826,6 +698,35 @@ impl Pagina {
 }
 
 /// Encolhe para o tamanho do álbum — nunca amplia.
+/// O lado maior da foto não levada dentro do livro.
+pub const LADO_DA_PROTEGIDA: u32 = 560;
+
+/// A qualidade do JPEG em que a não levada é recomprimida: os blocos e o
+/// borrão ficam na imagem, por cima da marca — o que a IA de remoção usaria
+/// para reconstruir o que a marca cobre já não está lá.
+const QUALIDADE_DA_PROTEGIDA: u8 = 38;
+
+/// 🛡️ A foto não levada como ela entra no livro: pequena e recomprimida.
+pub fn protegida(imagem: &DynamicImage) -> DynamicImage {
+    let pequena = imagem.resize(
+        LADO_DA_PROTEGIDA,
+        LADO_DA_PROTEGIDA,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut bytes = Vec::new();
+    let codificou =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, QUALIDADE_DA_PROTEGIDA)
+            .encode_image(&pequena.to_rgb8());
+    match codificou
+        .ok()
+        .and_then(|_| image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).ok())
+    {
+        Some(degradada) => degradada,
+        // Sem o recodificador, ao menos pequena — nunca a de 1400 px.
+        None => pequena,
+    }
+}
+
 fn reduzida(imagem: &DynamicImage) -> DynamicImage {
     if imagem.width().max(imagem.height()) <= LADO_NA_FOLHA {
         return imagem.clone();
@@ -945,7 +846,7 @@ impl Livro<'_> {
         let cor = &self.cor;
         let mut p = Pagina::nova(&cor.papel);
         let topo = PAPEL.1 - MARGEM;
-        p.espacado("NESTE ÁLBUM", MARGEM, topo - 4., 6.5, &cor.ambar);
+        p.espacado("GALERIA", MARGEM, topo - 4., 6.5, &cor.ambar);
         p.texto(
             &self.titulo,
             MARGEM,
@@ -1023,145 +924,36 @@ impl Livro<'_> {
             Letra::Sans,
             &cor.apagado,
         );
-        p.folio(self.plano.primeira_do_sumario() + numero, &cor.apagado);
+        p.folio(self.plano.primeira_da_galeria() + numero, &cor.apagado);
         PdfPage::new(Mm(PAPEL.0), Mm(PAPEL.1), p.ops)
     }
 
-    fn pagina(&self, molde: &Molde, numero: usize) -> PdfPage {
+    /// Uma foto, sozinha na página, sobre o preto: inteira, na moldura de
+    /// álbum antigo, com o número e o que o toque faz embaixo.
+    fn pagina_da_foto(&self, i: usize) -> PdfPage {
         let cor = &self.cor;
-        let caixas = molduras(molde);
-        let fundo = match molde {
-            Molde::Destaque(_) => &cor.escuro,
-            _ => &cor.papel,
-        };
-        let mut p = Pagina::nova(fundo);
-
-        match molde {
-            Molde::Destaque(i) => {
-                let (id, px) = &self.imagens[*i];
-                let onde = p.foto_inteira(id, *px, caixas[0], Alinhar::Centro);
-                // A legenda no pé, embaixo da foto — nunca sobre ela.
-                self.legenda(&mut p, *i, onde.x, onde.y - 6.5, true);
-                self.tocar_na_foto(&mut p, *i, onde);
-            }
-            Molde::RetratoComTexto(i) => {
-                let (id, px) = &self.imagens[*i];
-                let onde = p.foto_inteira(id, *px, caixas[0], Alinhar::Esquerda);
-                self.tocar_na_foto(&mut p, *i, onde);
-                let x = onde.x + onde.largura + 20.;
-                let largura = PAPEL.0 - x - MARGEM - 6.;
-                let foto = &self.fotos[*i];
-                let mut y = PAPEL.1 - 62.;
-                p.texto(
-                    &format!("{:02}", i + 1),
-                    x,
-                    y,
-                    60.,
-                    Letra::SerifaItalico,
-                    &cor.moldura,
-                );
-                y -= 16.;
-                let (frase, convite, tom) = if foto.levada {
-                    (
-                        "Esta é sua.",
-                        "Toque para baixar em alta resolução.",
-                        &cor.verde,
-                    )
-                } else {
-                    (
-                        "Esperando por você.",
-                        "Leve para casa, sem a marca d'água.",
-                        &cor.ambar,
-                    )
-                };
-                p.texto(frase, x, y, 22., Letra::SerifaNegrito, &cor.tinta);
-                y -= 8.;
-                p.texto(
-                    &caber(convite, 10., Letra::SerifaItalico, largura),
-                    x,
-                    y,
-                    10.,
-                    Letra::SerifaItalico,
-                    &cor.apagado,
-                );
-                y -= 7.;
-                p.texto(
-                    &caber(&foto.nome, 7.5, Letra::Sans, largura),
-                    x,
-                    y,
-                    7.5,
-                    Letra::Sans,
-                    &cor.apagado,
-                );
-                if let Some(destino) = &foto.link {
-                    let rotulo = if foto.levada {
-                        "Baixar esta foto"
-                    } else {
-                        "Comprar esta foto"
-                    };
-                    let botao = Caixa::nova(x, y - 22., 60., 12.);
-                    p.botao(botao, rotulo, 10.5, tom, &cor.branco);
-                    p.link(botao, destino);
-                }
-            }
-            _ => {
-                let alinhamentos: Vec<Alinhar> = match molde {
-                    Molde::DuplaDeitada(_, _, false) => vec![Alinhar::Esquerda, Alinhar::Direita],
-                    Molde::DuplaDeitada(_, _, true) => vec![Alinhar::Direita, Alinhar::Esquerda],
-                    Molde::DuplaEmPe(..) => vec![Alinhar::Direita, Alinhar::Esquerda],
-                    _ => vec![Alinhar::Esquerda; 3],
-                };
-                let mut lugares = Vec::new();
-                for (k, i) in molde.fotos().into_iter().enumerate() {
-                    let (id, px) = &self.imagens[i];
-                    let onde = p.foto_inteira(id, *px, caixas[k], alinhamentos[k]);
-                    self.legenda(&mut p, i, onde.x, onde.y - 6., false);
-                    self.tocar_na_foto(&mut p, i, onde);
-                    lugares.push(onde);
-                }
-                if let Molde::DuplaDeitada(a, b, _) = molde {
-                    // O vão acima da menor vira o texto da página, como numa
-                    // revista: os números grandes e o que cada toque faz.
-                    let coluna = lugares[1];
-                    let mut y = PAPEL.1 - MARGEM - 26.;
-                    p.texto(
-                        &format!("{:02}  {:02}", a + 1, b + 1),
-                        coluna.x,
-                        y,
-                        40.,
-                        Letra::SerifaItalico,
-                        &cor.moldura,
-                    );
-                    y -= 14.;
-                    let frase = match (self.fotos[*a].levada, self.fotos[*b].levada) {
-                        (true, true) => "As duas são suas.",
-                        (false, false) => "As duas esperam por você.",
-                        _ => "Uma é sua; a outra espera por você.",
-                    };
-                    for linha in quebrar(frase, 15., coluna.largura, 2) {
-                        p.texto(&linha, coluna.x, y, 15., Letra::SerifaNegrito, &cor.tinta);
-                        y -= 6.5;
-                    }
-                    y -= 1.;
-                    p.filete(coluna.x, y, 18., &cor.ambar);
-                    y -= 7.;
-                    p.texto(
-                        "Toque na foto para abrir no site.",
-                        coluna.x,
-                        y,
-                        9.,
-                        Letra::SerifaItalico,
-                        &cor.apagado,
-                    );
-                }
-            }
-        }
-        let folio = if matches!(molde, Molde::Destaque(_)) {
-            &cor.moldura
-        } else {
-            &cor.apagado
-        };
-        p.folio(self.plano.primeira_do_livro() + numero, folio);
+        let mut p = Pagina::nova(&cor.escuro);
+        let (id, px) = &self.imagens[i];
+        let onde = p.foto_inteira(id, *px, lugar_da_foto(), Alinhar::Centro);
+        self.legenda(&mut p, i, onde.x, onde.y - 6.5, true);
+        self.tocar_na_foto(&mut p, i, onde);
+        // "Galeria ›", no pé à direita: todas as fotos de uma vez.
+        let rotulo = "Galeria  ›";
+        let largura = largura_do_texto(rotulo, 7.5, Letra::SansNegrito);
+        let x = onde.x + onde.largura - largura;
+        p.texto(
+            rotulo,
+            x,
+            onde.y - 6.3,
+            7.5,
+            Letra::SansNegrito,
+            &cor.moldura,
+        );
+        p.ir_para(
+            Caixa::nova(x - 2., onde.y - 9., largura + 4., 7.),
+            self.plano.galeria_da_foto(i),
+        );
+        p.folio(self.plano.pagina_da_foto(i), &cor.apagado);
         PdfPage::new(Mm(PAPEL.0), Mm(PAPEL.1), p.ops)
     }
 
@@ -1327,7 +1119,7 @@ impl Livro<'_> {
             p.link(botao, galeria);
         }
         p.texto(
-            "‹ Voltar ao sumário",
+            "‹ Voltar à galeria",
             x,
             MARGEM,
             8.5,
@@ -1336,7 +1128,7 @@ impl Livro<'_> {
         );
         p.ir_para(
             Caixa::nova(x - 2., MARGEM - 3., 40., 8.),
-            self.plano.primeira_do_sumario(),
+            self.plano.primeira_da_galeria(),
         );
         if !self.capa.site.is_empty() {
             let largura_do_site = largura_do_texto(&self.capa.site, 8., Letra::Sans);
@@ -1380,7 +1172,12 @@ pub fn gerar(capa: &Capa, fotos: &[FotoDaFolha]) -> Result<Vec<u8>, String> {
     let imagens: Imagens = fotos
         .iter()
         .map(|foto| {
-            let rgb = reduzida(&foto.imagem).to_rgb8();
+            let rgb = if foto.levada {
+                reduzida(&foto.imagem)
+            } else {
+                protegida(&foto.imagem)
+            }
+            .to_rgb8();
             let px = (rgb.width(), rgb.height());
             let id = documento.add_image(&RawImage {
                 width: px.0 as usize,
@@ -1392,16 +1189,11 @@ pub fn gerar(capa: &Capa, fotos: &[FotoDaFolha]) -> Result<Vec<u8>, String> {
             (id, px)
         })
         .collect();
-    let aspectos: Vec<f32> = imagens
-        .iter()
-        .map(|(_, px)| px.0 as f32 / px.1.max(1) as f32)
-        .collect();
-
     let livro = Livro {
         capa,
         fotos,
         imagens,
-        plano: Plano::de(&aspectos),
+        plano: Plano::de(fotos.len()),
         titulo,
         resumo: linha_de_resumo,
         cor: Paleta::nova(),
@@ -1409,18 +1201,18 @@ pub fn gerar(capa: &Capa, fotos: &[FotoDaFolha]) -> Result<Vec<u8>, String> {
 
     let mut paginas = Vec::with_capacity(livro.plano.total());
     paginas.push(livro.capa());
-    for numero in 0..livro.plano.paginas_de_sumario() {
-        paginas.push(livro.sumario(numero));
+    for i in 0..fotos.len() {
+        paginas.push(livro.pagina_da_foto(i));
     }
-    for (numero, molde) in livro.plano.moldes.iter().enumerate() {
-        paginas.push(livro.pagina(molde, numero));
+    for numero in 0..livro.plano.paginas_da_galeria() {
+        paginas.push(livro.sumario(numero));
     }
     paginas.push(livro.fim());
     paginas.push(livro.despedida());
 
     // Os marcadores: a barra lateral do leitor vira o índice.
     documento.add_bookmark("Capa", 1);
-    documento.add_bookmark("Neste álbum", livro.plano.primeira_do_sumario());
+    documento.add_bookmark("Galeria", livro.plano.primeira_da_galeria());
     for (i, foto) in fotos.iter().enumerate() {
         let estado = if foto.levada { "sua" } else { "disponível" };
         documento.add_bookmark(
@@ -1457,89 +1249,24 @@ mod testes {
         }
     }
 
-    const DEITADA: f32 = 1.5;
-    const EM_PE: f32 = 0.67;
-
-    /// 🔑 A diagramação nunca muda a ordem e nunca perde foto: cada foto cai
-    /// num molde, uma vez, na ordem do ensaio.
+    /// 🔑 A ordem do dono, e os links internos dependem dela: capa, uma
+    /// página por foto, a galeria, "Leve o seu ensaio", "Até a próxima".
     #[test]
-    fn a_diagramacao_guarda_a_ordem_e_todas_as_fotos() {
-        let aspectos = [
-            DEITADA, EM_PE, EM_PE, DEITADA, DEITADA, EM_PE, DEITADA, DEITADA, EM_PE,
-        ];
-        let ordem: Vec<usize> = diagramar(&aspectos)
-            .iter()
-            .flat_map(|m| m.fotos())
-            .collect();
-        assert_eq!(ordem, (0..aspectos.len()).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn os_moldes_seguem_a_orientacao() {
-        assert_eq!(diagramar(&[EM_PE, EM_PE]), [Molde::DuplaEmPe(0, 1)]);
-        assert_eq!(
-            diagramar(&[EM_PE, DEITADA, DEITADA]),
-            [Molde::Trio(0, 1, 2)]
-        );
-        assert_eq!(diagramar(&[EM_PE]), [Molde::RetratoComTexto(0)]);
-        // As deitadas alternam entre o destaque sangrado e a dupla.
-        assert_eq!(
-            diagramar(&[DEITADA, DEITADA, DEITADA]),
-            [Molde::Destaque(0), Molde::DuplaDeitada(1, 2, true)]
-        );
-    }
-
-    /// 🔑 Os links internos dependem disto: capa, sumário, livro, fim.
-    #[test]
-    fn o_plano_numera_as_paginas() {
-        let plano = Plano::de(&[EM_PE, EM_PE, DEITADA]);
-        assert_eq!(plano.paginas_de_sumario(), 1);
-        assert_eq!(plano.primeira_do_livro(), 3);
-        assert_eq!(plano.pagina_da_foto(0), 3);
-        assert_eq!(plano.pagina_da_foto(1), 3, "a dupla divide a página");
+    fn o_plano_segue_a_ordem_do_dono() {
+        let plano = Plano::de(3);
+        assert_eq!(plano.primeira_do_livro(), 2);
+        assert_eq!(plano.pagina_da_foto(0), 2);
         assert_eq!(plano.pagina_da_foto(2), 4);
-        assert_eq!(plano.pagina_final(), 5);
-        assert_eq!(plano.despedida(), 6);
-        assert_eq!(plano.total(), 6);
+        assert_eq!(plano.primeira_da_galeria(), 5, "a antepenúltima");
+        assert_eq!(plano.pagina_final(), 6, "a penúltima");
+        assert_eq!(plano.despedida(), 7, "a última");
+        assert_eq!(plano.total(), 7);
 
-        let grande = Plano::de(&[EM_PE; 19]);
-        assert_eq!(grande.paginas_de_sumario(), 2);
-        assert_eq!(grande.sumario_da_foto(18), 3);
-        assert_eq!(grande.primeira_do_livro(), 4);
-    }
-
-    /// As molduras ficam dentro do papel, e as do mesmo molde não se cruzam.
-    #[test]
-    fn as_molduras_cabem_no_papel() {
-        for molde in [
-            Molde::DuplaEmPe(0, 1),
-            Molde::DuplaDeitada(0, 1, false),
-            Molde::DuplaDeitada(1, 2, true),
-            Molde::Trio(0, 1, 2),
-            Molde::RetratoComTexto(0),
-            Molde::Destaque(0),
-        ] {
-            let caixas = molduras(&molde);
-            assert_eq!(caixas.len(), molde.fotos().len());
-            for c in &caixas {
-                assert!(
-                    c.x >= -0.01 && c.x + c.largura <= PAPEL.0 + 0.01,
-                    "{molde:?}"
-                );
-                assert!(
-                    c.y >= -0.01 && c.y + c.altura <= PAPEL.1 + 0.01,
-                    "{molde:?}"
-                );
-            }
-            for par in caixas.windows(2) {
-                let (a, b) = (par[0], par[1]);
-                let separadas = a.x + a.largura <= b.x + 0.01
-                    || b.x + b.largura <= a.x + 0.01
-                    || a.y + a.altura <= b.y + 0.01
-                    || b.y + b.altura <= a.y + 0.01;
-                assert!(separadas, "molduras sobrepostas em {molde:?}");
-            }
-        }
+        let grande = Plano::de(19);
+        assert_eq!(grande.paginas_da_galeria(), 2);
+        assert_eq!(grande.galeria_da_foto(0), 21);
+        assert_eq!(grande.galeria_da_foto(18), 22);
+        assert_eq!(grande.pagina_final(), 23);
     }
 
     /// 🖼️ A moldura cabe no lugar, guarda a foto inteira e a cantoneira não
@@ -1567,34 +1294,36 @@ mod testes {
         }
     }
 
-    /// 🚨 **Nenhuma foto é cortada** (dono, 09/10): em todo molde, a 4×3, a
-    /// 3×4 e a quadrada entram inteiras — a proporção da foto se mantém e ela
-    /// cabe na moldura, qualquer que seja o lado em que encosta.
+    /// 🛡️ A não levada entra pequena e recomprimida — nunca no tamanho em
+    /// que chegou.
     #[test]
-    fn nenhuma_foto_e_cortada_em_molde_nenhum() {
-        for molde in [
-            Molde::Destaque(0),
-            Molde::DuplaEmPe(0, 1),
-            Molde::DuplaDeitada(0, 1, false),
-            Molde::DuplaDeitada(0, 1, true),
-            Molde::Trio(0, 1, 2),
-            Molde::RetratoComTexto(0),
-        ] {
-            for moldura in molduras(&molde) {
-                for aspecto in [4. / 3., 3. / 4., 1.0, 3. / 2., 16. / 9.] {
-                    for alinhar in [Alinhar::Centro, Alinhar::Esquerda, Alinhar::Direita] {
-                        let f = posicionar(&moldura, aspecto, alinhar);
-                        assert!(
-                            (f.largura / f.altura - aspecto).abs() < 0.001,
-                            "esticou em {molde:?}"
-                        );
-                        assert!(f.x >= moldura.x - 0.01, "saiu pela esquerda em {molde:?}");
-                        assert!(f.y >= moldura.y - 0.01, "saiu por baixo em {molde:?}");
-                        assert!(f.x + f.largura <= moldura.x + moldura.largura + 0.01);
-                        assert!(f.y + f.altura <= moldura.y + moldura.altura + 0.01);
-                    }
-                }
-            }
+    fn a_nao_levada_entra_em_baixa_qualidade() {
+        let grande = DynamicImage::ImageRgb8(image::RgbImage::from_fn(1400, 1050, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+        }));
+        let p = protegida(&grande);
+        assert_eq!(p.width().max(p.height()), LADO_DA_PROTEGIDA);
+        assert!(
+            (p.width() as f32 / p.height() as f32 - 1400. / 1050.).abs() < 0.01,
+            "sem esticar"
+        );
+    }
+
+    /// 🚨 **Nenhuma foto é cortada** (dono, 09/10): na página dela, a 4×3,
+    /// a 3×4 e a quadrada entram inteiras — a proporção se mantém e a foto
+    /// cabe no lugar, com a moldura em volta.
+    #[test]
+    fn nenhuma_foto_e_cortada() {
+        let lugar = lugar_da_foto();
+        assert!(lugar.x >= 0. && lugar.x + lugar.largura <= PAPEL.0);
+        assert!(lugar.y >= 0. && lugar.y + lugar.altura <= PAPEL.1);
+        for aspecto in [4. / 3., 3. / 4., 1.0, 3. / 2., 16. / 9.] {
+            let m = emoldurar(&lugar, aspecto, Alinhar::Centro);
+            assert!((m.foto.largura / m.foto.altura - aspecto).abs() < 0.001);
+            assert!(m.margem.x >= lugar.x - 0.01);
+            assert!(m.margem.y >= lugar.y - 0.01);
+            assert!(m.margem.x + m.margem.largura <= lugar.x + lugar.largura + 0.01);
+            assert!(m.margem.y + m.margem.altura <= lugar.y + lugar.altura + 0.01);
         }
     }
 
