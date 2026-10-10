@@ -619,15 +619,6 @@ pub struct InfoDoAdaptador {
 }
 
 impl InfoDoAdaptador {
-    /// O adaptador como a lista da máquina o descreve.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn de_adaptador(adaptador: &wgpu::Adapter) -> Self {
-        Self::de(
-            &adaptador.get_info(),
-            crate::cronometro::suportado(adaptador),
-        )
-    }
-
     fn de(dados: &wgpu::AdapterInfo, carimbos: bool) -> Self {
         Self {
             nome: dados.name.clone(),

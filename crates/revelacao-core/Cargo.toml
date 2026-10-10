@@ -43,12 +43,6 @@ nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 # Bloquear numa thread é privilégio do desktop: o navegador não tem como.
 pollster = "0.4"
 
-# O `medir-gpu` (`src/bin/`) sobe a foto ao DirectX 11 como o atlas do GPUI.
-# A mesma versão e só recursos que o `gpui-pre-windows` já liga: no balcão
-# Windows não há nada novo a compilar.
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common"] }
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Ceder a vez ao navegador entre um `poll` e outro: o WebGL2 só atualiza o
 # estado dos fences entre tarefas do laço de eventos.
