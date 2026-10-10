@@ -63,10 +63,10 @@
 
 use image::DynamicImage;
 use printpdf::{
-    Actions, BorderArray, BuiltinFont, Color, ColorArray, Destination, HighlightingMode,
-    ImageCompression, ImageOptimizationOptions, LinePoint, LinkAnnotation, Mm, Op, PaintMode,
-    PdfDocument, PdfFontHandle, PdfPage, PdfSaveOptions, Point, Polygon, PolygonRing, Pt, RawImage,
-    Rect, Rgb, TextItem, WindingOrder, XObjectId, XObjectTransform,
+    Actions, BorderArray, BuiltinFont, Color, ColorArray, Destination, DictItem, ExternalStream,
+    ExternalXObject, HighlightingMode, LinePoint, LinkAnnotation, Mm, Op, PaintMode, PdfDocument,
+    PdfFontHandle, PdfPage, PdfSaveOptions, Point, Polygon, PolygonRing, Pt, Px, Rect, Rgb,
+    TextItem, WindingOrder, XObjectId, XObjectTransform,
 };
 
 /// Uma foto do álbum.
@@ -305,9 +305,34 @@ pub fn com_acao(galeria: &str, acao: &str) -> String {
     format!("{galeria}{separador}acao={acao}")
 }
 
-/// O lado maior com que a foto entra no PDF: a página sangrada num monitor
-/// com folga. A marcada já chega com 1400 px do servidor.
-const LADO_NA_FOLHA: u32 = 1800;
+/// O lado maior com que a foto entra no PDF: a tela de um celular, e não a
+/// impressão (dono, 2026-10-10: *"o PDF do fotolivro não pode com foto em
+/// impressão, precisa ser pequeno e leve, pois pra isso já temos um botão
+/// para fazer download das fotos"*). A foto em tamanho original é o link de
+/// cada página.
+pub const LADO_NA_FOLHA: u32 = 1200;
+
+/// A qualidade do JPEG das fotos levadas dentro do PDF: boa na tela, leve no
+/// envio.
+const QUALIDADE_NA_FOLHA: u8 = 72;
+
+/// 📦 **O livro inteiro não passa de 20 MB** (dono, 2026-10-10: *"o cliente
+/// receber um PDF de 20MB é aceitável"*). Com as fotos no tamanho da tela,
+/// o livro comum fica bem abaixo (21 levadas, 3,6 MB); o teto só pesa no
+/// ensaio enorme. É o teto das fotos; o resto (texto, fontes do PDF,
+/// molduras) cabe na folga até [`TETO_DO_LIVRO`].
+pub const TETO_DO_LIVRO: usize = 20_000_000;
+const TETO_DAS_FOTOS: usize = 19_000_000;
+
+/// Os degraus para caber no orçamento: primeiro a qualidade, depois o lado.
+const DEGRAUS: [(u32, u8); 6] = [
+    (LADO_NA_FOLHA, QUALIDADE_NA_FOLHA),
+    (LADO_NA_FOLHA, 60),
+    (1000, 55),
+    (800, 50),
+    (640, 45),
+    (480, 40),
+];
 
 /// As cores do livro: papel quente, tinta quase preta, o âmbar e o verde do
 /// site para o que se compra e o que já é dele.
@@ -707,7 +732,13 @@ pub const LADO_DA_PROTEGIDA: u32 = 560;
 const QUALIDADE_DA_PROTEGIDA: u8 = 38;
 
 /// 🛡️ A foto não levada como ela entra no livro: pequena e recomprimida.
+///
+/// A que já chega no tamanho do livro passa como está: é a que [`preparar`]
+/// já protegeu — recomprimir de novo só a estragaria mais a cada volta.
 pub fn protegida(imagem: &DynamicImage) -> DynamicImage {
+    if imagem.width().max(imagem.height()) <= LADO_DA_PROTEGIDA {
+        return imagem.clone();
+    }
     let pequena = imagem.resize(
         LADO_DA_PROTEGIDA,
         LADO_DA_PROTEGIDA,
@@ -724,6 +755,83 @@ pub fn protegida(imagem: &DynamicImage) -> DynamicImage {
         Some(degradada) => degradada,
         // Sem o recodificador, ao menos pequena — nunca a de 1400 px.
         None => pequena,
+    }
+}
+
+/// 🧠 A foto já no tamanho em que entra no livro: a levada até
+/// [`LADO_NA_FOLHA`], a não levada [`protegida`].
+///
+/// Quem junta as fotos uma a uma (o site, no navegador do cliente) chama isto
+/// ao receber cada uma, e guarda só o resultado: a de 1400 px aberta pesa
+/// ~4 MB, a protegida ~0,7 MB. Sem isso, o livro de 75 fotos passava de
+/// 400 MB de memória antes de começar (medido em 2026-10-10).
+pub fn preparar(imagem: DynamicImage, levada: bool) -> DynamicImage {
+    if levada {
+        if imagem.width().max(imagem.height()) <= LADO_NA_FOLHA {
+            return imagem;
+        }
+        reduzida(&imagem)
+    } else {
+        protegida(&imagem)
+    }
+}
+
+fn jpeg(imagem: &DynamicImage, qualidade: u8) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    // Codificar em memória não falha com RGB8; se falhasse, a folha sairia
+    // vazia em vez de derrubar o livro.
+    let _ = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, qualidade)
+        .encode_image(&imagem.to_rgb8());
+    bytes
+}
+
+/// A levada em JPEG, no primeiro degrau que cabe no orçamento — ou no último.
+fn em_jpeg_no_orcamento(imagem: DynamicImage, orcamento: usize) -> (Vec<u8>, (u32, u32)) {
+    let mut ultimo = (Vec::new(), (1, 1));
+    for (lado, qualidade) in DEGRAUS {
+        let folha = if imagem.width().max(imagem.height()) <= lado {
+            std::borrow::Cow::Borrowed(&imagem)
+        } else {
+            std::borrow::Cow::Owned(imagem.resize(
+                lado,
+                lado,
+                image::imageops::FilterType::Triangle,
+            ))
+        };
+        let bytes = jpeg(&folha, qualidade);
+        let px = (folha.width(), folha.height());
+        if bytes.len() <= orcamento {
+            return (bytes, px);
+        }
+        ultimo = (bytes, px);
+    }
+    ultimo
+}
+
+/// O JPEG como imagem do PDF, sem recomprimir: `/DCTDecode` é o próprio JPEG.
+fn xobject_do_jpeg(bytes: Vec<u8>, px: (u32, u32)) -> ExternalXObject {
+    let nome = |n: &str| DictItem::Name(n.as_bytes().to_vec());
+    let dict = [
+        ("Type", nome("XObject")),
+        ("Subtype", nome("Image")),
+        ("Width", DictItem::Int(px.0 as i64)),
+        ("Height", DictItem::Int(px.1 as i64)),
+        ("ColorSpace", nome("DeviceRGB")),
+        ("BitsPerComponent", DictItem::Int(8)),
+        ("Filter", nome("DCTDecode")),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    ExternalXObject {
+        stream: ExternalStream {
+            dict,
+            content: bytes,
+            compress: false,
+        },
+        width: Some(Px(px.0 as usize)),
+        height: Some(Px(px.1 as usize)),
+        dpi: Some(72.),
     }
 }
 
@@ -1145,95 +1253,154 @@ impl Livro<'_> {
     }
 }
 
-/// O fotolivro inteiro, em PDF.
-pub fn gerar(capa: &Capa, fotos: &[FotoDaFolha]) -> Result<Vec<u8>, String> {
-    if fotos.is_empty() {
-        return Err("nenhuma foto para a prévia".to_string());
+/// 📖 O livro montado **foto a foto** — o jeito de gerar sem guardar as fotos
+/// abertas (dono, 2026-10-10: *"a geração desse fotolivro precisa ser
+/// eficiente para não exagerar no uso da memória"*).
+///
+/// Cada foto que chega por [`Montagem::adicionar`] já vira JPEG dentro do PDF
+/// (`/DCTDecode`, sem pixel cru guardado) e é solta na hora: o que fica na
+/// memória é o tamanho do próprio livro, que não passa de [`TETO_DO_LIVRO`].
+/// Quem tem as fotos uma a uma (o site no celular do cliente, o backend, o
+/// app) decodifica uma, entrega, e decodifica a próxima.
+pub struct Montagem {
+    capa: Capa,
+    documento: PdfDocument,
+    fotos: Vec<FotoDaFolha>,
+    imagens: Imagens,
+    previstas: usize,
+    gasto: usize,
+}
+
+impl Montagem {
+    /// `previstas` é quantas fotos vão entrar: é por ela que o orçamento de
+    /// [`TETO_DAS_FOTOS`] se divide. Errar para mais só deixa o livro menor.
+    pub fn nova(capa: Capa, previstas: usize) -> Self {
+        Self {
+            documento: PdfDocument::new(&titulo_de(&capa)),
+            capa,
+            fotos: Vec::with_capacity(previstas),
+            imagens: Vec::with_capacity(previstas),
+            previstas: previstas.max(1),
+            gasto: 0,
+        }
     }
-    let titulo = if capa.titulo.trim().is_empty() {
+
+    pub fn adicionar(
+        &mut self,
+        imagem: DynamicImage,
+        nome: String,
+        levada: bool,
+        link: Option<String>,
+    ) {
+        let faltam = self.previstas.saturating_sub(self.fotos.len()).max(1);
+        let orcamento = TETO_DAS_FOTOS.saturating_sub(self.gasto) / faltam;
+        let (bytes, px) = if levada {
+            em_jpeg_no_orcamento(preparar(imagem, true), orcamento)
+        } else {
+            let protegida = preparar(imagem, false);
+            let px = (protegida.width(), protegida.height());
+            (jpeg(&protegida, QUALIDADE_DA_PROTEGIDA), px)
+        };
+        self.gasto += bytes.len();
+        let id = self.documento.add_xobject(&xobject_do_jpeg(bytes, px));
+        self.imagens.push((id, px));
+        self.fotos.push(FotoDaFolha {
+            imagem: imagem_solta(),
+            nome,
+            levada,
+            link,
+        });
+    }
+
+    pub fn quantas(&self) -> usize {
+        self.fotos.len()
+    }
+
+    /// O PDF, com as páginas desenhadas sobre as fotos já guardadas.
+    pub fn gerar(self) -> Result<Vec<u8>, String> {
+        let Montagem {
+            capa,
+            mut documento,
+            fotos,
+            imagens,
+            ..
+        } = self;
+        if fotos.is_empty() {
+            return Err("nenhuma foto para a prévia".to_string());
+        }
+        let titulo = titulo_de(&capa);
+        let linha_de_resumo = resumo(&fotos);
+        {
+            let info = &mut documento.metadata.info;
+            info.document_title = titulo.clone();
+            info.author = "RecordarFotos".into();
+            info.creator = "VintageLightbox".into();
+            info.subject = linha_de_resumo.clone();
+            info.keywords = vec!["ensaio".into(), "fotolivro".into(), "galeria".into()];
+        }
+        let livro = Livro {
+            capa: &capa,
+            fotos: &fotos,
+            imagens,
+            plano: Plano::de(fotos.len()),
+            titulo,
+            resumo: linha_de_resumo,
+            cor: Paleta::nova(),
+        };
+
+        let mut paginas = Vec::with_capacity(livro.plano.total());
+        paginas.push(livro.capa());
+        for i in 0..fotos.len() {
+            paginas.push(livro.pagina_da_foto(i));
+        }
+        for numero in 0..livro.plano.paginas_da_galeria() {
+            paginas.push(livro.sumario(numero));
+        }
+        paginas.push(livro.fim());
+        paginas.push(livro.despedida());
+
+        // Os marcadores: a barra lateral do leitor vira o índice.
+        documento.add_bookmark("Capa", 1);
+        documento.add_bookmark("Galeria", livro.plano.primeira_da_galeria());
+        for (i, foto) in fotos.iter().enumerate() {
+            let estado = if foto.levada { "sua" } else { "disponível" };
+            documento.add_bookmark(
+                &format!("{:02} · {} — {}", i + 1, foto.nome, estado),
+                livro.plano.pagina_da_foto(i),
+            );
+        }
+        documento.add_bookmark("Baixar e comprar", livro.plano.pagina_final());
+        documento.add_bookmark("Até a próxima viagem", livro.plano.despedida());
+
+        let mut avisos = Vec::new();
+        Ok(documento
+            .with_pages(paginas)
+            .save(&PdfSaveOptions::default(), &mut avisos))
+    }
+}
+
+/// O lugar da foto depois que ela entrou no PDF: um pixel, só para o tipo.
+fn imagem_solta() -> DynamicImage {
+    DynamicImage::new_rgb8(1, 1)
+}
+
+fn titulo_de(capa: &Capa) -> String {
+    if capa.titulo.trim().is_empty() {
         "O seu ensaio".to_string()
     } else {
         capa.titulo.trim().to_string()
-    };
-    let linha_de_resumo = resumo(fotos);
-
-    let mut documento = PdfDocument::new(&titulo);
-    {
-        let info = &mut documento.metadata.info;
-        info.document_title = titulo.clone();
-        info.author = "RecordarFotos".into();
-        info.creator = "VintageLightbox".into();
-        info.subject = linha_de_resumo.clone();
-        info.keywords = vec!["ensaio".into(), "fotolivro".into(), "galeria".into()];
     }
+}
 
-    // Cada foto entra uma vez no arquivo e aparece em várias páginas: o
-    // sumário, a página dela, a capa e o fim.
-    let imagens: Imagens = fotos
-        .iter()
-        .map(|foto| {
-            let rgb = if foto.levada {
-                reduzida(&foto.imagem)
-            } else {
-                protegida(&foto.imagem)
-            }
-            .to_rgb8();
-            let px = (rgb.width(), rgb.height());
-            let id = documento.add_image(&RawImage {
-                width: px.0 as usize,
-                height: px.1 as usize,
-                data_format: printpdf::RawImageFormat::RGB8,
-                pixels: printpdf::RawImageData::U8(rgb.into_raw()),
-                tag: Vec::new(),
-            });
-            (id, px)
-        })
-        .collect();
-    let livro = Livro {
-        capa,
-        fotos,
-        imagens,
-        plano: Plano::de(fotos.len()),
-        titulo,
-        resumo: linha_de_resumo,
-        cor: Paleta::nova(),
-    };
-
-    let mut paginas = Vec::with_capacity(livro.plano.total());
-    paginas.push(livro.capa());
-    for i in 0..fotos.len() {
-        paginas.push(livro.pagina_da_foto(i));
+/// O fotolivro inteiro, em PDF, de fotos já abertas — o atalho de
+/// [`Montagem`] para quem as tem todas na mão (os testes, a amostra). Cada
+/// uma é solta assim que entra.
+pub fn gerar(capa: &Capa, fotos: Vec<FotoDaFolha>) -> Result<Vec<u8>, String> {
+    let mut montagem = Montagem::nova(capa.clone(), fotos.len());
+    for foto in fotos {
+        montagem.adicionar(foto.imagem, foto.nome, foto.levada, foto.link);
     }
-    for numero in 0..livro.plano.paginas_da_galeria() {
-        paginas.push(livro.sumario(numero));
-    }
-    paginas.push(livro.fim());
-    paginas.push(livro.despedida());
-
-    // Os marcadores: a barra lateral do leitor vira o índice.
-    documento.add_bookmark("Capa", 1);
-    documento.add_bookmark("Galeria", livro.plano.primeira_da_galeria());
-    for (i, foto) in fotos.iter().enumerate() {
-        let estado = if foto.levada { "sua" } else { "disponível" };
-        documento.add_bookmark(
-            &format!("{:02} · {} — {}", i + 1, foto.nome, estado),
-            livro.plano.pagina_da_foto(i),
-        );
-    }
-    documento.add_bookmark("Baixar e comprar", livro.plano.pagina_final());
-    documento.add_bookmark("Até a próxima viagem", livro.plano.despedida());
-
-    let opcoes = PdfSaveOptions {
-        image_optimization: Some(ImageOptimizationOptions {
-            quality: Some(0.86),
-            format: Some(ImageCompression::Jpeg),
-            max_image_size: None,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let mut avisos = Vec::new();
-    Ok(documento.with_pages(paginas).save(&opcoes, &mut avisos))
+    montagem.gerar()
 }
 
 #[cfg(test)]
@@ -1382,7 +1549,7 @@ mod testes {
             lugar_e_data: "Gramado · 9 de outubro de 2026".into(),
             agendar: Some("https://site/agendar".into()),
         };
-        let bytes = gerar(&capa, &fotos).expect("o PDF");
+        let bytes = gerar(&capa, fotos).expect("o PDF");
         assert!(bytes.starts_with(b"%PDF"));
         let texto = String::from_utf8_lossy(&bytes);
         for i in 0..7 {
@@ -1401,8 +1568,37 @@ mod testes {
         assert!(texto.contains("/Outlines"), "faltaram os marcadores");
     }
 
+    /// 📦 O pior caso: 75 levadas de puro ruído (o que o JPEG menos
+    /// comprime) e o livro **não passa do teto**, com as fotos em JPEG
+    /// direto (`/DCTDecode`), sem passar por pixel cru.
+    #[test]
+    fn o_livro_nao_passa_do_teto() {
+        let mut semente = 7u32;
+        let mut ruido = move || {
+            semente = semente.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (semente >> 16) as u8
+        };
+        let fotos: Vec<_> = (0..75)
+            .map(|i| FotoDaFolha {
+                imagem: DynamicImage::ImageRgb8(image::RgbImage::from_fn(1400, 1050, |_, _| {
+                    image::Rgb([ruido(), ruido(), ruido()])
+                })),
+                nome: format!("{i}.jpg"),
+                levada: true,
+                link: None,
+            })
+            .collect();
+        let bytes = gerar(&Capa::default(), fotos).expect("o PDF");
+        assert!(
+            bytes.len() <= TETO_DO_LIVRO,
+            "o livro saiu com {} bytes",
+            bytes.len()
+        );
+        assert!(String::from_utf8_lossy(&bytes).contains("/DCTDecode"));
+    }
+
     #[test]
     fn sem_foto_nao_gera() {
-        assert!(gerar(&Capa::default(), &[]).is_err());
+        assert!(gerar(&Capa::default(), Vec::new()).is_err());
     }
 }
