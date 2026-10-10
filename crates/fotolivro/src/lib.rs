@@ -299,6 +299,16 @@ pub fn foto_da_capa(fotos: &[FotoDaFolha]) -> usize {
     fotos.iter().position(|f| f.levada).unwrap_or(0)
 }
 
+/// O rótulo do botão que baixa as fotos do cliente, **sempre com a
+/// quantidade** (dono, 10/out/2026: *"deveria mostrar a quantidade de fotos
+/// levada pelo cliente"*) — com uma foto só o botão não dizia quantas eram.
+pub fn rotulo_de_baixar(levadas: usize) -> String {
+    match levadas {
+        1 => "Baixar a minha foto (1)".to_string(),
+        n => format!("Baixar todas as minhas fotos ({n})"),
+    }
+}
+
 /// O endereço da galeria com uma ação do fim do álbum.
 pub fn com_acao(galeria: &str, acao: &str) -> String {
     let separador = if galeria.contains('?') { '&' } else { '?' };
@@ -1203,10 +1213,7 @@ impl Livro<'_> {
         if let Some(galeria) = &self.capa.galeria {
             let altura = 14.;
             if levadas > 0 {
-                let rotulo = match levadas {
-                    1 => "Baixar a minha foto".to_string(),
-                    n => format!("Baixar todas as minhas fotos ({n})"),
-                };
+                let rotulo = rotulo_de_baixar(levadas);
                 let botao = Caixa::nova(x, y, largura, altura);
                 p.botao(botao, &rotulo, 11.5, &cor.verde, &cor.branco);
                 p.link(botao, &com_acao(galeria, "baixar-todas"));
@@ -1520,6 +1527,14 @@ mod testes {
             com_acao("https://s/g?x=1", "comprar-todas"),
             "https://s/g?x=1&acao=comprar-todas"
         );
+    }
+
+    /// O botão de baixar diz quantas fotos são do cliente — também quando é
+    /// uma só.
+    #[test]
+    fn o_botao_de_baixar_diz_quantas_fotos() {
+        assert_eq!(rotulo_de_baixar(1), "Baixar a minha foto (1)");
+        assert_eq!(rotulo_de_baixar(5), "Baixar todas as minhas fotos (5)");
     }
 
     /// A capa prefere a levada: ela sai limpa.
