@@ -117,7 +117,7 @@ impl Imagem {
     /// Os mesmos pixels na outra ordem de canais, no lugar.
     pub fn em(mut self, ordem: Ordem) -> Self {
         if self.ordem != ordem {
-            for pixel in self.pixels.chunks_exact_mut(4) {
+            for pixel in self.pixels.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
             self.ordem = ordem;
@@ -626,11 +626,13 @@ mod testes {
         );
         // Opaca de ponta a ponta: é o que deixa a imagem ir à tela sem
         // pré-multiplicar.
-        assert!(imagem.pixels.chunks_exact(4).all(|p| p[3] == 255));
+        assert!(imagem.pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
         // A foto vermelha está na página: muito vermelho, pouco azul.
         let vermelhos = imagem
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[0] > 150 && p[1] < 90 && p[2] < 90)
             .count();
         assert!(
@@ -641,7 +643,9 @@ mod testes {
         let bgra = imagem.clone().em(Ordem::Bgra);
         let no_azul = bgra
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[2] > 150 && p[1] < 90 && p[0] < 90)
             .count();
         assert_eq!(no_azul, vermelhos);
