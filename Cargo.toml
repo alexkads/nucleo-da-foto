@@ -1,0 +1,81 @@
+# O núcleo da foto: o motor que o VintageLightbox (RecordarFotos) e o
+# PhotoKads compartilham — revelação, RAW, codificador, editor, recuperação,
+# fotolivro, visualizador de PDF, IA local e os wrappers wasm dos sites.
+#
+# 🔑 Nada aqui sabe de estúdio, de plataforma, de banco ou de rede: é o que vale
+#    igual para os dois produtos. O que é de um produto (o app, a API, a marca)
+#    fica no repositório dele.
+#
+# Os consumidores dependem por git com **tag** (semver):
+#
+#     [workspace.dependencies]
+#     revelacao-core = { git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.0" }
+#
+# Ver README.md: como consumir, como desenvolver junto com o app e como lançar.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/foto-codec",
+    "crates/raw-codec",
+    "crates/revelacao-core",
+    "crates/editor-core",
+    "crates/recuperacao-core",
+    "crates/fotolivro",
+    "crates/visualizador-pdf",
+    "crates/ia-local",
+    "crates/preenchimento",
+    # Os wrappers wasm-bindgen que os sites carregam (scripts/construir-*.sh).
+    "crates/conversao-web",
+    "crates/fotolivro-web",
+    "crates/raw-web",
+    "crates/revelacao-web",
+    "crates/tela-do-cliente-web",
+]
+# O rawler vendorizado (o RAW em Rust puro, com o DNG com perdas) é dependência
+# por caminho do `raw-codec`, não membro: os testes dele pedem dev-dependências
+# que não vieram junto.
+exclude = ["vendor/rawler"]
+
+[workspace.package]
+# 🔑 Uma versão para o workspace inteiro, e é ela que vira a tag (`v0.1.0`).
+#    Semver de verdade: mudança que quebra quem consome sobe o menor enquanto o
+#    número for 0.x (0.1 → 0.2), e o patch é só correção e coisa nova compatível.
+version = "0.1.0"
+edition = "2021"
+authors = ["Recordar Fotos Estúdio"]
+license = "MIT"
+repository = "https://github.com/alexkads/nucleo-da-foto"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tempfile = "3.8"
+
+# Os perfis valem só quando este workspace é compilado aqui (testes, wasm). Quem
+# consome usa os perfis do próprio workspace — inclusive os `opt-level` por
+# pacote abaixo, que cada app repete se quiser o motor rápido em `debug`.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+[profile.dev.package.revelacao-core]
+opt-level = 2
+
+[profile.dev.package.foto-codec]
+opt-level = 3
+
+[profile.test]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# O perfil dos `.wasm` (scripts/construir-*.sh).
+[profile.release-web]
+inherits = "release"
+opt-level = 3
+panic = "abort"
