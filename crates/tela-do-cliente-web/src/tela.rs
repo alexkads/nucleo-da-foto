@@ -5,30 +5,10 @@ use std::sync::Arc;
 use revelacao_core::{Ajustes, Corte, Entrada};
 use wasm_bindgen::prelude::*;
 
-/// Quanto dura o cruzamento entre uma foto e a seguinte, em milissegundos.
-///
-/// 🔑 **Aqui não é o mesmo compromisso da galeria.** Meio segundo era o número
-/// da versão em CSS, herdado de uma tela em que o operador atravessa a tira com
-/// a seta e a transição vira melado. **Esta tela é a do cliente**: quem olha não
-/// está navegando, está decidindo se leva a foto — e o que ele viu foi *"tá
-/// muito rápido"* (dono, 2026-09-11). Um segundo dá tempo de a foto que entra
-/// ser percebida como apresentação, e não como troca de slide.
-///
-/// ⚠️ Passar muito disto tem um custo que não aparece parado: o operador que
-/// anda três fotos seguidas deixa a tela do cliente cruzando o tempo todo, e a
-/// foto nunca assenta. A saída não seria encurtar isto — é [`Tela::mostrar`]
-/// descartar a camada do meio, que é o que ele já faz.
-const CRUZAMENTO_MS: f64 = 1000.0;
-
-/// De quanto a foto que entra começa maior — o respiro de apresentação.
-///
-/// 🔑 **Só a que entra se move.** Dois movimentos cruzados dariam a impressão
-/// de a foto ter sido empurrada, e o que se quer é que ela **apareça**.
-///
-/// Cresceu junto com o tempo: num cruzamento de um segundo, 3% é um movimento
-/// que quase não se vê — e o movimento é metade do que faz a foto parecer
-/// entrar em vez de piscar.
-const PASSO_DA_ENTRADA: f32 = 1.06;
+use crate::contrato::{
+    self, alfa_da_saida, alfa_e_zoom_da_entrada, camada_a_descartar, escala_do_original,
+    fica_no_ar, progresso, CamadaUniforme,
+};
 
 /// O formato das texturas em que cada foto é revelada.
 ///
@@ -39,23 +19,6 @@ const FORMATO_DA_CAMADA: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 fn erro(mensagem: impl Into<String>) -> JsValue {
     JsValue::from_str(&mensagem.into())
-}
-
-/// O `uniform` de uma camada — a mesma struct do WGSL.
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct CamadaUniforme {
-    escala: [f32; 2],
-    centro: [f32; 2],
-    uv_x: [f32; 2],
-    uv_y: [f32; 2],
-    uv_off: [f32; 2],
-    alfa: f32,
-    _reservado: f32,
-    /// A linha projetiva da perspectiva guiada, `[w0, w1, w2, 0]`: a UV é
-    /// `(uv_off + uv_x·s + uv_y·t) / (w0·s + w1·t + w2)`. Sem perspectiva é
-    /// `[0, 0, 1, 0]`, e a divisão por 1 é exata.
-    uv_w: [f32; 4],
 }
 
 /// Uma foto no ar — a que entra ou a que sai.
@@ -337,22 +300,8 @@ impl Tela {
         corte: &[f32],
         lado_original: Option<u32>,
     ) -> Result<(), JsValue> {
-        if largura == 0 || altura == 0 {
-            return Err(erro("imagem sem tamanho"));
-        }
-        if rgba.len() != (largura as usize) * (altura as usize) * 4 {
-            return Err(erro(format!(
-                "esperava {} bytes RGBA para {largura}×{altura}, recebi {}",
-                largura as usize * altura as usize * 4,
-                rgba.len()
-            )));
-        }
-        let limite = self.limite_de_textura();
-        if largura > limite || altura > limite {
-            return Err(erro(format!(
-                "{largura}×{altura} passa do limite de textura deste dispositivo ({limite} px)"
-            )));
-        }
+        contrato::conferir_foto(largura, altura, rgba.len(), self.limite_de_textura())
+            .map_err(erro)?;
         let ajustes = ajustes_de(ajustes)?;
         let corte = corte_de(corte)?;
 
@@ -360,10 +309,7 @@ impl Tela {
         // 🔑 Os módulos locais do darktable medem em pixels da foto original;
         // a tela recebe a cópia de trabalho, como o editor, e precisa da mesma
         // escala para mostrar o mesmo estilo.
-        camada.escala = match lado_original {
-            Some(lado) if lado > 0 => (largura.max(altura) as f32 / lado as f32).min(1.0),
-            _ => 1.0,
-        };
+        camada.escala = escala_do_original(largura, altura, lado_original);
         // A que estava no ar começa a se despedir **do alfa em que está**.
         if let Some(anterior) = self.camadas.last_mut() {
             anterior.saindo = Some(Saida {
@@ -374,21 +320,11 @@ impl Tela {
         // Só duas ficam — atravessar a tira com a seta não pode acumular
         // camadas.
         //
-        // 🚨 **Sai a menos visível, e não a mais antiga.** Com `remove(0)`, o
-        // operador que apertasse a seta duas vezes antes do primeiro quadro
-        // descartava a foto que estava **inteira** na tela (ela era a mais
-        // antiga) e mantinha uma que nunca chegou a ser desenhada, em alfa
-        // zero: a tela saltava de uma para a outra sem cruzamento nenhum. A
-        // que ainda tem o que mostrar é a que fica.
+        // 🚨 **Sai a menos visível, e não a mais antiga** — ver
+        // `contrato::camada_a_descartar`.
         if self.camadas.len() >= 2 {
-            let descartar = self
-                .camadas
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.saindo.is_some())
-                .min_by(|(_, a), (_, b)| a.alfa.total_cmp(&b.alfa))
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            let descartar =
+                camada_a_descartar(self.camadas.iter().map(|c| (c.saindo.is_some(), c.alfa)));
             self.camadas.remove(descartar);
         }
         self.camadas.push(camada);
@@ -488,21 +424,20 @@ impl Tela {
             let (alfa, zoom) = match &mut camada.saindo {
                 Some(saida) => {
                     let comecou = *saida.em.get_or_insert(agora);
-                    let t = ((agora - comecou) / CRUZAMENTO_MS).clamp(0.0, 1.0) as f32;
+                    let t = progresso(agora, comecou);
                     if t < 1.0 {
                         animando = true;
                     }
                     // Só esmaece: dois movimentos cruzados pareceriam empurrão.
-                    (saida.de * (1.0 - suavizar(t)), 1.0)
+                    (alfa_da_saida(saida.de, t), 1.0)
                 }
                 None => {
                     let entrou = *camada.entrou_em.get_or_insert(agora);
-                    let t = ((agora - entrou) / CRUZAMENTO_MS).clamp(0.0, 1.0) as f32;
+                    let t = progresso(agora, entrou);
                     if t < 1.0 {
                         animando = true;
                     }
-                    let suave = suavizar(t);
-                    (suave, PASSO_DA_ENTRADA + (1.0 - PASSO_DA_ENTRADA) * suave)
+                    alfa_e_zoom_da_entrada(t)
                 }
             };
             camada.alfa = alfa;
@@ -516,7 +451,7 @@ impl Tela {
         let ultima = self.camadas.len().saturating_sub(1);
         let mut i = 0;
         self.camadas.retain(|c| {
-            let fica = i == ultima || c.alfa > 0.0 || c.saindo.is_none();
+            let fica = fica_no_ar(i == ultima, c.alfa, c.saindo.is_some());
             i += 1;
             fica
         });
@@ -630,99 +565,23 @@ impl Tela {
     }
 }
 
-/// A curva do cruzamento: começa devagar, termina devagar.
-///
-/// 🔑 **`ease-in-out`, e não o `ease-out` de antes.** O `ease-out` sai do zero
-/// a toda velocidade — a foto nova "aparece de estalo" e depois demora a
-/// assentar, que é exatamente a sensação de rápido demais que o dono relatou,
-/// mesmo com o tempo aumentado. Esta é simétrica: os dois primeiros quadros
-/// quase não mexem, o meio faz o trabalho, e o fim encosta devagar.
-fn suavizar(t: f32) -> f32 {
-    if t < 0.5 {
-        4.0 * t * t * t
-    } else {
-        let d = -2.0 * t + 2.0;
-        1.0 - d * d * d / 2.0
-    }
-}
-
 fn ajustes_de(v: &[f32]) -> Result<Ajustes, JsValue> {
-    Ajustes::de_vetor(v).ok_or_else(|| {
-        erro(format!(
-            "esperava {} ajustes, recebi {}",
-            revelacao_core::QUANTIDADE,
-            v.len()
-        ))
-    })
+    contrato::ajustes_de(v).map_err(erro)
 }
 
 fn corte_de(v: &[f32]) -> Result<Corte, JsValue> {
-    // Oito números, ou oito mais os seis da perspectiva guiada — a mesma forma
-    // do `revelacao-web`.
-    if v.len() != 8 && v.len() != 14 {
-        return Err(erro(format!(
-            "esperava 8 ou 14 campos de corte, recebi {}",
-            v.len()
-        )));
-    }
-    let corte = Corte::novo(
-        v[0],
-        v[1],
-        v[2],
-        v[3],
-        v[4] as i32,
-        v[5],
-        v[6] != 0.0,
-        v[7] != 0.0,
-    );
-    Ok(match v.get(8..14) {
-        Some(&[rx, ry, rz, foco, vertical, horizontal]) => {
-            corte.com_perspectiva(revelacao_core::perspectiva::Perspectiva::nova(
-                [rx, ry, rz],
-                foco,
-                vertical,
-                horizontal,
-            ))
-        }
-        _ => corte,
-    })
+    contrato::corte_de(v).map_err(erro)
 }
 
-/// Onde esta camada fica na janela, e que pedaço da foto ela mostra.
-///
-/// 🚨 **O enquadramento é a mesma conta do arquivo** (`Corte::retangulo` sobre
-/// `dimensoes_giradas`), e não uma aproximação: é o que impede o operador de
-/// enquadrar uma coisa na tela e o cliente ver outra. O que muda entre os dois é
-/// só quem interpola — aqui o amostrador, no arquivo a bilinear do core.
+/// Onde esta camada fica na janela, e que pedaço da foto ela mostra — a conta
+/// é `contrato::montar_uniforme`.
 fn montar_uniforme(camada: &Camada, janela: (f32, f32), alfa: f32, zoom: f32) -> CamadaUniforme {
-    let corte = &camada.corte;
-
-    // 1. Encaixe: a foto enquadrada cabe inteira na janela, sem cortar nada.
-    //
-    // 🚨 **O tamanho vem de `dimensoes_de_saida`, e não do retângulo.** Com
-    // ângulo os dois divergem — o endireitamento reamostra para a saída pedida,
-    // sem o `min` da borda —, e usar o retângulo ali deixava a foto endireitada
-    // com a proporção errada na tela do cliente enquanto o arquivo saía certo.
-    // É a outra metade do defeito de 2026-09-12; a primeira estava nas UVs.
-    let (sw, sh) = corte.dimensoes_de_saida(camada.largura, camada.altura);
-    let (jw, jh) = janela;
-    let escala = (jw / sw.max(1) as f32).min(jh / sh.max(1) as f32) * zoom;
-    let largura_na_tela = sw as f32 * escala;
-    let altura_na_tela = sh as f32 * escala;
-
-    // 2. As UVs — a conta pura, testada em `uvs_do_enquadramento` e, com
-    //    perspectiva, em `a_tela_do_cliente_amostra_o_que_o_arquivo_tem`.
-    let m =
-        revelacao_core::transformacao::mapa_do_enquadramento(camada.largura, camada.altura, corte);
-
-    CamadaUniforme {
-        escala: [largura_na_tela / jw, altura_na_tela / jh],
-        centro: [0.0, 0.0],
-        uv_x: [m[0][0], m[1][0]],
-        uv_y: [m[0][1], m[1][1]],
-        uv_off: [m[0][2], m[1][2]],
+    contrato::montar_uniforme(
+        camada.largura,
+        camada.altura,
+        &camada.corte,
+        janela,
         alfa,
-        _reservado: 0.0,
-        uv_w: [m[2][0], m[2][1], m[2][2], 0.0],
-    }
+        zoom,
+    )
 }

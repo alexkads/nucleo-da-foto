@@ -36,6 +36,8 @@ use ia_local::modelos::{self, Estado, Modelo};
 
 use crate::{caixa_do_destino, Controle, Entrada, Erro, Metodo, Motor, Progresso, Saida};
 
+/// O modelo publicado, no catálogo do `ia-local`: de onde baixar, quanto pesa
+/// e o SHA-256 que o arquivo instalado tem de ter.
 pub const MODELO: Modelo = Modelo {
     id: "lama-fp32",
     nome: "LaMa (big-lama, ONNX fp32)",
@@ -54,8 +56,13 @@ pub const LADO: u32 = 512;
 /// O backend do automático: a CPU (a medida está no topo do módulo).
 pub const BACKEND_AUTOMATICO: Backend = Backend::Cpu;
 
+/// O motor LaMa. A sessão do ONNX Runtime não mora aqui: é o `ia-local` que
+/// a guarda e a reaproveita entre preenchimentos.
 pub struct LaMa {
+    /// A pasta dos modelos, onde [`MODELO`] está (ou não) instalado —
+    /// normalmente `ia_local::modelos::pasta_padrao()`.
     pub pasta: PathBuf,
+    /// Onde rodar. [`Backend::Automatico`] vira [`BACKEND_AUTOMATICO`].
     pub backend: Backend,
 }
 
@@ -88,7 +95,9 @@ pub fn recorte_de_contexto(
 /// A entrada do modelo: a imagem BGR em 0..1 e a máscara, 512 × 512, com o
 /// recorte reduzido por `escala` (média da área) e espelhado no que sobra.
 pub struct Preparado {
+    /// `[3, 512, 512]` em planos, B, G e R, em 0..1.
     pub imagem: Vec<f32>,
+    /// `[1, 512, 512]`: 1 onde reconstruir, 0 no resto (inclusive no espelho).
     pub mascara: Vec<f32>,
     /// O tamanho útil (sem o espelho) dentro dos 512.
     pub util: (u32, u32),
@@ -96,6 +105,9 @@ pub struct Preparado {
     pub escala: f32,
 }
 
+/// Monta a [`Preparado`] do `recorte` `(x, y, largura, altura)` da região —
+/// o de [`recorte_de_contexto`]. Um pixel reduzido é destino se **qualquer**
+/// pixel que ele cobre for: o buraco nunca encolhe na redução.
 pub fn preparar(e: &Entrada, recorte: (u32, u32, u32, u32)) -> Preparado {
     let (rx, ry, rw, rh) = recorte;
     let escala = (LADO as f32 / rw.max(rh) as f32).min(1.0);
@@ -217,6 +229,12 @@ pub fn reconstruir(
 
 /// A assinatura que um arquivo importado tem de ter para ser aceito no lugar
 /// do publicado.
+///
+/// # Erros
+///
+/// A frase para o operador, se o arquivo não abre como ONNX ou se as entradas
+/// (`image` e `mask`) ou a saída não têm as formas de 512 × 512 que o motor
+/// alimenta.
 pub fn conferir_assinatura(caminho: &std::path::Path) -> Result<(), String> {
     let (entradas, saidas) = execucao::assinatura(caminho)?;
     let tem = |lista: &[(String, Vec<i64>)], nome: &str, canais: i64| {

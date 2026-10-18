@@ -37,7 +37,8 @@ impl<'a> BitPumpLSB<'a> {
           .fold((0, 0), |(bits, bit_cnt), x| ((bits << 8) | *x as u32, bit_cnt + 8))
       }
     } else {
-      panic!("Can't refill bitpump, buffer exhausted");
+      // nucleo-da-foto: era `panic!` — um RAW cortado derrubava o app. Além do fim, zeros.
+      (0, u32::BITS)
     }
   }
 }
@@ -74,7 +75,8 @@ impl<'a> BitPumpMSB<'a> {
         chunk.into_iter().fold((0, 0), |(bits, bit_cnt), x| ((bits << 8) | *x as u32, bit_cnt + 8))
       }
     } else {
-      panic!("Can't refill bitpump, buffer exhausted");
+      // nucleo-da-foto: era `panic!` — um RAW cortado derrubava o app. Além do fim, zeros.
+      (0, u32::BITS)
     }
   }
 }
@@ -116,7 +118,8 @@ impl<'a> BitPumpMSB32<'a> {
           .fold((0, 0), |(bits, bit_cnt), x| ((bits << 8) | *x as u32, bit_cnt + 8))
       }
     } else {
-      panic!("Can't refill bitpump, buffer exhausted");
+      // nucleo-da-foto: era `panic!` — um RAW cortado derrubava o app. Além do fim, zeros.
+      (0, u32::BITS)
     }
   }
 
@@ -228,6 +231,12 @@ impl<'a> BitPump for BitPumpMSB<'a> {
       let (inbits, bit_cnt) = self.refill();
       self.bits = (self.bits << bit_cnt) | inbits as u64;
       self.nbits += bit_cnt;
+      // nucleo-da-foto: no fim do buffer o refill lento traz menos bits que o pedido, e o
+      // `nbits - num` abaixo estourava. Completa com zeros, como além do fim.
+      if num > self.nbits {
+        self.bits <<= num - self.nbits;
+        self.nbits = num;
+      }
     }
     (self.bits >> (self.nbits - num)) as u32
   }

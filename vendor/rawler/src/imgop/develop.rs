@@ -254,11 +254,15 @@ impl RawDevelop {
           9 => adapt_bradford(&illu, &Illuminant::D65, &transform_1d::<3, 3>(&matrix).expect("Transformation failed"))
             .as_flattened()
             .to_vec(),
-          _ => unimplemented!(),
+          // nucleo-da-foto: era `unimplemented!()` — uma ColorMatrix sem D65 e sem 9 valores.
+          n => return Err(format!("matriz de cor com {n} valores, sem D65: não suportada").into()),
         }
       }
 
-      assert_eq!(d65_matrix.len() % 3, 0); // this is not so nice...
+      // nucleo-da-foto: era `assert_eq!` — e o laço abaixo indexa até 4 componentes.
+      if d65_matrix.len() % 3 != 0 || d65_matrix.len() / 3 > 4 {
+        return Err(format!("matriz de cor com {} valores: não suportada", d65_matrix.len()).into());
+      }
       let components = d65_matrix.len() / 3;
       for i in 0..components {
         for j in 0..3 {

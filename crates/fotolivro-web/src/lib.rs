@@ -17,6 +17,8 @@
 //! outras — quem decide é o servidor), entrega os bytes aqui uma a uma e
 //! recebe o PDF.
 
+#![deny(missing_docs)]
+
 use wasm_bindgen::prelude::*;
 
 fn erro(mensagem: impl Into<String>) -> JsValue {
@@ -31,8 +33,9 @@ pub struct Fotolivro {
 
 #[wasm_bindgen]
 impl Fotolivro {
-    /// `previstas`: quantas fotos vão entrar — o teto de 10 MB do livro se
-    /// divide por elas.
+    /// `previstas`: quantas fotos vão entrar — o teto do livro
+    /// (`fotolivro::TETO_DO_LIVRO`) se divide por elas. `galeria` e `agendar`
+    /// vazios ficam de fora da capa e do fim.
     #[wasm_bindgen(constructor)]
     pub fn new(
         titulo: &str,
@@ -64,12 +67,34 @@ impl Fotolivro {
         levada: bool,
         link: &str,
     ) -> Result<(), JsValue> {
-        let montagem = self
-            .montagem
-            .as_mut()
-            .ok_or_else(|| erro("o livro já foi gerado"))?;
+        self.adicionar_foto(bytes, nome, levada, link).map_err(erro)
+    }
+
+    /// Quantas fotos já entraram no livro — a página usa para a barra de
+    /// progresso. Depois de [`gerar`](Self::gerar) a montagem foi consumida e
+    /// a conta volta a 0.
+    pub fn quantas(&self) -> usize {
+        self.montagem.as_ref().map_or(0, |m| m.quantas())
+    }
+
+    /// Gera o livro. Uma vez: as fotos já estão dentro do PDF.
+    pub fn gerar(&mut self) -> Result<Vec<u8>, JsValue> {
+        self.gerar_livro().map_err(erro)
+    }
+}
+
+/// Os métodos sem o `JsValue`, para os testes nativos.
+impl Fotolivro {
+    fn adicionar_foto(
+        &mut self,
+        bytes: &[u8],
+        nome: &str,
+        levada: bool,
+        link: &str,
+    ) -> Result<(), String> {
+        let montagem = self.montagem.as_mut().ok_or(JA_GERADO)?;
         let imagem = foto_codec::orientacao::decodificar_de_pe(bytes)
-            .map_err(|e| erro(format!("a foto {nome} não abriu: {e}")))?;
+            .map_err(|e| format!("a foto {nome} não abriu: {e}"))?;
         montagem.adicionar(
             imagem,
             nome.to_string(),
@@ -79,16 +104,83 @@ impl Fotolivro {
         Ok(())
     }
 
-    pub fn quantas(&self) -> usize {
-        self.montagem.as_ref().map_or(0, |m| m.quantas())
+    fn gerar_livro(&mut self) -> Result<Vec<u8>, String> {
+        self.montagem.take().ok_or(JA_GERADO)?.gerar()
+    }
+}
+
+const JA_GERADO: &str = "o livro já foi gerado";
+
+#[cfg(test)]
+mod testes {
+    use std::io::Cursor;
+
+    use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+
+    use super::*;
+
+    fn jpeg(largura: u32, altura: u32) -> Vec<u8> {
+        let img = RgbImage::from_fn(largura, altura, |x, y| {
+            Rgb([(x % 256) as u8, (y % 256) as u8, 90])
+        });
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgb8(img)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Jpeg)
+            .unwrap();
+        bytes
     }
 
-    /// Gera o livro. Uma vez: as fotos já estão dentro do PDF.
-    pub fn gerar(&mut self) -> Result<Vec<u8>, JsValue> {
-        self.montagem
-            .take()
-            .ok_or_else(|| erro("o livro já foi gerado"))?
-            .gerar()
-            .map_err(erro)
+    fn livro(previstas: usize) -> Fotolivro {
+        Fotolivro::new(
+            "Ensaio da Ana",
+            "Jardim Botânico · 12/out/2026",
+            "",
+            "",
+            "estudio.exemplo",
+            previstas,
+        )
+    }
+
+    #[test]
+    fn as_fotos_entram_uma_a_uma_e_o_livro_sai_em_pdf() {
+        let mut l = livro(2);
+        assert_eq!(l.quantas(), 0);
+        l.adicionar_foto(&jpeg(300, 200), "IMG_1.jpg", true, "")
+            .unwrap();
+        l.adicionar_foto(
+            &jpeg(200, 300),
+            "IMG_2.jpg",
+            false,
+            "https://estudio.exemplo/f/2",
+        )
+        .unwrap();
+        assert_eq!(l.quantas(), 2);
+        let pdf = l.gerar_livro().unwrap();
+        assert!(pdf.starts_with(b"%PDF-"), "um PDF");
+        assert!(pdf.windows(5).any(|w| w == b"%%EOF"), "inteiro");
+    }
+
+    #[test]
+    fn o_livro_sai_uma_vez_so() {
+        let mut l = livro(1);
+        l.adicionar_foto(&jpeg(64, 64), "a.jpg", true, "").unwrap();
+        l.gerar_livro().unwrap();
+        assert_eq!(l.quantas(), 0, "as fotos foram para o PDF");
+        assert_eq!(l.gerar_livro().unwrap_err(), JA_GERADO);
+        assert_eq!(
+            l.adicionar_foto(&jpeg(64, 64), "b.jpg", true, "")
+                .unwrap_err(),
+            JA_GERADO
+        );
+    }
+
+    #[test]
+    fn a_foto_que_nao_abre_diz_qual_e_e_nao_entra() {
+        let mut l = livro(1);
+        let e = l
+            .adicionar_foto(b"nao e jpeg", "IMG_9.jpg", true, "")
+            .unwrap_err();
+        assert!(e.contains("IMG_9.jpg"), "{e}");
+        assert_eq!(l.quantas(), 0);
     }
 }

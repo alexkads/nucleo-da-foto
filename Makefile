@@ -3,7 +3,15 @@
 .PHONY: ajuda verificar fmt clippy testar wasm doc deny cobertura semver msrv
 
 WEB := -p conversao-web -p fotolivro-web -p raw-web -p revelacao-web -p tela-do-cliente-web
-SEM_WEB := --exclude conversao-web --exclude fotolivro-web --exclude raw-web --exclude revelacao-web --exclude tela-do-cliente-web
+# O que vai para o navegador: os wrappers e os crates do núcleo que eles levam.
+WASM := $(WEB) -p revelacao-core -p foto-codec -p raw-codec -p fotolivro
+# O rawler é vendorizado: entra na compilação, não na conta da cobertura.
+FORA_DA_COBERTURA := --ignore-filename-regex 'vendor/'
+# O piso: a cobertura de linhas do núcleo (sem o vendor) não desce daqui.
+PISO_DA_COBERTURA := 90
+# 🚨 Um por um: com `--workspace`, o cargo-semver-checks pula os crates com
+# `publish = false` — todos aqui — e sai verde sem ter conferido nada.
+BIBLIOTECAS := foto-codec raw-codec revelacao-core editor-core recuperacao-core fotolivro visualizador-pdf ia-local preenchimento
 MSRV := $(shell sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
 ULTIMA_TAG := $(shell git describe --tags --abbrev=0 2>/dev/null)
 
@@ -21,8 +29,8 @@ clippy: ## Clippy com -D warnings, nativo
 testar: ## Os testes (unidade, integração e doc-tests)
 	cargo test --workspace
 
-wasm: ## Os wrappers *-web no alvo wasm32, com clippy -D warnings
-	cargo clippy --target wasm32-unknown-unknown $(WEB) -- -D warnings
+wasm: ## Os *-web e os crates que eles levam, no alvo wasm32, com clippy -D warnings
+	cargo clippy --target wasm32-unknown-unknown $(WASM) -- -D warnings
 
 doc: ## A documentação sem nenhum aviso (link quebrado, item privado citado)
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -30,12 +38,12 @@ doc: ## A documentação sem nenhum aviso (link quebrado, item privado citado)
 deny: ## Licenças, vulnerabilidades conhecidas e fontes das dependências (cargo-deny)
 	cargo deny check
 
-cobertura: ## Cobertura por crate (cargo-llvm-cov); HTML em target/cobertura
-	cargo llvm-cov --workspace $(SEM_WEB) --html --output-dir target/cobertura
-	cargo llvm-cov report --summary-only
+cobertura: ## Cobertura por arquivo (cargo-llvm-cov), com piso; HTML em target/cobertura
+	cargo llvm-cov --workspace $(FORA_DA_COBERTURA) --html --output-dir target/cobertura
+	cargo llvm-cov report $(FORA_DA_COBERTURA) --summary-only --fail-under-lines $(PISO_DA_COBERTURA)
 
-semver: ## A API pública comparada com a última tag (cargo-semver-checks)
-	cargo semver-checks --workspace --baseline-rev $(ULTIMA_TAG)
+semver: ## A API pública de cada crate comparada com a última tag (cargo-semver-checks)
+	@for c in $(BIBLIOTECAS); do cargo semver-checks -p $$c --baseline-rev $(ULTIMA_TAG) || exit 1; done
 
 msrv: ## Compila com o Rust mínimo declarado (rust-version)
 	rustup toolchain install $(MSRV) --profile minimal

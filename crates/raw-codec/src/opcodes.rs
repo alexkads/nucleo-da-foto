@@ -228,6 +228,239 @@ pub(crate) mod testes {
         assert!((m.aplicar(0.5) - 0.125).abs() < 1e-9);
     }
 
+    use rawler::decoders::Camera;
+    use rawler::pixarray::PixU16;
+    use rawler::rawimage::RawPhotometricInterpretation;
+
+    /// Um opcode qualquer: o cabeçalho de 16 bytes, a área (8 campos) e o
+    /// corpo, que começa pelo grau ou pelo tamanho da tabela.
+    fn bloco(id: u32, area: [u32; 8], corpo: &[u8]) -> Vec<u8> {
+        let mut b = id.to_be_bytes().to_vec();
+        b.extend(0x0103_0000u32.to_be_bytes());
+        b.extend(0u32.to_be_bytes());
+        b.extend((32 + corpo.len() as u32).to_be_bytes());
+        for v in area {
+            b.extend(v.to_be_bytes());
+        }
+        b.extend(corpo);
+        b
+    }
+
+    fn lista(blocos: &[Vec<u8>]) -> Vec<u8> {
+        let mut b = (blocos.len() as u32).to_be_bytes().to_vec();
+        for bl in blocos {
+            b.extend(bl);
+        }
+        b
+    }
+
+    fn polinomio(c: &[f64]) -> Vec<u8> {
+        let mut b = ((c.len() - 1) as u32).to_be_bytes().to_vec();
+        for k in c {
+            b.extend(k.to_be_bytes());
+        }
+        b
+    }
+
+    fn tabela(t: &[u16]) -> Vec<u8> {
+        let mut b = (t.len() as u32).to_be_bytes().to_vec();
+        for v in t {
+            b.extend(v.to_be_bytes());
+        }
+        b
+    }
+
+    /// A foto toda, todos os planos a partir de `plano`.
+    fn toda(altura: u32, largura: u32, plano: u32, planos: u32) -> [u32; 8] {
+        [0, 0, altura, largura, plano, planos, 1, 1]
+    }
+
+    /// Um RAW de dados inteiros, `largura × altura` pixels de `cpp` amostras.
+    fn raw(
+        cpp: usize,
+        largura: usize,
+        altura: usize,
+        dados: Vec<u16>,
+        pretos: &[u16],
+        branco: u32,
+    ) -> RawImage {
+        RawImage::new(
+            Camera::default(),
+            PixU16::new_with(dados, largura * cpp, altura),
+            cpp,
+            [1.0; 4],
+            RawPhotometricInterpretation::LinearRaw,
+            Some(BlackLevel::new(pretos, 1, 1, cpp)),
+            Some(WhiteLevel::new(vec![branco; cpp])),
+            false,
+        )
+    }
+
+    fn inteiros(raw: &RawImage) -> Vec<u16> {
+        match &raw.data {
+            RawImageData::Integer(d) => d.clone(),
+            RawImageData::Float(_) => panic!("devia ser inteiro"),
+        }
+    }
+
+    #[test]
+    fn o_polinomio_age_sobre_o_valor_normalizado_e_volta_a_16_bits() {
+        let mut r = raw(1, 2, 2, vec![0, 32768, 65535, 16384], &[0], 65535);
+        let l = lista(&[bloco(
+            MAP_POLYNOMIAL,
+            toda(2, 2, 0, 1),
+            &polinomio(&[0.0, 0.0, 0.0, 1.0]),
+        )]);
+        assert_eq!(aplicar(&mut r, &l), 1);
+        let cubo = |v: f64| ((v / 65535.0).powi(3) * 65535.0).round() as u16;
+        assert_eq!(inteiros(&r), vec![0, cubo(32768.0), 65535, cubo(16384.0)]);
+        assert_eq!(r.whitelevel.as_vec(), vec![65535.0]);
+        assert_eq!(r.blacklevel.as_vec(), vec![0.0]);
+    }
+
+    #[test]
+    fn o_preto_e_o_branco_do_arquivo_entram_na_normalizacao() {
+        // Preto 1000, branco 5000: abaixo do preto é 0, acima do branco é cheio.
+        let mut r = raw(1, 4, 1, vec![500, 1000, 3000, 6000], &[1000], 5000);
+        let l = lista(&[bloco(
+            MAP_POLYNOMIAL,
+            toda(1, 4, 0, 1),
+            &polinomio(&[0.0, 1.0]),
+        )]);
+        assert_eq!(aplicar(&mut r, &l), 1);
+        assert_eq!(inteiros(&r), vec![0, 0, 32768, 65535]);
+        assert_eq!(
+            r.whitelevel.as_vec(),
+            vec![65535.0],
+            "agora em 16 bits cheios"
+        );
+        assert_eq!(r.blacklevel.as_vec(), vec![0.0]);
+    }
+
+    #[test]
+    fn a_tabela_e_indexada_pelo_valor_e_presa_no_ultimo_degrau() {
+        let mut r = raw(1, 4, 1, vec![0, 1, 2, 3], &[0], 65535);
+        let l = lista(&[bloco(MAP_TABLE, toda(1, 4, 0, 1), &tabela(&[10, 20, 30]))]);
+        assert_eq!(ler(&l)[0].mapa, Mapa::Tabela(vec![10, 20, 30]));
+        assert_eq!(aplicar(&mut r, &l), 1);
+        assert_eq!(inteiros(&r), vec![10, 20, 30, 30]);
+    }
+
+    #[test]
+    fn so_a_area_o_passo_e_os_planos_pedidos_mudam() {
+        // 3×2 pixels RGB, todos 30000. Zera o verde (plano 1) da primeira
+        // linha, de dois em dois pixels: (0,0) e (2,0).
+        let mut r = raw(3, 3, 2, vec![30000; 18], &[0, 0, 0], 65535);
+        let l = lista(&[bloco(
+            MAP_POLYNOMIAL,
+            [0, 0, 1, 3, 1, 1, 1, 2],
+            &polinomio(&[0.0]),
+        )]);
+        assert_eq!(aplicar(&mut r, &l), 1);
+        let d = inteiros(&r);
+        let zerados: Vec<usize> = (0..18).filter(|i| d[*i] == 0).collect();
+        assert_eq!(zerados, vec![1, 7], "o verde de (0,0) e de (2,0)");
+        assert!(d.iter().all(|v| *v == 0 || *v == 30000));
+    }
+
+    #[test]
+    fn os_opcodes_agem_em_sequencia_sobre_o_mesmo_buffer() {
+        // Dobra e depois eleva ao quadrado: (2x)² = 4x², preso em 1.
+        let mut r = raw(1, 2, 1, vec![6553, 40000], &[0], 65535);
+        let l = lista(&[
+            bloco(MAP_POLYNOMIAL, toda(1, 2, 0, 1), &polinomio(&[0.0, 2.0])),
+            bloco(
+                MAP_POLYNOMIAL,
+                toda(1, 2, 0, 1),
+                &polinomio(&[0.0, 0.0, 1.0]),
+            ),
+        ]);
+        assert_eq!(aplicar(&mut r, &l), 2);
+        let x = 6553.0 / 65535.0;
+        assert_eq!(inteiros(&r)[0], (4.0 * x * x * 65535.0_f64).round() as u16);
+        assert_eq!(
+            inteiros(&r)[1],
+            65535,
+            "2·0,61 passa de 1, fica em 1, e 1² = 1"
+        );
+    }
+
+    #[test]
+    fn a_area_maior_que_a_foto_e_cortada_na_borda() {
+        let mut r = raw(1, 2, 2, vec![100; 4], &[0], 65535);
+        let l = lista(&[bloco(
+            MAP_POLYNOMIAL,
+            toda(9000, 9000, 0, 1),
+            &polinomio(&[1.0]),
+        )]);
+        assert_eq!(aplicar(&mut r, &l), 1);
+        assert_eq!(inteiros(&r), vec![65535; 4]);
+    }
+
+    #[test]
+    fn os_outros_opcodes_da_lista_sao_pulados() {
+        // WarpRectilinear (1) e GainMap (9) antes do polinômio.
+        let l = lista(&[
+            bloco(1, toda(1, 1, 0, 1), &[0; 12]),
+            bloco(9, toda(1, 1, 0, 1), &[0; 40]),
+            bloco(MAP_POLYNOMIAL, toda(1, 1, 0, 1), &polinomio(&[0.5])),
+        ]);
+        let ops = ler(&l);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].mapa, Mapa::Polinomio(vec![0.5]));
+    }
+
+    #[test]
+    fn passos_e_planos_zerados_valem_um() {
+        let l = lista(&[bloco(
+            MAP_POLYNOMIAL,
+            [0, 0, 1, 1, 0, 0, 0, 0],
+            &polinomio(&[0.0]),
+        )]);
+        let a = &ler(&l)[0].area;
+        assert_eq!((a.planos, a.passo_linha, a.passo_coluna), (1, 1, 1));
+    }
+
+    #[test]
+    fn tabela_vazia_ou_truncada_encerra_a_leitura() {
+        let vazia = lista(&[bloco(MAP_TABLE, toda(1, 1, 0, 1), &tabela(&[]))]);
+        assert!(ler(&vazia).is_empty());
+        let mut curta = tabela(&[1, 2, 3]);
+        curta.truncate(curta.len() - 1);
+        assert!(ler(&lista(&[bloco(MAP_TABLE, toda(1, 1, 0, 1), &curta)])).is_empty());
+    }
+
+    #[test]
+    fn preto_diferente_por_canal_ou_dado_em_ponto_flutuante_passa_como_veio() {
+        let l = lista(&[bloco(MAP_POLYNOMIAL, toda(1, 1, 0, 3), &polinomio(&[0.0]))]);
+
+        let mut r = raw(3, 1, 1, vec![500, 600, 700], &[0, 100, 0], 65535);
+        assert_eq!(aplicar(&mut r, &l), 0);
+        assert_eq!(inteiros(&r), vec![500, 600, 700]);
+        assert_eq!(r.whitelevel.as_vec(), vec![65535.0; 3]);
+
+        let mut r = raw(3, 1, 1, vec![500, 600, 700], &[0, 0, 0], 65535);
+        r.data = RawImageData::Float(vec![0.1, 0.2, 0.3]);
+        assert_eq!(aplicar(&mut r, &l), 0);
+        assert!(matches!(&r.data, RawImageData::Float(f) if f == &vec![0.1, 0.2, 0.3]));
+    }
+
+    #[test]
+    fn lista_sem_mapeamento_nao_toca_no_raw() {
+        let mut r = raw(1, 1, 1, vec![4000], &[100], 8000);
+        assert_eq!(aplicar(&mut r, &[]), 0);
+        assert_eq!(
+            aplicar(&mut r, &lista(&[bloco(1, toda(1, 1, 0, 1), &[])])),
+            0
+        );
+        assert_eq!(inteiros(&r), vec![4000]);
+        assert_eq!(
+            r.whitelevel.as_vec(),
+            vec![8000.0],
+            "o branco do arquivo fica"
+        );
+    }
+
     #[test]
     fn lista_truncada_nao_quebra() {
         let lista = lista_de_polinomios(10, 10, &[[0.0, 1.0, 0.0, 0.0]]);

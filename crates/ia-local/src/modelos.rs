@@ -13,19 +13,33 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Um modelo que o app sabe usar.
+/// Um modelo que o app sabe usar — declarado em `const` por quem o usa (a
+/// LaMa mora em `preenchimento::lama::MODELO`).
+///
+/// 🔑 [`sha256`](Self::sha256) é o que faz o arquivo ser **o** publicado:
+/// trocar o arquivo na origem sem trocar o hash aqui faz todo download falhar
+/// com [`ErroDeModelo::HashDiferente`], e nada é instalado.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Modelo {
+    /// O identificador estável: dá nome ao registro (`<id>.json`) na pasta.
+    /// Não muda entre versões do app.
     pub id: &'static str,
+    /// O nome que o operador lê nas opções.
     pub nome: &'static str,
     /// O arquivo, na pasta dos modelos.
     pub arquivo: &'static str,
     /// A versão: o repositório e o commit de onde o arquivo vem.
     pub versao: &'static str,
+    /// De onde [`baixar`] busca, presa a um commit — nunca a um ramo que anda.
     pub url: &'static str,
+    /// O tamanho publicado, em bytes: o total do progresso quando o servidor
+    /// não manda `Content-Length`.
     pub bytes: u64,
+    /// O SHA-256 publicado, em hexadecimal minúsculo (64 caracteres).
     pub sha256: &'static str,
+    /// A licença **dos pesos**, que não é a do código do app.
     pub licenca: &'static str,
+    /// Quem treinou e quem exportou, para os créditos.
     pub origem: &'static str,
 }
 
@@ -33,6 +47,11 @@ pub struct Modelo {
 pub const VAR_DA_PASTA: &str = "VLB_MODELOS";
 
 /// A pasta dos modelos: a de dados do app (`…/VintageLightbox/modelos`).
+///
+/// [`VAR_DA_PASTA`], se definida e não vazia, vence. Sem pasta de dados no
+/// sistema, cai numa pasta temporária — o modelo funciona, mas não sobrevive
+/// a uma limpeza. Não cria a pasta: quem grava ([`baixar`], [`importar`])
+/// cria.
 pub fn pasta_padrao() -> PathBuf {
     if let Some(p) = std::env::var_os(VAR_DA_PASTA).filter(|v| !v.is_empty()) {
         return PathBuf::from(p);
@@ -45,7 +64,9 @@ pub fn pasta_padrao() -> PathBuf {
 /// O que se sabe de um modelo instalado (gravado ao lado dele).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Registro {
+    /// O SHA-256 do arquivo instalado, em hexadecimal minúsculo.
     pub sha256: String,
+    /// O tamanho do arquivo instalado: é o que [`estado`] confere.
     pub bytes: u64,
     /// `"download"` ou `"importado"`.
     pub como: String,
@@ -53,33 +74,52 @@ pub struct Registro {
     pub verificado: bool,
 }
 
+/// O que [`estado`] encontrou na pasta para um modelo.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Estado {
+    /// Não há arquivo: a tela oferece baixar ou importar.
     Ausente,
+    /// Pronto para usar.
     Instalado {
+        /// O arquivo do modelo, para abrir a sessão.
         caminho: PathBuf,
+        /// O que foi gravado ao instalar (verificado ou importado).
         registro: Registro,
     },
-    /// O arquivo está lá, mas não bate com o registro (cortado, trocado).
+    /// O arquivo está lá, mas não bate com o registro (cortado, trocado) —
+    /// ou o registro sumiu. Não se usa: a tela pede para remover e baixar de
+    /// novo.
     Corrompido {
+        /// O arquivo que está lá.
         caminho: PathBuf,
     },
 }
 
+/// Por que o modelo não foi instalado (ou removido). Em todo caso, nada pela
+/// metade fica parecendo instalado.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErroDeModelo {
+    /// A conexão falhou ou caiu no meio — o porquê, como o `ureq` disse.
     Rede(String),
+    /// Ler, gravar, copiar ou renomear na pasta falhou.
     Disco(String),
     /// O baixado ou o importado não é o arquivo publicado.
     HashDiferente {
+        /// O publicado ([`Modelo::sha256`]).
         esperado: String,
+        /// O do arquivo que chegou.
         obtido: String,
     },
+    /// O operador cancelou o download; o `.parte` foi apagado.
     Cancelado,
+    /// O arquivo importado não tem o hash publicado e a conferência de
+    /// assinatura o recusou — o porquê vem dela.
     Incompativel(String),
 }
 
 impl ErroDeModelo {
+    /// A frase para o operador. O [`HashDiferente`](Self::HashDiferente) não
+    /// mostra os hashes: estão no `Debug`, para o registro.
     pub fn mensagem(&self) -> String {
         match self {
             ErroDeModelo::Rede(m) => format!("O download falhou: {m}"),
@@ -127,6 +167,34 @@ fn gravar_registro(pasta: &Path, m: &Modelo, r: &Registro) -> Result<(), ErroDeM
 /// `(recebidos, total)`, e só o instala se o SHA-256 bater. O arquivo vai
 /// para um `.parte` e troca de nome no fim: um download interrompido nunca
 /// parece instalado.
+///
+/// Bloqueia até o fim (208 MB, no caso da LaMa): chame fora da thread da
+/// tela. `cancelado` é olhado a cada leitura (até 64 KiB).
+///
+/// ```no_run
+/// use std::sync::atomic::AtomicBool;
+/// use ia_local::modelos::{self, Modelo};
+///
+/// # const MODELO: Modelo = Modelo { id: "m", nome: "m", arquivo: "m.onnx",
+/// #     versao: "", url: "https://exemplo.invalid/m.onnx", bytes: 0,
+/// #     sha256: "", licenca: "", origem: "" };
+/// let cancelado = AtomicBool::new(false);
+/// let caminho = modelos::baixar(
+///     &modelos::pasta_padrao(),
+///     &MODELO,
+///     MODELO.url,
+///     &|recebidos, total| println!("{recebidos} de {total}"),
+///     &cancelado,
+/// )?;
+/// # Ok::<(), modelos::ErroDeModelo>(())
+/// ```
+///
+/// # Erros
+///
+/// [`ErroDeModelo::Rede`], [`Disco`](ErroDeModelo::Disco),
+/// [`Cancelado`](ErroDeModelo::Cancelado) ou
+/// [`HashDiferente`](ErroDeModelo::HashDiferente) — neste, o arquivo baixado é
+/// apagado e o instalado antes (se havia) fica como estava.
 pub fn baixar(
     pasta: &Path,
     m: &Modelo,
@@ -189,6 +257,13 @@ pub fn baixar(
 /// de outro balcão). O hash publicado instala como verificado; outro hash só
 /// entra se `compativel` disser que o arquivo tem a assinatura do modelo —
 /// e fica marcado como não verificado.
+///
+/// `origem` não é tocado: é copiado para a pasta antes de qualquer conferência.
+///
+/// # Erros
+///
+/// [`ErroDeModelo::Disco`] se a cópia falhar;
+/// [`ErroDeModelo::Incompativel`] se o hash não bater e `compativel` recusar.
 pub fn importar(
     pasta: &Path,
     m: &Modelo,
@@ -233,7 +308,12 @@ fn instalar(
     Ok(destino)
 }
 
-/// Tira o modelo (e o registro) da pasta.
+/// Tira o modelo (e o registro) da pasta. O que já não está lá não é erro.
+///
+/// # Erros
+///
+/// [`ErroDeModelo::Disco`] se um dos arquivos existir e não puder ser
+/// apagado (em uso, sem permissão).
 pub fn remover(pasta: &Path, m: &Modelo) -> Result<(), ErroDeModelo> {
     for p in [pasta.join(m.arquivo), caminho_do_registro(pasta, m)] {
         match std::fs::remove_file(&p) {

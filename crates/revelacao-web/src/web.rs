@@ -26,8 +26,10 @@
 
 use std::sync::Arc;
 
-use revelacao_core::{Ajustes, Corte, Entrada, ParametrosLocais};
+use revelacao_core::{Corte, Entrada, ParametrosLocais};
 use wasm_bindgen::prelude::*;
+
+use crate::contrato::{self, escala_do_original};
 
 /// O motor aberto sobre um `<canvas>`.
 ///
@@ -58,64 +60,16 @@ fn erro(mensagem: impl Into<String>) -> JsValue {
     JsValue::from_str(&mensagem.into())
 }
 
-/// A revelação local vinda do JavaScript, como o desktop a grava
-/// (`ParametrosLocais::em_json`). `None` ou texto vazio é "sem máscara".
-///
-/// 🚨 **Versão mais nova ou JSON inválido é erro**, e não revelação vazia: revelar
-/// sem as máscaras que a foto tem seria entregar outra foto, calado.
+/// A revelação local vinda do JavaScript — `contrato::locais_de_json`, com o
+/// erro já em `JsValue`.
 fn locais_de_json(json: Option<&str>) -> Result<ParametrosLocais, JsValue> {
-    match json.map(str::trim).filter(|j| !j.is_empty()) {
-        None => Ok(ParametrosLocais::default()),
-        Some(j) => ParametrosLocais::de_json(j).map_err(|e| erro(e.to_string())),
-    }
+    contrato::locais_de_json(json).map_err(erro)
 }
 
-/// Quantos números o enquadramento carrega **sem** perspectiva.
-const CAMPOS_DO_CORTE: usize = 8;
-/// …e com ela: os oito, mais o vetor de rotação resolvido (3, em graus), o
-/// foco e o ajuste manual vertical e horizontal (graus).
-const CAMPOS_COM_PERSPECTIVA: usize = CAMPOS_DO_CORTE + 6;
-
-/// O enquadramento vindo do JavaScript: `[x, y, largura, altura, giro_90,
-/// angulo, espelho_h, espelho_v]`, na ordem de `Corte::novo` — e, quando a foto
-/// tem perspectiva guiada, `[…, rx, ry, rz, foco, vertical, horizontal]`.
-///
-/// Os dois espelhos viajam como 0 ou 1 e o giro como inteiro num `f32`: um
-/// vetor só, do mesmo tipo do dos ajustes, é o que o `wasm-bindgen` passa sem
-/// custo. `Corte::novo` limita tudo, então valor fora da faixa entra corrigido
-/// em vez de virar erro — o mesmo tratamento que o desktop dá.
-///
-/// 🔑 **Oito continua valendo**: o site de hoje manda oito, e a foto sem
-/// perspectiva é exatamente a de antes. Um tamanho que não é nenhum dos dois é
-/// erro — revelar sem a correção que a foto tem seria entregar outra foto.
+/// O enquadramento vindo do JavaScript — a forma do vetor (8 ou 14 números)
+/// está em `contrato::corte_de_vetor`.
 fn corte_de_vetor(v: &[f32]) -> Result<Corte, JsValue> {
-    if v.len() != CAMPOS_DO_CORTE && v.len() != CAMPOS_COM_PERSPECTIVA {
-        return Err(erro(format!(
-            "esperava {CAMPOS_DO_CORTE} ou {CAMPOS_COM_PERSPECTIVA} campos de corte, recebi {}",
-            v.len()
-        )));
-    }
-    let corte = Corte::novo(
-        v[0],
-        v[1],
-        v[2],
-        v[3],
-        v[4] as i32,
-        v[5],
-        v[6] != 0.0,
-        v[7] != 0.0,
-    );
-    Ok(match v.get(CAMPOS_DO_CORTE..CAMPOS_COM_PERSPECTIVA) {
-        Some(&[rx, ry, rz, foco, vertical, horizontal]) => {
-            corte.com_perspectiva(revelacao_core::perspectiva::Perspectiva::nova(
-                [rx, ry, rz],
-                foco,
-                vertical,
-                horizontal,
-            ))
-        }
-        _ => corte,
-    })
+    contrato::corte_de_vetor(v).map_err(erro)
 }
 
 /// A perspectiva sozinha, em pixels do espaço orientado (depois de espelhos e
@@ -126,11 +80,7 @@ fn corte_de_vetor(v: &[f32]) -> Result<Corte, JsValue> {
 /// perspectiva, a identidade.
 #[wasm_bindgen]
 pub fn homografia_no_espaco(corte: &[f32], largura: u32, altura: u32) -> Result<Vec<f32>, JsValue> {
-    let h = corte_de_vetor(corte)?.homografia_em_pixels(largura, altura);
-    Ok((0..3)
-        .flat_map(|i| (0..3).map(move |j| (i, j)))
-        .map(|(i, j)| h[(i, j)] as f32)
-        .collect())
+    contrato::homografia_no_espaco(corte, largura, altura).map_err(erro)
 }
 
 /// A matriz do enquadramento, do quadro que sai (`s, t` em 0–1) à foto de pé
@@ -146,18 +96,13 @@ pub fn matriz_do_enquadramento(
     altura: u32,
     recortar: bool,
 ) -> Result<Vec<f32>, JsValue> {
-    let m = corte_de_vetor(corte)?.mapa(largura, altura, recortar);
-    let m = m / m[(2, 2)];
-    Ok((0..3)
-        .flat_map(|i| (0..3).map(move |j| (i, j)))
-        .map(|(i, j)| m[(i, j)] as f32)
-        .collect())
+    contrato::matriz_do_enquadramento(corte, largura, altura, recortar).map_err(erro)
 }
 
 /// O enquadramento neutro: a foto inteira, sem giro, ângulo ou espelho.
 #[wasm_bindgen]
 pub fn corte_inteiro() -> Vec<f32> {
-    vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    contrato::corte_inteiro()
 }
 
 /// A geometria do enquadramento, para a tela desenhá-lo — **calculada aqui**.
@@ -173,13 +118,7 @@ pub fn corte_inteiro() -> Vec<f32> {
 /// arquivo que vai sair.
 #[wasm_bindgen]
 pub fn enquadramento(corte: &[f32], largura: u32, altura: u32) -> Result<Vec<f32>, JsValue> {
-    let corte = corte_de_vetor(corte)?;
-    let (lg, ag) = corte.dimensoes_giradas(largura, altura);
-    let (x, y, w, h) = corte.retangulo(lg, ag);
-    let (sw, sh) = corte.dimensoes_de_saida(largura, altura);
-    Ok(vec![
-        lg as f32, ag as f32, x as f32, y as f32, w as f32, h as f32, sw as f32, sh as f32,
-    ])
+    contrato::enquadramento(corte, largura, altura).map_err(erro)
 }
 
 /// Codifica pixels RGBA em JPEG — **sem GPU e sem canvas**.
@@ -211,26 +150,7 @@ pub fn comprimir_jpeg(
     qualidade: u8,
 ) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-
-    let esperado = (largura as usize)
-        .checked_mul(altura as usize)
-        .and_then(|p| p.checked_mul(4))
-        .ok_or_else(|| erro(format!("{largura}×{altura} não cabe na memória")))?;
-    if rgba.len() != esperado {
-        return Err(erro(format!(
-            "os bytes não batem com largura × altura × 4: {} para {esperado}",
-            rgba.len()
-        )));
-    }
-
-    let buffer = image::RgbaImage::from_raw(largura, altura, rgba.to_vec())
-        .ok_or_else(|| erro("os pixels não formam uma imagem"))?;
-
-    revelacao_core::jpeg::codificar(
-        &image::DynamicImage::ImageRgba8(buffer),
-        qualidade.clamp(1, 100),
-    )
-    .map_err(|e| erro(format!("o JPEG não codificou: {e}")))
+    contrato::comprimir_jpeg(largura, altura, rgba, qualidade).map_err(erro)
 }
 
 /// Os formatos que este wasm sabe **abrir** — a lista que a tela mostra.
@@ -240,13 +160,13 @@ pub fn comprimir_jpeg(
 /// duas listas da mesma verdade discordam no dia em que uma muda).
 #[wasm_bindgen]
 pub fn formatos_de_entrada() -> String {
-    serde_json::to_string(&["jpeg", "png", "tiff", "webp", "bmp", "gif"]).unwrap_or_default()
+    contrato::formatos_de_entrada()
 }
 
 /// Os formatos que este wasm sabe **gravar**.
 #[wasm_bindgen]
 pub fn formatos_de_saida() -> String {
-    serde_json::to_string(&["jpeg", "png", "tiff", "webp"]).unwrap_or_default()
+    contrato::formatos_de_saida()
 }
 
 /// Decodifica um arquivo de imagem para RGBA — a rede de baixo do navegador.
@@ -272,22 +192,7 @@ pub fn formatos_de_saida() -> String {
 #[wasm_bindgen]
 pub fn decodificar_imagem(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-
-    // De pé: a mesma regra do desktop e do `createImageBitmap` com
-    // `imageOrientation: "from-image"` — `foto_codec::orientacao`.
-    let imagem = foto_codec::orientacao::decodificar_de_pe(bytes).map_err(|e| {
-        erro(format!(
-            "este arquivo não abriu ({e}). Formatos aceitos: JPEG, PNG, TIFF, WebP, BMP e GIF"
-        ))
-    })?;
-    let rgba = imagem.to_rgba8();
-    let (largura, altura) = rgba.dimensions();
-
-    let mut saida = Vec::with_capacity(8 + rgba.len());
-    saida.extend_from_slice(&largura.to_le_bytes());
-    saida.extend_from_slice(&altura.to_le_bytes());
-    saida.extend_from_slice(rgba.as_raw());
-    Ok(saida)
+    contrato::decodificar_imagem(bytes).map_err(erro)
 }
 
 /// O espaço de cor que o arquivo declara: 0 sRGB, 1 Adobe RGB, 2 Display P3.
@@ -299,15 +204,14 @@ pub fn decodificar_imagem(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
 /// `decodificar_imagem` (e o app) já fazem — a mesma foto nos dois lados.
 #[wasm_bindgen]
 pub fn espaco_de_cor_declarado(bytes: &[u8]) -> u8 {
-    foto_codec::espaco_de_cor::declarado_no_arquivo(bytes).codigo()
+    contrato::espaco_de_cor_declarado(bytes)
 }
 
 /// Converte RGBA (4 bytes por pixel) do espaço `espaco` (o código de
 /// [`espaco_de_cor_declarado`]) para sRGB, no lugar. Em sRGB não toca em nada.
 #[wasm_bindgen]
 pub fn converter_para_srgb(rgba: &mut [u8], espaco: u8) {
-    use foto_codec::espaco_de_cor::{rgba_para_srgb, EspacoDeCor};
-    rgba_para_srgb(rgba, EspacoDeCor::do_codigo(espaco));
+    contrato::converter_para_srgb(rgba, espaco);
 }
 
 /// Codifica RGBA no formato pedido — o "baixar em vários formatos".
@@ -334,39 +238,7 @@ pub fn codificar_imagem(
     qualidade: u8,
 ) -> Result<Vec<u8>, JsValue> {
     console_error_panic_hook::set_once();
-
-    let esperado = (largura as usize)
-        .checked_mul(altura as usize)
-        .and_then(|p| p.checked_mul(4))
-        .ok_or_else(|| erro(format!("{largura}×{altura} não cabe na memória")))?;
-    if rgba.len() != esperado {
-        return Err(erro(format!(
-            "os bytes não batem com largura × altura × 4: {} para {esperado}",
-            rgba.len()
-        )));
-    }
-    let buffer = image::RgbaImage::from_raw(largura, altura, rgba.to_vec())
-        .ok_or_else(|| erro("os pixels não formam uma imagem"))?;
-    let imagem = image::DynamicImage::ImageRgba8(buffer);
-
-    if formato == "jpeg" {
-        return revelacao_core::jpeg::codificar(&imagem, qualidade.clamp(1, 100))
-            .map_err(|e| erro(format!("o JPEG não codificou: {e}")));
-    }
-
-    let saida_formato = match formato {
-        "png" => image::ImageFormat::Png,
-        "tiff" => image::ImageFormat::Tiff,
-        "webp" => image::ImageFormat::WebP,
-        outro => return Err(erro(format!("formato desconhecido: {outro}"))),
-    };
-    // O TIFF do `image` não aceita alfa em todo caminho, e o WebP sem perda
-    // aceita: RGBA para os dois, RGB só quando o formato exigir.
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    imagem
-        .write_to(&mut bytes, saida_formato)
-        .map_err(|e| erro(format!("o arquivo não codificou: {e}")))?;
-    Ok(bytes.into_inner())
+    contrato::codificar_imagem(largura, altura, rgba, formato, qualidade).map_err(erro)
 }
 
 /// Abre o motor sobre o canvas: WebGPU se houver, senão WebGL2.
@@ -496,12 +368,12 @@ impl Motor {
 
     /// Os 53 valores do neutro, na ordem do `uniform`.
     pub fn ajustes_padrao() -> Vec<f32> {
-        Ajustes::default().como_vetor().to_vec()
+        contrato::ajustes_padrao()
     }
 
     /// Os 53 nomes, na ordem do `uniform`, como JSON.
     pub fn nomes_dos_ajustes() -> String {
-        serde_json::to_string(&Ajustes::NOMES[..]).expect("os nomes viram JSON")
+        contrato::nomes_dos_ajustes()
     }
 
     /// Sobe a cópia de trabalho (RGBA, 4 bytes por pixel) e ajusta o canvas ao
@@ -518,22 +390,8 @@ impl Motor {
         rgba: &[u8],
         lado_original: Option<u32>,
     ) -> Result<(), JsValue> {
-        if largura == 0 || altura == 0 {
-            return Err(erro("imagem sem tamanho"));
-        }
-        if rgba.len() != (largura as usize) * (altura as usize) * 4 {
-            return Err(erro(format!(
-                "esperava {} bytes RGBA para {largura}×{altura}, recebi {}",
-                largura as usize * altura as usize * 4,
-                rgba.len()
-            )));
-        }
-        let limite = self.limite_de_textura();
-        if largura > limite || altura > limite {
-            return Err(erro(format!(
-                "{largura}×{altura} passa do limite de textura deste dispositivo ({limite} px)"
-            )));
-        }
+        contrato::conferir_copia_de_trabalho(largura, altura, rgba.len(), self.limite_de_textura())
+            .map_err(erro)?;
 
         self.canvas.set_width(largura);
         self.canvas.set_height(altura);
@@ -605,13 +463,7 @@ impl Motor {
     /// `true` quando o desenho saiu com grades de antes — aí o site desenha de
     /// novo no próximo quadro, com os mesmos ajustes, até vir `false`.
     pub fn aplicar(&mut self, ajustes: &[f32], agora: Option<f64>) -> Result<bool, JsValue> {
-        let ajustes = Ajustes::de_vetor(ajustes).ok_or_else(|| {
-            erro(format!(
-                "esperava {} ajustes, recebi {}",
-                revelacao_core::QUANTIDADE,
-                ajustes.len()
-            ))
-        })?;
+        let ajustes = contrato::ajustes_de_vetor(ajustes).map_err(erro)?;
         let (pixels, largura, altura) = self
             .trabalho
             .clone()
@@ -684,20 +536,6 @@ impl Motor {
     }
 }
 
-/// A razão entre esta imagem e a foto original, pelo maior lado.
-///
-/// 🚨 **Os raios do darktable são em pixels da foto original.** O `shadows and
-/// highlights` do estilo borra com raio de 100 px: numa exportação reduzida ao
-/// limite de textura, ou na cópia de 2048 px, isso é outro pedaço da foto, e o
-/// estilo sairia diferente do que o darktable dá. Sem `lado_original` (ou com
-/// um valor sem sentido), vale 1 — a imagem é a original.
-fn escala_do_original(largura: u32, altura: u32, lado_original: Option<u32>) -> f32 {
-    match lado_original {
-        Some(lado) if lado > 0 => (largura.max(altura) as f32 / lado as f32).min(1.0),
-        _ => 1.0,
-    }
-}
-
 /// Revela, enquadra e codifica — o miolo da exportação, **sem canvas**.
 ///
 /// 🔑 **Livre da tela de propósito**: é o que permite [`Exportador`] existir, e
@@ -728,23 +566,9 @@ async fn revelar_e_codificar(
     lado_original: Option<u32>,
     locais: Option<&str>,
 ) -> Result<Vec<u8>, JsValue> {
-    let corte = corte_de_vetor(corte)?;
-    let locais = locais_de_json(locais)?;
-    let ajustes = Ajustes::de_vetor(ajustes).ok_or_else(|| {
-        erro(format!(
-            "esperava {} ajustes, recebi {}",
-            revelacao_core::QUANTIDADE,
-            ajustes.len()
-        ))
-    })?;
-    if rgba.len() != (largura as usize) * (altura as usize) * 4 {
-        return Err(erro("os bytes não batem com largura × altura × 4"));
-    }
-    if largura > limite || altura > limite {
-        return Err(erro(format!(
-            "{largura}×{altura} passa do limite de textura deste dispositivo ({limite} px)"
-        )));
-    }
+    let (corte, locais, ajustes) =
+        contrato::preparar_exportacao(largura, altura, rgba.len(), ajustes, corte, locais, limite)
+            .map_err(erro)?;
 
     motor.definir_escala_do_original(escala_do_original(largura, altura, lado_original));
     motor.definir_corte(&corte);

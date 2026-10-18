@@ -31,15 +31,25 @@
 //! | JavaScript | escuta o `BroadcastChannel`, baixa a cópia de trabalho, decodifica (`createImageBitmap`, 5–10× mais rápido que em wasm), chama `mostrar`/`ajustar` e roda o laço de quadros |
 //! | aqui | sobe os pixels, revela com os 53 ajustes, enquadra, encaixa na janela, cruza as duas fotos e desenha |
 
-//! # 🔑 Só existe no alvo `wasm32`
+//! # 🔑 A tela só existe no alvo `wasm32`
 //!
 //! `wgpu::SurfaceTarget::Canvas` e o `HtmlCanvasElement` não têm par em nativo,
 //! e um crate que só compila num alvo quebraria `cargo test --workspace` e o
 //! clippy do CI — que é exatamente o que aconteceu quando este nasceu sem a
-//! guarda. É a mesma linha do `revelacao-web`, e pelo mesmo motivo: em nativo
-//! ele é vazio de propósito, e o que se prova sem navegador é o
-//! `revelacao-core`, onde a matemática mora.
+//! guarda. É a mesma linha do `revelacao-web`, e pelo mesmo motivo: `tela` (o
+//! canvas, a GPU e a API do JavaScript) fica atrás de
+//! `cfg(target_arch = "wasm32")`, e em nativo este crate não exporta nada.
+//!
+//! O que a tela decide sem GPU mora em `contrato`, que compila em todo alvo: a
+//! forma dos vetores de ajustes e de corte, as conferências e as mensagens de
+//! erro, o tempo e a curva do cruzamento, qual camada sai, e o `uniform` de
+//! cada camada (o encaixe na janela e as UVs do enquadramento). Os testes dele
+//! provam isso em `cargo test`, sem navegador; a matemática da revelação e do
+//! enquadramento continua provada no `revelacao-core`, onde ela mora.
 
+// Em nativo só os testes chamam o contrato; quem o usa de verdade é `tela`.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod contrato;
 #[cfg(target_arch = "wasm32")]
 mod tela;
 #[cfg(target_arch = "wasm32")]

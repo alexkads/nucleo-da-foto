@@ -14,6 +14,33 @@
 //!
 //! 🔒 **Nada sai da máquina**: a única conexão é o download do modelo, pedido
 //! pelo operador. Fotos, máscaras e resultados ficam aqui.
+//!
+//! # Exemplo
+//!
+//! Uma tarefa declara o seu modelo e pergunta à pasta se ele está lá — sem
+//! rede: só o [`modelos::baixar`] fala com a internet, e só quando o operador
+//! pede.
+//!
+//! ```rust
+//! use ia_local::modelos::{self, Estado, Modelo};
+//!
+//! const EXEMPLO: Modelo = Modelo {
+//!     id: "exemplo",
+//!     nome: "Modelo de exemplo",
+//!     arquivo: "exemplo.onnx",
+//!     versao: "exemplo/repo @ 0000000",
+//!     url: "https://exemplo.invalid/exemplo.onnx",
+//!     bytes: 1024,
+//!     sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+//!     licenca: "MIT",
+//!     origem: "exemplo",
+//! };
+//!
+//! let pasta = tempfile::tempdir().unwrap();
+//! assert_eq!(modelos::estado(pasta.path(), &EXEMPLO), Estado::Ausente);
+//! ```
+
+#![deny(missing_docs)]
 
 pub mod modelos;
 

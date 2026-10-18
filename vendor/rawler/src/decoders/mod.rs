@@ -533,7 +533,8 @@ pub(crate) fn dynamic_image_from_ifd(ifd: &IFD, rawsource: &RawSource) -> Result
             ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(tiff_width as u32, tiff_height as u32, buf.to_vec())
               .ok_or(RawlerError::DecoderFailed(format!("Create RGB thumbnail from strip failed")))?,
           )),
-          _ => unimplemented!(),
+          // nucleo-da-foto: era `unimplemented!()`.
+          outro => Err(RawlerError::DecoderFailed(format!("{outro} amostras por pixel não suportadas"))),
         }
       }
       9..=16 => {
@@ -551,10 +552,12 @@ pub(crate) fn dynamic_image_from_ifd(ifd: &IFD, rawsource: &RawSource) -> Result
             ImageBuffer::<Rgb<u16>, Vec<u16>>::from_raw((tiff_width) as u32, tiff_height as u32, samples)
               .ok_or(RawlerError::DecoderFailed(format!("Create RGB image failed")))?,
           )),
-          _ => unimplemented!(),
+          // nucleo-da-foto: era `unimplemented!()`.
+          outro => Err(RawlerError::DecoderFailed(format!("{outro} amostras por pixel não suportadas"))),
         }
       }
-      _ => unimplemented!(),
+      // nucleo-da-foto: era `unimplemented!()`.
+      outros => Err(RawlerError::DecoderFailed(format!("{outros} bits por amostra não suportados"))),
     },
     RawImageData::Float(samples) => match cpp {
       3 => Ok(DynamicImage::ImageRgb32F(
@@ -562,7 +565,8 @@ pub(crate) fn dynamic_image_from_ifd(ifd: &IFD, rawsource: &RawSource) -> Result
         ImageBuffer::<Rgb<f32>, Vec<f32>>::from_raw(tiff_width as u32, tiff_height as u32, samples)
           .ok_or(RawlerError::DecoderFailed(format!("Create RGB image failed")))?,
       )),
-      _ => unimplemented!(),
+      // nucleo-da-foto: era `unimplemented!()`.
+      outro => Err(RawlerError::DecoderFailed(format!("{outro} amostras por pixel não suportadas"))),
     },
   }
 }
@@ -675,7 +679,8 @@ pub fn plain_image_from_ifd(ifd: &IFD, rawsource: &RawSource) -> Result<RawImage
           // Make sure pixbuf is properly cropped (e.g. LJPEG padding)
           pixbuf = deinterleave2x2(&pixbuf)?;
         }
-        _ => todo!(),
+        // nucleo-da-foto: era `todo!()`.
+        outro => return Err(RawlerError::DecoderFailed(format!("DNG: entrelaçamento {outro:?} não suportado"))),
       }
       return Ok(RawImageData::Integer(pixbuf.into_inner()));
     }

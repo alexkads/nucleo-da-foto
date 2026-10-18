@@ -38,6 +38,13 @@ impl<'a> Decoder for DngDecoder<'a> {
     let height = fetch_tiff_tag!(raw, TiffCommonTag::ImageLength).force_usize(0);
     let cpp = fetch_tiff_tag!(raw, TiffCommonTag::SamplesPerPixel).force_usize(0);
     let bits = fetch_tiff_tag!(raw, TiffCommonTag::BitsPerSample).force_u32(0);
+    // nucleo-da-foto: um cabeçalho corrompido (largura 0, 40 bits por amostra…) chegava a
+    // `par_chunks_mut(0)` e a `WhiteLevel::new_bits` em pânico. Recusado aqui, com erro.
+    if width == 0 || height == 0 || !(1..=4).contains(&cpp) || !(1..=32).contains(&bits) {
+      return Err(RawlerError::DecoderFailed(format!(
+        "DNG: cabeçalho inválido ({width}×{height}, {cpp} amostras por pixel, {bits} bits)"
+      )));
+    }
     let orientation = Orientation::from_tiff(self.tiff.root_ifd());
 
     let mut cam = self.make_camera(raw, width, height)?;
@@ -63,7 +70,8 @@ impl<'a> Decoder for DngDecoder<'a> {
       1 => RawPhotometricInterpretation::BlackIsZero,
       32803 => RawPhotometricInterpretation::Cfa(CFAConfig::new_from_camera(&cam)),
       34892 => RawPhotometricInterpretation::LinearRaw,
-      _ => todo!(),
+      // nucleo-da-foto: era `todo!()` — um DNG com outra fotometria derrubava quem decodificava.
+      outra => return Err(RawlerError::DecoderFailed(format!("DNG: fotometria {outra} não suportada"))),
     };
 
     let raw_data = plain_image_from_ifd(raw, file)?;
