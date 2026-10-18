@@ -40,8 +40,14 @@ pub const JANELA_DA_NEVOA: f32 = 0.008;
 /// A guia pronta para subir: `rgba` em `f32`, linha a linha.
 #[derive(Debug, Clone)]
 pub struct Guia {
+    /// Largura da guia, em texels: a da foto dividida pelo fator inteiro de
+    /// redução, com o lado maior até [`LADO_DA_GUIA`].
     pub largura: u32,
+    /// Altura da guia, em texels, no mesmo fator da largura.
     pub altura: u32,
+    /// Os texels, quatro `f32` cada (`r`, `g`, `b`, `a` da tabela do módulo,
+    /// todos em 0–1), linha a linha de cima para baixo:
+    /// `largura × altura × 4` valores.
     pub texels: Vec<f32>,
     /// A "luz atmosférica" do Remover névoa, em 0–1: a luminância média do
     /// 0,1 % de pontos mais enevoados (os de canal escuro mais alto).

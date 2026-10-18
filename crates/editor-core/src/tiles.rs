@@ -33,12 +33,18 @@ pub const BYTES_DO_TILE: usize = (LADO_DO_TILE * LADO_DO_TILE * 4) as usize;
 pub const BITS_POR_CANAL: u8 =
     (BYTES_DO_TILE / (LADO_DO_TILE * LADO_DO_TILE) as usize / 4 * 8) as u8;
 
+/// Os [`BYTES_DO_TILE`] de um tile, linha a linha, RGBA8 de alfa reto. É um
+/// `Arc` para a cópia na escrita: quem muda chama `Arc::make_mut` (ou
+/// [`CamadaDePixels::tile_mut`]) e o desfazer fica com o de antes.
 pub type Tile = Arc<Vec<u8>>;
 
 /// Onde um tile fica: coluna e linha, em tiles — negativas, ou além da última,
 /// quando o tile está fora da foto.
 pub type Posicao = (i32, i32);
 
+/// Os pixels RGBA8 de uma camada (ou de uma máscara), em tiles de
+/// [`LADO_DO_TILE`] pixels, esparsos e com cópia na escrita. As dimensões são
+/// as da foto; os tiles podem passar delas (ver o topo do módulo).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CamadaDePixels {
     largura: u32,
@@ -105,22 +111,29 @@ impl CamadaDePixels {
         camada
     }
 
+    /// Largura da foto, em pixels — não a dos tiles, que arredondam para cima.
     pub fn largura(&self) -> u32 {
         self.largura
     }
 
+    /// Altura da foto, em pixels.
     pub fn altura(&self) -> u32 {
         self.altura
     }
 
+    /// Quantas colunas de tiles cobrem a foto (a última pode passar da borda).
+    /// Os tiles de fora da foto não contam.
     pub fn colunas(&self) -> u32 {
         self.largura.div_ceil(LADO_DO_TILE)
     }
 
+    /// Quantas linhas de tiles cobrem a foto (a última pode passar da borda).
     pub fn linhas(&self) -> u32 {
         self.altura.div_ceil(LADO_DO_TILE)
     }
 
+    /// O tile em `posicao`, dentro ou fora da foto. `None` = nunca pintado
+    /// (transparente).
     pub fn tile(&self, posicao: Posicao) -> Option<&Tile> {
         self.tiles.get(&posicao)
     }

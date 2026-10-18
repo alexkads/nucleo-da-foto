@@ -29,6 +29,8 @@ use super::{Caminho, OperacaoDoComponente, Ponto, RegraDePreenchimento, Subcamin
 /// Como rasterizar.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Opcoes {
+    /// Antisserrilhado: a fração coberta de cada pixel (quatro linhas de
+    /// amostra). Sem ele, o pixel é 0 ou 255 pelo centro.
     pub suavizar: bool,
     /// O erro máximo do achatamento das curvas, em pixels do documento.
     pub tolerancia: f64,
@@ -44,6 +46,8 @@ impl Opcoes {
         }
     }
 
+    /// A do "Fazer seleção" (⌘↵): a mesma tolerância da máscara, com o
+    /// antisserrilhado que o operador escolheu na caixa de diálogo.
     pub fn da_selecao(suavizar: bool) -> Self {
         Self {
             suavizar,

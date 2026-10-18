@@ -49,23 +49,31 @@ use crate::selecao::Selecao;
 /// Um ponto no espaço do documento (pixels da foto, fracionário).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Ponto {
+    /// Pixels da foto da esquerda para a direita; `0,0` é a borda esquerda do
+    /// primeiro pixel, e o centro dele é `0,5`.
     pub x: f64,
+    /// Pixels da foto de cima para baixo (o `y` cresce para baixo, como na
+    /// imagem).
     pub y: f64,
 }
 
 impl Ponto {
+    /// O ponto `(x, y)`, em pixels do documento.
     pub const fn novo(x: f64, y: f64) -> Self {
         Self { x, y }
     }
 
+    /// O ponto deslocado de `d = (dx, dy)`, em pixels do documento.
     pub fn mais(self, d: (f64, f64)) -> Self {
         Self::novo(self.x + d.0, self.y + d.1)
     }
 
+    /// O vetor de `outro` até este ponto, `(dx, dy)`: `a.menos(b)` é `a − b`.
     pub fn menos(self, outro: Ponto) -> (f64, f64) {
         (self.x - outro.x, self.y - outro.y)
     }
 
+    /// A distância euclidiana até `outro`, em pixels do documento.
     pub fn distancia(self, outro: Ponto) -> f64 {
         (self.x - outro.x).hypot(self.y - outro.y)
     }
@@ -98,6 +106,7 @@ pub enum Ligacao {
 }
 
 impl Ligacao {
+    /// O nome em português, para o menu da âncora.
     pub fn nome(self) -> &'static str {
         match self {
             Ligacao::Canto => "Canto",
@@ -113,6 +122,7 @@ pub struct Ancora {
     /// Estável dentro do caminho: sobrevive a edições, ao desfazer e à
     /// gravação.
     pub id: u64,
+    /// Onde a âncora está — por onde a curva passa.
     pub ponto: Ponto,
     /// O controle do segmento que **chega** à âncora (P2 dele). `None` = o
     /// controle coincide com a âncora.
@@ -121,6 +131,8 @@ pub struct Ancora {
     /// O controle do segmento que **sai** da âncora (P1 dele).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saida: Option<Ponto>,
+    /// A regra de edição das alças (padrão [`Ligacao::Canto`]); não é
+    /// verificada contra a forma — veja [`Ancora::alcas_colineares`].
     #[serde(default)]
     pub ligacao: Ligacao,
     /// Feita pela Caneta de curvatura: as alças saem dos vizinhos (a curva
@@ -133,11 +145,14 @@ pub struct Ancora {
 /// Qual alça.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Lado {
+    /// A alça de entrada ([`Ancora::entrada`]), do segmento que chega.
     Entrada,
+    /// A alça de saída ([`Ancora::saida`]), do segmento que sai.
     Saida,
 }
 
 impl Lado {
+    /// A outra alça da mesma âncora.
     pub fn oposto(self) -> Lado {
         match self {
             Lado::Entrada => Lado::Saida,
@@ -150,6 +165,8 @@ impl Lado {
 pub const ALCA_NULA: f64 = 1e-6;
 
 impl Ancora {
+    /// Uma âncora de canto sem alças em `ponto` — o clique simples da Caneta.
+    /// `id` vem de [`Caminho::gerar_id`].
     pub fn de_canto(id: u64, ponto: Ponto) -> Self {
         Self {
             id,
@@ -161,6 +178,8 @@ impl Ancora {
         }
     }
 
+    /// A alça do `lado`, se existe (`None` = coincide com a âncora). Para o
+    /// controle que a curva usa, veja [`controle`](Ancora::controle).
     pub fn alca(&self, lado: Lado) -> Option<Ponto> {
         match lado {
             Lado::Entrada => self.entrada,
@@ -168,6 +187,8 @@ impl Ancora {
         }
     }
 
+    /// A alça do `lado` para escrever direto, sem aplicar a ligação (para
+    /// isso, [`mover_alca`](Ancora::mover_alca)).
     pub fn alca_mut(&mut self, lado: Lado) -> &mut Option<Ponto> {
         match lado {
             Lado::Entrada => &mut self.entrada,
@@ -275,14 +296,19 @@ impl Ancora {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperacaoDoComponente {
+    /// "Combinar formas": `max(a, b)`. O padrão.
     #[default]
     Somar,
+    /// "Subtrair forma da frente": `a·(1 − b)`.
     Subtrair,
+    /// "Fazer interseção das áreas": `min(a, b)`.
     Intersectar,
+    /// "Excluir sobreposição": `|a − b|` — fica o que está em só um dos dois.
     Excluir,
 }
 
 impl OperacaoDoComponente {
+    /// As quatro, na ordem dos botões do Photoshop.
     pub const TODAS: [OperacaoDoComponente; 4] = [
         OperacaoDoComponente::Somar,
         OperacaoDoComponente::Subtrair,
@@ -290,6 +316,7 @@ impl OperacaoDoComponente {
         OperacaoDoComponente::Excluir,
     ];
 
+    /// O nome do Photoshop em português, para a barra de opções.
     pub fn nome(self) -> &'static str {
         match self {
             OperacaoDoComponente::Somar => "Combinar formas",
@@ -328,9 +355,17 @@ pub enum RegraDePreenchimento {
 /// Um componente: um subcaminho aberto ou fechado.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Subcaminho {
+    /// Estável dentro do caminho (de [`Caminho::gerar_id`], o mesmo contador
+    /// das âncoras).
     pub id: u64,
+    /// As âncoras na ordem do traçado; o segmento `i` vai da `i` à `i + 1`.
     pub ancoras: Vec<Ancora>,
+    /// Fechado: há o segmento da última âncora à primeira. Aberto, o
+    /// preenchimento ainda o fecha por uma reta
+    /// ([`fechamento_virtual`](Subcaminho::fechamento_virtual)).
     pub fechado: bool,
+    /// Como o componente entra na área do caminho (padrão
+    /// [`OperacaoDoComponente::Somar`]).
     #[serde(default)]
     pub operacao: OperacaoDoComponente,
 }
@@ -339,8 +374,12 @@ pub struct Subcaminho {
 /// (índices no subcaminho).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Segmento {
+    /// O índice da âncora de partida no subcaminho.
     pub de: usize,
+    /// O índice da âncora de chegada (0 no segmento que fecha o caminho).
     pub ate: usize,
+    /// Os quatro pontos da cúbica: a âncora `de`, a saída dela, a entrada da
+    /// `ate` e a âncora `ate` (alça ausente = o ponto da âncora).
     pub p: [Ponto; 4],
 }
 
@@ -350,6 +389,8 @@ impl Segmento {
         self.p[1] == self.p[0] && self.p[2] == self.p[3]
     }
 
+    /// A mesma cúbica no `kurbo`, para as contas de geometria (ponto mais
+    /// próximo, extremos, achatamento).
     pub fn kurbo(&self) -> kurbo::CubicBez {
         kurbo::CubicBez::new(
             self.p[0].kurbo(),
@@ -361,6 +402,7 @@ impl Segmento {
 }
 
 impl Subcaminho {
+    /// Um componente aberto e sem âncoras.
     pub fn novo(id: u64, operacao: OperacaoDoComponente) -> Self {
         Self {
             id,
@@ -400,10 +442,12 @@ impl Subcaminho {
         })
     }
 
+    /// Todos os segmentos, em ordem (o de fechamento por último, se fechado).
     pub fn segmentos(&self) -> impl Iterator<Item = Segmento> + '_ {
         (0..self.quantos_segmentos()).filter_map(|i| self.segmento(i))
     }
 
+    /// A posição em [`ancoras`](Subcaminho::ancoras) da âncora de id `id`.
     pub fn indice_da_ancora(&self, id: u64) -> Option<usize> {
         self.ancoras.iter().position(|a| a.id == id)
     }
@@ -470,17 +514,27 @@ impl Subcaminho {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "onde", content = "id", rename_all = "snake_case")]
 pub enum LugarDoCaminho {
+    /// O [`Caminhos::trabalho`].
     Trabalho,
+    /// Um de [`Caminhos::nomeados`], pelo [`Caminho::id`].
     Nomeado(u64),
+    /// A [`MascaraVetorial`] da camada neste índice do documento (0 = a de
+    /// baixo).
     Mascara(usize),
 }
 
 /// Um caminho: um ou mais componentes, com nome e id estáveis.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Caminho {
+    /// Estável entre os caminhos do documento (de [`Caminhos::gerar_id`]).
     pub id: u64,
+    /// O nome no painel Caminhos (`"Caminho de trabalho"`, `"Caminho 1"`…).
     pub nome: String,
+    /// Os componentes, de baixo para cima — a ordem em que as operações se
+    /// aplicam (veja [`OperacaoDoComponente`]).
     pub subcaminhos: Vec<Subcaminho>,
+    /// A regra do "dentro" de cada componente (padrão
+    /// [`RegraDePreenchimento::NaoZero`]).
     #[serde(default)]
     pub regra: RegraDePreenchimento,
     /// O próximo id livre para âncoras e subcaminhos deste caminho.
@@ -491,6 +545,8 @@ pub struct Caminho {
 pub const NOME_DO_TRABALHO: &str = "Caminho de trabalho";
 
 impl Caminho {
+    /// Um caminho sem componentes, com a regra não-zero e os ids de âncora
+    /// começando em 1.
     pub fn novo(id: u64, nome: &str) -> Self {
         Self {
             id,
@@ -508,22 +564,29 @@ impl Caminho {
         id
     }
 
+    /// Nenhuma âncora em nenhum componente (subcaminhos vazios não contam).
     pub fn vazio(&self) -> bool {
         self.subcaminhos.iter().all(|s| s.ancoras.is_empty())
     }
 
+    /// O componente de id `id`.
     pub fn subcaminho(&self, id: u64) -> Option<&Subcaminho> {
         self.subcaminhos.iter().find(|s| s.id == id)
     }
 
+    /// O componente de id `id`, para editar.
     pub fn subcaminho_mut(&mut self, id: u64) -> Option<&mut Subcaminho> {
         self.subcaminhos.iter_mut().find(|s| s.id == id)
     }
 
+    /// A posição em [`subcaminhos`](Caminho::subcaminhos) do componente de id
+    /// `id`.
     pub fn indice_do_subcaminho(&self, id: u64) -> Option<usize> {
         self.subcaminhos.iter().position(|s| s.id == id)
     }
 
+    /// A âncora apontada por `r`; `None` se o componente ou a âncora não
+    /// existem mais (apagados, desfeitos).
     pub fn ancora(&self, r: RefAncora) -> Option<&Ancora> {
         self.subcaminho(r.sub)?
             .ancoras
@@ -531,6 +594,7 @@ impl Caminho {
             .find(|a| a.id == r.ancora)
     }
 
+    /// A âncora apontada por `r`, para editar.
     pub fn ancora_mut(&mut self, r: RefAncora) -> Option<&mut Ancora> {
         self.subcaminho_mut(r.sub)?
             .ancoras
@@ -609,7 +673,9 @@ impl Caminho {
 /// Uma âncora dentro do caminho: o subcaminho e ela, pelos ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RefAncora {
+    /// O [`Subcaminho::id`].
     pub sub: u64,
+    /// O [`Ancora::id`].
     pub ancora: u64,
 }
 
@@ -618,8 +684,11 @@ pub struct RefAncora {
 /// vetoriais moram nas camadas.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Caminhos {
+    /// O caminho de trabalho: onde a Caneta desenha quando nenhum caminho
+    /// está escolhido. Há no máximo um.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trabalho: Option<Caminho>,
+    /// Os caminhos salvos com nome, na ordem do painel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nomeados: Vec<Caminho>,
     /// O próximo id livre para caminhos.
@@ -638,6 +707,7 @@ impl Default for Caminhos {
 }
 
 impl Caminhos {
+    /// Sem caminho de trabalho nem nomeados (o mesmo que o [`Default`]).
     pub fn novo() -> Self {
         Self {
             trabalho: None,
@@ -646,20 +716,25 @@ impl Caminhos {
         }
     }
 
+    /// Um id novo para um [`Caminho`] (nunca 0, nem num projeto antigo com o
+    /// contador zerado).
     pub fn gerar_id(&mut self) -> u64 {
         let id = self.proximo_id.max(1);
         self.proximo_id = id + 1;
         id
     }
 
+    /// Nem caminho de trabalho nem nomeados.
     pub fn vazio(&self) -> bool {
         self.trabalho.is_none() && self.nomeados.is_empty()
     }
 
+    /// O caminho nomeado de id `id`.
     pub fn nomeado(&self, id: u64) -> Option<&Caminho> {
         self.nomeados.iter().find(|c| c.id == id)
     }
 
+    /// A posição em [`nomeados`](Caminhos::nomeados) do caminho de id `id`.
     pub fn indice_do_nomeado(&self, id: u64) -> Option<usize> {
         self.nomeados.iter().position(|c| c.id == id)
     }
@@ -685,6 +760,8 @@ impl Caminhos {
 /// mesma cobertura, então a borda é a mesma em qualquer zoom.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MascaraVetorial {
+    /// O caminho que recorta: dentro revela a camada, fora esconde (pelas
+    /// operações dos componentes e pela regra de preenchimento).
     pub caminho: Caminho,
     /// Desligada (⇧ + clique na miniatura), a camada aparece inteira e o
     /// caminho continua lá.
@@ -789,6 +866,8 @@ impl MascaraVetorial {
         .limitado(largura, altura)
     }
 
+    /// A máscara deste caminho, ativa e vinculada, com densidade 100%, sem
+    /// difusão e revelando tudo enquanto não houver área.
     pub fn nova(caminho: Caminho) -> Self {
         Self {
             caminho,

@@ -34,6 +34,48 @@
 //! Não abre dispositivo, não pede privilégio, não grava arquivo. Quem faz isso
 //! é o `infrastructure` (`recuperacao.rs`). Aqui a entrada é um `Read + Seek`,
 //! e é o que permite testar com um `Cursor` de bytes montado no teste.
+//!
+//! # Exemplo
+//!
+//! Um "cartão" de 8 KiB em memória, com lixo, um JPEG no setor 2 e zeros
+//! depois — a varredura acha a foto e a copia inteira, nem um byte a mais:
+//!
+//! ```rust
+//! use std::io::Cursor;
+//! use recuperacao_core::{copiar, varrer, Formato, Leitor};
+//!
+//! // Um JPEG mínimo com a estrutura que a medida confere: SOI, DQT, SOF0,
+//! // SOS, dados comprimidos e EOI — com mais de 1 KiB, para não passar por
+//! // miniatura solta.
+//! let mut jpeg = vec![0xFF, 0xD8];
+//! jpeg.extend([0xFF, 0xDB, 0x00, 0x43]);
+//! jpeg.extend([1u8; 65]);
+//! jpeg.extend([0xFF, 0xC0, 0x00, 0x0B, 8, 0, 16, 0, 16, 1, 1, 0x11, 0]);
+//! jpeg.extend([0xFF, 0xDA, 0x00, 0x08, 1, 1, 0, 0, 63, 0]);
+//! jpeg.extend([0x55u8; 2000]);
+//! jpeg.extend([0xFF, 0xD9]);
+//!
+//! let mut cartao = vec![0xA5u8; 1024];
+//! cartao.extend(&jpeg);
+//! cartao.resize(8192, 0);
+//!
+//! let total = cartao.len() as u64;
+//! let mut leitor = Leitor::novo(Cursor::new(cartao), Some(total));
+//! let mut copias = Vec::new();
+//! let resumo = varrer(&mut leitor, &|| false, &mut |_| {}, &mut |leitor, achado| {
+//!     assert_eq!((achado.inicio, achado.formato), (1024, Formato::Jpeg));
+//!     let mut destino = Vec::new();
+//!     copiar(leitor, achado, &mut destino)?;
+//!     copias.push(destino);
+//!     Ok(())
+//! })
+//! .unwrap();
+//!
+//! assert_eq!(resumo.achadas, 1);
+//! assert_eq!(copias, vec![jpeg]);
+//! ```
+
+#![deny(missing_docs)]
 
 pub mod formatos;
 pub mod leitor;

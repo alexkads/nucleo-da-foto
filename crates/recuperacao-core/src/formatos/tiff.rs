@@ -37,6 +37,13 @@ const EXIF_IFD: u16 = 34665;
 const GPS_IFD: u16 = 34853;
 const DNG_VERSION: u16 = 50706;
 
+/// A assinatura do TIFF e dos RAW que moram nele: `II*\0` ou `MM\0*`, e as
+/// variantes do ORF (`IIRO`, `IIRS`, `MMOR`) e do RW2 (`IIU\0`).
+///
+/// # Pânico
+///
+/// Se `cabeca` tiver menos de 4 bytes — quem chama é
+/// [`assinatura`](super::assinatura), que garante [`CABECA`](super::CABECA).
 pub fn parece(cabeca: &[u8]) -> bool {
     matches!(
         &cabeca[..4],
@@ -156,6 +163,21 @@ impl<R: Read + Seek> Leitura<'_, R> {
     }
 }
 
+/// O tamanho em bytes do TIFF que começa em `inicio` (posição absoluta no
+/// dispositivo), e a marca: o ponto mais distante que os IFDs apontam
+/// (faixas, ladrilhos, prévia JPEG, dados das entradas, SubIFDs, EXIF, GPS).
+/// `None` quando a estrutura não fecha, quando nenhum IFD aponta imagem ou
+/// quando o arquivo daria menos de 4 KiB.
+///
+/// A marca vem da assinatura (CR2, ORF, RW2) ou, nos demais, da `DNGVersion`
+/// e da tag `Make`; sem nenhuma delas, [`Formato::Tiff`].
+///
+/// Não confere o fim contra o tamanho do cartão: use
+/// [`formatos::medir`](super::medir), que confere.
+///
+/// # Erros
+///
+/// O erro de E/S do dispositivo, como veio.
 pub fn medir<R: Read + Seek>(
     leitor: &mut Leitor<R>,
     inicio: u64,

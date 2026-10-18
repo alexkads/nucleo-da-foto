@@ -18,15 +18,21 @@ pub const PERFIL: &str = "sRGB-8";
 /// é. Os pixels vêm do bruto a cada abertura (C28).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BaseRef {
+    /// Largura da base, em pixels, de pé (já com a orientação aplicada).
     pub largura: u32,
+    /// Altura da base, em pixels, de pé.
     pub altura: u32,
     /// O SHA-256 dos pixels RGB da base, precedido das dimensões. É o que a
     /// reabertura confere: pintar sobre outra base desalinharia tudo.
     pub sha256: String,
+    /// O espaço dos pixels — hoje sempre [`PERFIL`] (`"sRGB-8"`).
     pub perfil: String,
 }
 
 impl BaseRef {
+    /// A referência da base que acabou de ser decodificada: dimensões,
+    /// [`impressao_da_base`] e o [`PERFIL`]. Lê todos os pixels uma vez (o
+    /// SHA-256).
     pub fn da_imagem(base: &image::RgbImage) -> Self {
         Self {
             largura: base.width(),
@@ -69,6 +75,8 @@ pub struct Mascara {
     pub fundo: u8,
     /// Desligada (⇧ + clique na miniatura), a camada aparece inteira.
     pub ativa: bool,
+    /// O que foi pintado na máscara, em RGBA sobre o `fundo` (ver
+    /// [`Mascara::valor_do_pixel`]); do tamanho da camada.
     pub pixels: CamadaDePixels,
     /// A corrente entre a miniatura da camada e a da máscara (ligada ao
     /// nascer): o Mover, o ⌘T e o Deformar levam as duas juntas.
@@ -93,6 +101,8 @@ impl PartialEq for Mascara {
 }
 
 impl Mascara {
+    /// Uma máscara sem nada pintado, de `largura × altura` pixels, que vale
+    /// `fundo` em toda parte. Nasce como em [`Mascara::com_pixels`].
     pub fn nova(fundo: u8, largura: u32, altura: u32) -> Self {
         Self::com_pixels(fundo, CamadaDePixels::nova(largura, altura))
     }
@@ -215,14 +225,23 @@ pub enum MascaraNoTile<'a> {
     Produto(Box<MascaraNoTile<'a>>, Result<&'a [u8], u8>),
     /// O tile inteiro vale o mesmo (já com a densidade).
     Constante(u8),
+    /// O tile pintado da máscara, lido pixel a pixel, sem difusão.
     Pixels {
+        /// Os bytes RGBA do tile ([`BYTES_DO_TILE`](crate::tiles::BYTES_DO_TILE)).
         tile: &'a [u8],
+        /// O [`Mascara::fundo`], para os pixels de alfa parcial ou zero.
         fundo: u8,
+        /// A [`Mascara::tabela_da_densidade`], aplicada ao valor lido.
         tabela: [u8; 256],
     },
+    /// A máscara com difusão: lida do mapa desfocado da máscara inteira.
     Difusa {
+        /// O mapa desfocado, em pixels da foto.
         mapa: &'a MapaDifuso,
+        /// O canto de cima à esquerda do tile, em pixels da foto (com sinal:
+        /// o tile pode estar fora dela).
         origem: (i64, i64),
+        /// A [`Mascara::tabela_da_densidade`], aplicada ao valor do mapa.
         tabela: [u8; 256],
     },
 }
@@ -281,6 +300,9 @@ pub struct LeitorDasMascaras<'a> {
 }
 
 impl LeitorDasMascaras<'_> {
+    /// O valor das duas máscaras juntas no tile `posicao`, já multiplicadas.
+    /// Sem nenhuma, [`MascaraNoTile::Constante`]`(255)` (revela tudo); quando
+    /// um lado é constante, a conta se simplifica aqui e não pixel a pixel.
     pub fn no_tile(&self, posicao: crate::tiles::Posicao) -> MascaraNoTile<'_> {
         let r = self.raster.as_ref().map(|l| l.no_tile(posicao));
         let v = self.vetor.as_ref().map(|s| s.do_tile(posicao));
@@ -310,6 +332,8 @@ pub struct LeitorDaMascara<'a> {
 }
 
 impl LeitorDaMascara<'_> {
+    /// O valor da máscara no tile `posicao`: o mapa desfocado, com difusão; o
+    /// tile pintado, se existir; senão o fundo, constante (já com a densidade).
     pub fn no_tile(&self, posicao: crate::tiles::Posicao) -> MascaraNoTile<'_> {
         if let Some(mapa) = &self.mapa {
             return MascaraNoTile::Difusa {
@@ -329,14 +353,22 @@ impl LeitorDaMascara<'_> {
     }
 }
 
+/// Uma camada do documento: pixels (ou um ajuste), as máscaras e as
+/// propriedades do painel Camadas.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Camada {
+    /// O nome no painel Camadas. Não precisa ser único.
     pub nome: String,
+    /// O olho do painel: escondida, a camada não entra na composição.
     pub visivel: bool,
-    /// `0..=1`.
+    /// `0..=1`, onde 1 é opaca (o padrão).
     pub opacidade: f32,
+    /// O modo de mesclagem com o que está embaixo (Normal ao nascer).
     pub modo: Modo,
+    /// Os pixels RGBA da camada, em tiles, do tamanho da base — e os de fora
+    /// dela que o Mover ou o ⌘T levaram para lá. Vazios numa camada de ajuste.
     pub pixels: CamadaDePixels,
+    /// A máscara de pixels, se a camada tiver uma.
     pub mascara: Option<Mascara>,
     /// Uma camada de ajuste: sem pixels, muda a cor do que está abaixo
     /// (`ajuste.rs`). O pincel pinta na máscara dela.
@@ -362,9 +394,15 @@ pub struct Camada {
 pub enum Retoque {
     /// A baixa frequência (cor e tom), base da máscara de corte; `raio` é o
     /// σ do desfoque que a gerou, em pixels da foto.
-    Baixa { raio: f32 },
+    Baixa {
+        /// O σ do desfoque, em pixels da foto.
+        raio: f32,
+    },
     /// A alta frequência (textura), recortada na baixa, em Luz Linear.
-    Alta { raio: f32 },
+    Alta {
+        /// O σ do desfoque da baixa que a acompanha, em pixels da foto.
+        raio: f32,
+    },
     /// Dodge & Burn: a Curva que clareia, em Luminosidade, máscara preta.
     Clarear,
     /// Dodge & Burn: a Curva que escurece.
@@ -372,6 +410,7 @@ pub enum Retoque {
 }
 
 impl Retoque {
+    /// O nome do papel, como a camada nasce no painel Camadas.
     pub fn nome(self) -> &'static str {
         match self {
             Retoque::Baixa { .. } => "Baixa frequência",
@@ -414,10 +453,13 @@ impl Bloqueio {
         posicao: true,
     };
 
+    /// Os três cadeados ligados ([`Bloqueio::TUDO`]).
     pub fn tudo(&self) -> bool {
         *self == Self::TUDO
     }
 
+    /// Pelo menos um cadeado ligado — o que acende o cadeado na camada (e o
+    /// que decide se `bloqueio` vai para o manifesto).
     pub fn algum(&self) -> bool {
         self.transparencia || self.pixels || self.posicao
     }
@@ -482,6 +524,8 @@ impl Camada {
         }
     }
 
+    /// A versão mutável de [`Camada::alvo`]. Sem máscara, `na_mascara` é
+    /// ignorado e devolve os pixels da camada.
     pub fn alvo_mut(&mut self, na_mascara: bool) -> &mut CamadaDePixels {
         match (&mut self.mascara, na_mascara) {
             (Some(m), true) => &mut m.pixels,
@@ -557,12 +601,28 @@ pub const NOME_DA_FOTOGRAFIA: &str = "Fotografia";
 /// coluna `posicao`; senão, horizontal, na linha `posicao`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Guia {
+    /// `true` = linha vertical (uma coluna); `false` = horizontal (uma linha).
     pub vertical: bool,
+    /// A coluna (vertical) ou a linha (horizontal) da guia, em pixels da foto;
+    /// fracionária, porque o arrasto na tela ampliada cai entre pixels.
     pub posicao: f32,
 }
 
+/// O que se edita: a base de que partiu (só a referência), as camadas por cima,
+/// as guias e os caminhos. Tem sempre o tamanho da base.
+///
+/// ```rust
+/// use editor_core::{BaseRef, Documento};
+///
+/// let foto = image::RgbImage::new(640, 480);
+/// let doc = Documento::novo(BaseRef::da_imagem(&foto));
+/// assert_eq!((doc.largura(), doc.altura()), (640, 480));
+/// assert_eq!(doc.camadas.len(), 1); // a "Pintura", transparente
+/// assert!(doc.neutro()); // nada pintado: nenhuma versão a publicar (C30)
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Documento {
+    /// A base neutra de que partiu; as dimensões do documento são as dela.
     pub base: BaseRef,
     /// De baixo para cima — a de índice 0 fica logo acima da base.
     pub camadas: Vec<Camada>,
@@ -585,6 +645,7 @@ impl Documento {
         }
     }
 
+    /// Largura do documento, em pixels da foto (a da base).
     pub fn largura(&self) -> u32 {
         self.base.largura
     }
@@ -661,6 +722,7 @@ impl Documento {
         }
     }
 
+    /// Altura do documento, em pixels da foto (a da base).
     pub fn altura(&self) -> u32 {
         self.base.altura
     }

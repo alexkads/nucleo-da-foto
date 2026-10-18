@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 /// A versão da imagem editada que a Revelação deve usar como entrada.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersaoEditada {
+    /// O id da edição no catálogo, que quem grava passa a
+    /// [`Projeto::salvar`](crate::projeto::Projeto::salvar). Não fica no
+    /// manifesto: é o catálogo que o conhece.
     pub edicao_id: String,
     /// Monotônica e nunca reusada (C33). `0` não existe: é "o bruto".
     pub revisao: u64,
@@ -18,8 +21,9 @@ pub struct VersaoEditada {
     pub arquivo: PathBuf,
     /// Do arquivo.
     pub sha256: String,
-    /// Iguais às da base (C31).
+    /// Largura da imagem editada, em pixels; igual à da base (C31).
     pub largura: u32,
+    /// Altura da imagem editada, em pixels; igual à da base (C31).
     pub altura: u32,
     /// A impressão da base neutra de que partiu.
     pub base_sha256: String,

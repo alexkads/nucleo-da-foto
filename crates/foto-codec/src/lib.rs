@@ -16,6 +16,30 @@
 //!
 //! O `revelacao_core::jpeg` continua existindo e apontando para cá: quem já
 //! chamava, chama igual.
+//!
+//! # Exemplo
+//!
+//! A ida e volta que todo destino faz — bytes do arquivo em pixels, pixels em
+//! JPEG:
+//!
+//! ```rust
+//! use image::{DynamicImage, ImageFormat, RgbImage};
+//!
+//! // Um PNG 4×3 feito na hora, no lugar do arquivo que viria do disco.
+//! let mut png = Vec::new();
+//! DynamicImage::ImageRgb8(RgbImage::new(4, 3))
+//!     .write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+//!     .unwrap();
+//!
+//! let foto = foto_codec::decodificar(&png).unwrap();
+//! let jpeg = foto_codec::codificar(&foto, 90).unwrap();
+//! assert_eq!(&jpeg[..2], &[0xFF, 0xD8]); // SOI: é JPEG
+//!
+//! let de_volta = foto_codec::decodificar(&jpeg).unwrap();
+//! assert_eq!((de_volta.width(), de_volta.height()), (4, 3));
+//! ```
+
+#![deny(missing_docs)]
 
 pub mod espaco_de_cor;
 pub mod orientacao;
@@ -43,6 +67,15 @@ const DPI: u16 = 300;
 /// 🔑 **O WebP está aqui porque o acervo passou a guardá-lo** (2026-09-12): é
 /// 38% menor que o JPEG na mesma foto, e o que o cliente leva ao laboratório
 /// continua sendo JPEG, convertido no navegador dele por este crate.
+///
+/// Devolve os pixels **como estão no arquivo**: sem a orientação do EXIF e
+/// sem converter o espaço de cor. Para abrir a foto como o fotógrafo a viu,
+/// use [`orientacao::decodificar_de_pe`].
+///
+/// # Erros
+///
+/// [`ImageError`] se o formato não for reconhecido ou os bytes estiverem
+/// corrompidos.
 pub fn decodificar(bytes: &[u8]) -> Result<DynamicImage, ImageError> {
     image::load_from_memory(bytes)
 }
@@ -51,8 +84,14 @@ pub fn decodificar(bytes: &[u8]) -> Result<DynamicImage, ImageError> {
 ///
 /// O canal alfa é descartado: JPEG não o tem, e a revelação nunca o altera.
 ///
-/// Sai com `DPI` no cabeçalho — ver a nota lá sobre o que isso muda no
-/// laboratório.
+/// Sai com 300 DPI no cabeçalho JFIF: sem isso, boa parte dos programas de
+/// laboratório lê 72 DPI e a foto abre quatro vezes maior que o tamanho de
+/// impressão.
+///
+/// # Erros
+///
+/// [`ImageError`] se o codificador recusar a imagem — na prática, um lado
+/// maior que os 65 535 px que o JPEG admite.
 pub fn codificar(imagem: &DynamicImage, qualidade: u8) -> Result<Vec<u8>, ImageError> {
     let rgb = imagem.to_rgb8();
     let mut bytes = Vec::new();

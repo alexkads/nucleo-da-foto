@@ -10,11 +10,10 @@ com um app, o que é mudança que quebra e como lançá-la sem derrubar nenhum d
 ## Comandos
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo check --target wasm32-unknown-unknown -p conversao-web -p fotolivro-web -p raw-web -p revelacao-web -p tela-do-cliente-web
-cargo semver-checks --workspace --baseline-rev <tag anterior>
+make verificar   # o portão: fmt, clippy nativo e wasm32, testes e doc-tests, doc -D warnings, cargo deny
+make cobertura   # cobertura por arquivo, com piso de 90 % (sem o vendor)
+make semver      # cada crate contra a última tag — 🚨 não use --workspace: ele pula os crates
+                 # publish = false (todos) e sai verde sem conferir nada
 ```
 
 🚨 Tag publicada nunca se move nem se apaga: os balcões do RecordarFotos compilam o VintageLightbox do

@@ -52,6 +52,30 @@ use crate::perspectiva::{Orientacao, Perspectiva};
 /// `CropSettings::new` faz no `domain` — inclusive o mínimo de 1% de lado e os
 /// 45° de ângulo. Dois clamps diferentes dariam dois enquadramentos para o mesmo
 /// registro.
+///
+/// ```rust
+/// use image::{DynamicImage, Rgba, RgbaImage};
+/// use revelacao_core::{transformacao, Corte};
+///
+/// // Uma foto 4×2 em que o vermelho do pixel é `60·x`.
+/// let foto = DynamicImage::ImageRgba8(RgbaImage::from_fn(4, 2, |x, _| {
+///     Rgba([x as u8 * 60, 0, 0, 255])
+/// }));
+///
+/// // A metade direita: x = 0,5 e largura 0,5, sem giro, ângulo nem espelho.
+/// let corte = Corte::novo(0.5, 0.0, 0.5, 1.0, 0, 0.0, false, false);
+/// assert_eq!(corte.dimensoes_de_saida(4, 2), (2, 2));
+/// let recortada = transformacao::aplicar(&foto, &corte, true);
+/// assert_eq!((recortada.width(), recortada.height()), (2, 2));
+/// assert_eq!(recortada.to_rgba8().get_pixel(0, 0)[0], 120); // era o x = 2
+///
+/// // Um quarto de volta troca os lados — o retângulo mora no espaço girado.
+/// let girado = Corte::novo(0.0, 0.0, 1.0, 1.0, 1, 0.0, false, false);
+/// assert_eq!(girado.dimensoes_de_saida(4, 2), (2, 4));
+///
+/// // Fora da faixa é limitado na construção: o ângulo para em 45°.
+/// assert_eq!(Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 90.0, false, false).angulo(), 45.0);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Corte {
     x: f32,
@@ -107,6 +131,8 @@ impl Corte {
         self
     }
 
+    /// A perspectiva guiada deste corte — [`Perspectiva::default`] quando não
+    /// há nenhuma.
     pub fn perspectiva(&self) -> &Perspectiva {
         &self.perspectiva
     }
@@ -117,6 +143,8 @@ impl Corte {
         !self.perspectiva.e_identidade()
     }
 
+    /// O giro de 90° e os espelhos, juntos — o que a perspectiva precisa para
+    /// passar da foto de pé ao espaço orientado.
     pub fn orientacao(&self) -> Orientacao {
         Orientacao {
             giro_90: self.giro_90,
@@ -130,27 +158,38 @@ impl Corte {
         Self::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, false, false)
     }
 
+    /// A borda esquerda do recorte, em fração `0..1` da largura **girada**.
     pub fn x(&self) -> f32 {
         self.x
     }
+    /// A borda de cima do recorte, em fração `0..1` da altura girada (o `y`
+    /// cresce para baixo).
     pub fn y(&self) -> f32 {
         self.y
     }
+    /// A largura do recorte, em fração da largura girada: de 1 % até `1 − x`.
     pub fn largura(&self) -> f32 {
         self.largura
     }
+    /// A altura do recorte, em fração da altura girada: de 1 % até `1 − y`.
     pub fn altura(&self) -> f32 {
         self.altura
     }
+    /// Quantos quartos de volta no sentido horário, de −1 a 3 (−1 é o mesmo
+    /// que 3).
     pub fn giro_90(&self) -> i32 {
         self.giro_90
     }
+    /// O endireitamento fino, em graus, de −45 a +45 — o `Ângulo` do Corte do
+    /// Lightroom.
     pub fn angulo(&self) -> f32 {
         self.angulo
     }
+    /// Espelho horizontal (troca esquerda e direita), aplicado antes do giro.
     pub fn espelho_h(&self) -> bool {
         self.espelho_h
     }
+    /// Espelho vertical (troca cima e baixo), aplicado antes do giro.
     pub fn espelho_v(&self) -> bool {
         self.espelho_v
     }
@@ -478,6 +517,7 @@ fn compor(depois: Afim, antes: Afim) -> Afim {
 pub struct Quadro {
     /// O tamanho do arquivo que sai, em pixels — [`Corte::dimensoes_de_saida`].
     pub largura: f32,
+    /// A altura do arquivo que sai, em pixels.
     pub altura: f32,
     /// `X = m[0]·x + m[1]·y + m[2]` e `Y = m[3]·x + m[4]·y + m[5]`: do pixel da
     /// foto revelada ao pixel do arquivo…

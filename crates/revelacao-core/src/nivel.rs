@@ -96,8 +96,10 @@ pub struct Reta {
     pub vertical: bool,
     /// Quantos pixels de borda caem nela, na escala de origem.
     pub comprimento: f32,
-    /// As pontas, em pixels da imagem de origem.
+    /// Uma ponta, `(x, y)` em pixels da imagem de origem (o `y` cresce para
+    /// baixo).
     pub de: (f32, f32),
+    /// A outra ponta, no mesmo espaço de [`Reta::de`].
     pub ate: (f32, f32),
 }
 

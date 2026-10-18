@@ -25,13 +25,18 @@ use crate::tiles::{indice, origem_do_tile, CamadaDePixels, LADO_DO_TILE};
 /// conteúdo levado para fora, etapa 14), por isso com sinal.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Caixa {
+    /// Coluna do canto esquerdo, em pixels da foto; negativa à esquerda dela.
     pub x: i32,
+    /// Linha do canto de cima, em pixels da foto; negativa acima dela.
     pub y: i32,
+    /// Largura em pixels.
     pub largura: u32,
+    /// Altura em pixels.
     pub altura: u32,
 }
 
 impl Caixa {
+    /// A caixa com canto em `(x, y)` e esse tamanho, sem limitar à foto.
     pub fn nova(x: i32, y: i32, largura: u32, altura: u32) -> Self {
         Self {
             x,
@@ -41,14 +46,17 @@ impl Caixa {
         }
     }
 
+    /// A primeira coluna **fora** da caixa, à direita (`x + largura`).
     pub fn direita(&self) -> i32 {
         self.x + self.largura as i32
     }
 
+    /// A primeira linha **fora** da caixa, embaixo (`y + altura`).
     pub fn baixo(&self) -> i32 {
         self.y + self.altura as i32
     }
 
+    /// Não cobre pixel nenhum (largura ou altura zero).
     pub fn vazia(&self) -> bool {
         self.largura == 0 || self.altura == 0
     }
@@ -76,6 +84,8 @@ const MARGEM_FORA_DA_FOTO: f32 = 1.0;
 /// O conteúdo tirado da camada: RGBA de alfa reto, do tamanho da caixa.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Conteudo {
+    /// Onde o conteúdo estava na foto (antes de transformar) e o tamanho dos
+    /// pixels guardados.
     pub caixa: Caixa,
     rgba: Vec<u8>,
 }
@@ -210,9 +220,13 @@ impl Conteudo {
 /// Escala, giro e deslocamento em volta do centro da caixa.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transformacao {
+    /// Deslocamento horizontal do centro, em pixels da foto (para a direita).
     pub dx: f32,
+    /// Deslocamento vertical do centro, em pixels da foto (para baixo).
     pub dy: f32,
+    /// Escala horizontal, antes do giro: 1 = o tamanho original (o padrão).
     pub escala_x: f32,
+    /// Escala vertical, antes do giro: 1 = o tamanho original (o padrão).
     pub escala_y: f32,
     /// Em radianos, no sentido do relógio na tela (y para baixo).
     pub angulo: f32,
@@ -231,6 +245,8 @@ impl Default for Transformacao {
 }
 
 impl Transformacao {
+    /// Só andar `(dx, dy)` pixels da foto — o Mover. Com `dx` e `dy` inteiros
+    /// o conteúdo não borra.
     pub fn deslocamento(dx: f32, dy: f32) -> Self {
         Self {
             dx,

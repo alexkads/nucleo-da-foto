@@ -160,6 +160,7 @@ const BYTES: usize = (LADO_DO_TILE * LADO_DO_TILE) as usize;
 /// Uma forma desenhada, em pixels da foto.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Forma {
+    /// O retângulo, de borda exata em pixels inteiros (nunca antisserrilhado).
     Retangulo(Retangulo),
     /// A elipse inscrita no retângulo.
     Elipse(Retangulo),
@@ -202,9 +203,19 @@ pub enum Estilo {
     #[default]
     Normal,
     /// A razão largura:altura fica presa; o arrasto decide o tamanho.
-    Proporcao { largura: f32, altura: f32 },
+    Proporcao {
+        /// O termo da largura na razão (só a razão conta: `3:2` = `1,5:1`).
+        largura: f32,
+        /// O termo da altura na razão.
+        altura: f32,
+    },
     /// Largura e altura exatas; o arrasto só leva a caixa.
-    Tamanho { largura: u32, altura: u32 },
+    Tamanho {
+        /// A largura da caixa, em pixels do documento.
+        largura: u32,
+        /// A altura da caixa, em pixels do documento.
+        altura: u32,
+    },
 }
 
 impl Estilo {
@@ -389,6 +400,12 @@ impl Amostra {
         }
     }
 
+    /// O pixel em `(x, y)` do documento, `[r, g, b, a]` com a cor
+    /// pré-multiplicada.
+    ///
+    /// # Panics
+    ///
+    /// Fora de `largura × altura` (quem chama já limitou à foto).
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         self.pixels[y as usize * self.largura as usize + x as usize]
     }
@@ -397,6 +414,7 @@ impl Amostra {
 /// Como uma forma nova entra na seleção que já existe.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Operacao {
+    /// Sem modificador — a forma substitui a seleção. O padrão.
     #[default]
     Nova,
     /// ⇧ — soma à seleção.
@@ -433,6 +451,9 @@ pub struct Molde {
 }
 
 impl Molde {
+    /// Tira o molde da seleção no começo do arrasto: a máscara densa da
+    /// [`caixa_justa`](Selecao::caixa_justa) dela. Uma seleção vazia dá um molde
+    /// vazio, e todo [`transformado`](Molde::transformado) dele é vazio.
     pub fn de(selecao: &Selecao) -> Self {
         let regiao = selecao.caixa_justa();
         Self {
@@ -523,6 +544,14 @@ impl Molde {
     }
 }
 
+/// A seleção da foto: um valor de 0 (fora) a 255 (dentro) por pixel, nas
+/// dimensões da foto, com os valores do meio na borda antisserrilhada e na
+/// difusão. Quem pinta multiplica o efeito por `valor / 255`.
+///
+/// Esparsa em tiles de [`LADO_DO_TILE`] com um valor padrão para os que não
+/// existem (veja o módulo); clonar é barato (os tiles são `Arc`). Fora da foto
+/// o [`valor`](Selecao::valor) é sempre 0. Mora na
+/// [`Sessao`](crate::Sessao) e no histórico, nunca no projeto.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Selecao {
     largura: u32,
@@ -916,10 +945,12 @@ impl Selecao {
         self.tiles.retain(|_, t| t.iter().any(|v| *v != padrao));
     }
 
+    /// A largura da foto a que a seleção pertence, em pixels.
     pub fn largura(&self) -> u32 {
         self.largura
     }
 
+    /// A altura da foto a que a seleção pertence, em pixels.
     pub fn altura(&self) -> u32 {
         self.altura
     }

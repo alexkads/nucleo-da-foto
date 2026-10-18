@@ -29,12 +29,42 @@ use image::{DynamicImage, ImageDecoder, ImageReader, ImageResult};
 
 use crate::espaco_de_cor::{self, EspacoDeCor};
 
-/// Decodifica bytes de imagem já com a orientação aplicada.
+/// Decodifica bytes de imagem já **de pé e em sRGB**: a orientação do EXIF
+/// aplicada aos pixels e o espaço de cor declarado (ver
+/// [`espaco_de_cor`]) convertido.
+///
+/// É a porta de quem decodifica sem o navegador: os wasm do site e o desktop.
+/// Etiqueta ilegível não recusa a foto — sem orientação que se leia, ela sai
+/// como veio.
+///
+/// ```rust
+/// use image::{DynamicImage, ImageFormat, RgbImage};
+///
+/// // Um JPEG sem EXIF: sai como entrou, 6×4.
+/// let mut jpeg = Vec::new();
+/// DynamicImage::ImageRgb8(RgbImage::new(6, 4))
+///     .write_to(&mut std::io::Cursor::new(&mut jpeg), ImageFormat::Jpeg)
+///     .unwrap();
+///
+/// let foto = foto_codec::orientacao::decodificar_de_pe(&jpeg).unwrap();
+/// assert_eq!((foto.width(), foto.height()), (6, 4));
+/// ```
+///
+/// # Erros
+///
+/// [`image::ImageError`] se o formato não for reconhecido ou os pixels não
+/// decodificarem.
 pub fn decodificar_de_pe(bytes: &[u8]) -> ImageResult<DynamicImage> {
     de_pe(ImageReader::new(Cursor::new(bytes)).with_guessed_format()?)
 }
 
-/// Abre um arquivo de imagem já com a orientação aplicada.
+/// Abre um arquivo do disco já de pé e em sRGB — o mesmo que
+/// [`decodificar_de_pe`], lendo do caminho. O arquivo não é tocado.
+///
+/// # Erros
+///
+/// [`image::ImageError`] se o arquivo não abrir (inclusive erro de E/S) ou
+/// não decodificar.
 pub fn abrir_de_pe(caminho: impl AsRef<Path>) -> ImageResult<DynamicImage> {
     de_pe(ImageReader::open(caminho)?.with_guessed_format()?)
 }

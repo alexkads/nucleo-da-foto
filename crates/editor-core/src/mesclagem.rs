@@ -15,28 +15,61 @@
 
 use serde::{Deserialize, Serialize};
 
+/// O modo de mesclagem de uma camada: o `B(baixo, cima)` da conta do topo do
+/// módulo. Nas fórmulas abaixo `b` é o canal de baixo e `c` o de cima, ambos em
+/// `0..=1`; os separáveis valem canal a canal, os quatro últimos (Matiz,
+/// Saturação, Cor, Luminosidade) trabalham com a cor inteira, pela luminância
+/// `0,3·R + 0,59·G + 0,11·B` do W3C.
+///
+/// No manifesto e no roteiro vai pela [`chave`](Modo::chave) em `snake_case`
+/// (`"luz_suave"`); o padrão é o [`Normal`](Modo::Normal), e projeto sem o
+/// campo abre em Normal.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Modo {
+    /// *Normal*: `c` — a de cima tapa a de baixo na proporção do alfa. O padrão.
     #[default]
     Normal,
+    /// *Darken*: `min(b, c)`, canal a canal.
     Escurecer,
+    /// *Multiply*: `b·c`. Branco não muda nada; sempre escurece.
     Multiplicacao,
+    /// *Color Burn*: `1 − min(1, (1 − b)/c)` (branco embaixo fica branco, `c = 0`
+    /// dá preto). Escurece aumentando o contraste.
     SuperexposicaoDeCores,
+    /// *Lighten*: `max(b, c)`, canal a canal.
     Clarear,
+    /// *Screen*: `b + c − b·c`. Preto não muda nada; sempre clareia.
     Tela,
+    /// *Color Dodge*: `min(1, b/(1 − c))` (preto embaixo fica preto, `c = 1` dá
+    /// branco). Clareia diminuindo o contraste.
     SubexposicaoDeCores,
+    /// *Overlay*: a Luz Direta com os papéis trocados — `2·b·c` onde `b ≤ 0,5`,
+    /// tela de `b` com `2c − 1` onde é mais claro. Cinza 50% é neutro.
     Sobrepor,
+    /// *Soft Light*, na fórmula do W3C: escurece de leve onde `c ≤ 0,5`
+    /// (`b − (1 − 2c)·b·(1 − b)`) e clareia de leve acima, rumo a `√b`.
     LuzSuave,
+    /// *Hard Light*: multiplicação dobrada (`2·b·c`) onde `c ≤ 0,5`, tela com
+    /// `2c − 1` acima.
     LuzDireta,
     /// *Linear Light*: `b + 2c − 1` — a recomposição da separação de
     /// frequências (`frequencias.rs`). Não é a Luz Direta (*Hard Light*).
     LuzLinear,
+    /// *Difference*: `|b − c|`. Preto não muda nada; branco inverte.
     Diferenca,
+    /// *Exclusion*: `b + c − 2·b·c` — a Diferença com menos contraste.
     Exclusao,
+    /// *Hue*: o matiz da de cima com a saturação e a luminância da de baixo.
     Matiz,
+    /// *Saturation*: a saturação da de cima com o matiz e a luminância da de
+    /// baixo. Camada cinza tira a cor da foto.
     Saturacao,
+    /// *Color*: matiz e saturação da de cima, luminância da de baixo — o de
+    /// colorir foto em preto e branco.
     Cor,
+    /// *Luminosity*: a luminância da de cima com a cor (matiz e saturação) da de
+    /// baixo. O inverso da [`Cor`](Modo::Cor).
     Luminosidade,
 }
 
@@ -108,11 +141,28 @@ impl Modo {
         }
     }
 
+    /// O caminho de volta da [`chave`](Modo::chave): `None` se a chave não é de
+    /// nenhum modo (manifesto de versão futura, roteiro com erro de digitação).
     pub fn da_chave(chave: &str) -> Option<Modo> {
         Modo::TODOS.into_iter().find(|m| m.chave() == chave)
     }
 
-    /// `B(baixo, cima)`, com os canais em `0..=1`.
+    /// `B(baixo, cima)`, com os canais em `0..=1`. Só a fórmula do modo, sem
+    /// alfa nem opacidade: quem pondera é [`mesclar`] ou [`mesclar_em_camada`].
+    ///
+    /// 🚨 Não corta o resultado — a [`LuzLinear`](Modo::LuzLinear) sai de
+    /// `0..=1`, e quem chama corta.
+    ///
+    /// ```rust
+    /// use editor_core::Modo;
+    ///
+    /// let b = [0.5, 0.25, 0.0];
+    /// // Multiplicação por branco e Tela com preto devolvem o de baixo.
+    /// assert_eq!(Modo::Multiplicacao.misturar(b, [1.0; 3]), b);
+    /// assert_eq!(Modo::Tela.misturar(b, [0.0; 3]), b);
+    /// // Diferença com branco inverte.
+    /// assert_eq!(Modo::Diferenca.misturar(b, [1.0; 3]), [0.5, 0.75, 1.0]);
+    /// ```
     pub fn misturar(self, b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
         let canal = |f: fn(f32, f32) -> f32| [f(b[0], c[0]), f(b[1], c[1]), f(b[2], c[2])];
         match self {
@@ -221,7 +271,28 @@ fn com_sat(c: [f32; 3], s: f32) -> [f32; 3] {
     c.map(|v| (v - menor) * s / (maior - menor))
 }
 
-/// Um pixel da camada sobre um pixel de baixo, no modo da camada.
+/// Um pixel da camada sobre um pixel de baixo, no modo da camada — a conta do
+/// topo do módulo, a que a composição faz em cada pixel.
+///
+/// `baixo` é o já composto (opaco, RGB8); `cima` é o pixel da camada, RGBA8 com
+/// o alfa não pré-multiplicado; `opacidade` é a da camada, em `0..=1` (acima de
+/// 1 conta como 1). O resultado é arredondado e cortado em `0..=255`.
+///
+/// 🔑 Alfa 0 ou opacidade `≤ 0` devolvem `baixo` exato, em qualquer modo; e o
+/// Normal não passa por `0..=1`, para compor bit a bit igual ao projeto antigo.
+///
+/// ```rust
+/// use editor_core::Modo;
+/// use editor_core::mesclagem::mesclar;
+///
+/// let baixo = [200, 100, 30];
+/// // Normal a 50%: metade do caminho até a cor de cima.
+/// assert_eq!(mesclar(baixo, [0, 0, 0, 255], 0.5, Modo::Normal), [100, 50, 15]);
+/// // Multiplicação: 200·60/255 ≈ 47, 100·180/255 ≈ 71, 30·240/255 ≈ 28.
+/// assert_eq!(mesclar(baixo, [60, 180, 240, 255], 1.0, Modo::Multiplicacao), [47, 71, 28]);
+/// // Transparente não mexe em nada.
+/// assert_eq!(mesclar(baixo, [9, 9, 9, 0], 1.0, Modo::Diferenca), baixo);
+/// ```
 #[inline]
 pub fn mesclar(baixo: [u8; 3], cima: [u8; 4], opacidade: f32, modo: Modo) -> [u8; 3] {
     if cima[3] == 0 || opacidade <= 0.0 {

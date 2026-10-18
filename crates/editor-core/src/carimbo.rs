@@ -38,12 +38,16 @@ pub enum AmostraDoCarimbo {
 }
 
 impl AmostraDoCarimbo {
+    /// As três, na ordem do menu "Amostra" do Photoshop — para a tela montar a
+    /// lista sem repetir o enum.
     pub const TODAS: [AmostraDoCarimbo; 3] = [
         AmostraDoCarimbo::CamadaAtual,
         AmostraDoCarimbo::AtualEAbaixo,
         AmostraDoCarimbo::Todas,
     ];
 
+    /// A chave estável e curta (`"atual"`, `"abaixo"`, `"todas"`), para o
+    /// roteiro e as preferências da tela. Não muda com o nome exibido.
     pub fn chave(self) -> &'static str {
         match self {
             AmostraDoCarimbo::CamadaAtual => "atual",
@@ -52,6 +56,7 @@ impl AmostraDoCarimbo {
         }
     }
 
+    /// O nome em português que a barra do carimbo mostra.
     pub fn nome(self) -> &'static str {
         match self {
             AmostraDoCarimbo::CamadaAtual => "Camada atual",
@@ -61,6 +66,14 @@ impl AmostraDoCarimbo {
     }
 }
 
+/// A fonte de um traço do carimbo (e da recuperação e do tratamento de pele):
+/// o instantâneo do documento no começo do traço, composto por tile sob
+/// demanda, com o deslocamento entre onde se pinta e de onde se copia.
+///
+/// Quem cria é a [`Sessao`](crate::Sessao) quando o ponteiro desce, e quem lê é
+/// o traço do [`Pincel`](crate::Pincel), pixel a pixel. Vive só durante o
+/// traço: os tiles compostos ficam guardados nela, e soltá-la solta o cache.
+/// Todas as coordenadas são pixels inteiros da foto (as da base).
 pub struct Fonte {
     base: Arc<RgbImage>,
     doc: Documento,

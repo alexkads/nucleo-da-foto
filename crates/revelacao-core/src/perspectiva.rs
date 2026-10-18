@@ -89,7 +89,10 @@ const MU_PRESO: f64 = 1e3;
 /// espelho e giro de 90°. A tela troca o rótulo quando o giro é ímpar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Eixo {
+    /// A guia tem de ficar vertical depois da correção (`Δx = 0`) — um batente,
+    /// uma quina de prédio.
     Vertical,
+    /// A guia tem de ficar horizontal (`Δy = 0`) — um rodapé, uma janela.
     Horizontal,
 }
 
@@ -108,8 +111,11 @@ impl Eixo {
 /// conteúdo quando a foto gira ou espelha depois.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Guia {
+    /// Uma ponta, `[x, y]` em `0..1` da foto de pé (o `y` cresce para baixo).
     pub de: [f64; 2],
+    /// A outra ponta, no mesmo espaço. A ordem das pontas não importa.
     pub ate: [f64; 2],
+    /// O eixo em que a reta tem de ficar.
     pub eixo: Eixo,
 }
 
@@ -121,9 +127,18 @@ pub struct Guia {
 /// tela** — como os sliders do Lightroom.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Perspectiva {
+    /// O vetor de rotação da câmera virtual (eixo × ângulo), **em graus**, no
+    /// espaço da foto de pé; neutro `[0, 0, 0]`. [`Perspectiva::nova`] limita a
+    /// norma a [`ROTACAO_MAXIMA`].
     pub rotacao: [f32; 3],
+    /// O foco da lente virtual, em meias diagonais; neutro [`F0`], limitado a
+    /// `F0/3..3·F0`. Sozinho não muda a foto.
     pub foco: f32,
+    /// O ajuste manual vertical, em graus, nos eixos da tela — o `Vertical` da
+    /// Transformação do Lightroom; neutro 0, limitado a ±[`AJUSTE_MAXIMO`].
     pub vertical: f32,
+    /// O ajuste manual horizontal, em graus, nos eixos da tela — o
+    /// `Horizontal` do Lightroom; neutro 0, limitado a ±[`AJUSTE_MAXIMO`].
     pub horizontal: f32,
 }
 
@@ -270,8 +285,13 @@ fn area_do_quadrilatero(q: &[[f64; 2]; 4]) -> f64 {
 /// `espelhar_e_girar`: espelho horizontal, espelho vertical, e depois o giro.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Orientacao {
+    /// Quantos quartos de volta no sentido horário da tela (o `rotate90` do
+    /// `image`); conta em módulo 4, então −1 é o mesmo que 3.
     pub giro_90: i32,
+    /// Espelho horizontal (troca esquerda e direita), aplicado antes do giro.
     pub espelho_h: bool,
+    /// Espelho vertical (troca cima e baixo), depois do horizontal e antes do
+    /// giro.
     pub espelho_v: bool,
 }
 
@@ -315,10 +335,12 @@ pub enum GuiaIgnorada {
 pub enum Resolucao {
     /// Menos de duas guias válidas: a foto fica como está.
     PoucasGuias {
+        /// Quantas guias passaram nas validações (0 ou 1).
         validas: usize,
     },
     /// A solução existe, mas pede uma correção que a foto não aguenta.
     Excessiva,
+    /// A correção encontrada, dentro dos limites.
     Resolvida(Solucao),
 }
 
@@ -327,6 +349,8 @@ pub enum Resolucao {
 pub struct Solucao {
     /// O vetor de rotação, em graus, no espaço da foto de pé.
     pub rotacao: [f64; 3],
+    /// O foco resolvido, em meias diagonais — [`F0`] quando as guias não o
+    /// determinam (menos de duas de cada eixo).
     pub foco: f64,
     /// O maior desvio que sobrou numa guia, em graus. Perto de zero quando as
     /// guias concordam; grande quando se contradizem (retas curvas, por ex.).
@@ -339,6 +363,9 @@ pub struct Solucao {
 }
 
 impl Solucao {
+    /// A [`Perspectiva`] que a foto guarda: esta solução mais o ajuste manual
+    /// (`vertical` e `horizontal`, em graus, nos eixos da tela), passada por
+    /// [`Perspectiva::nova`] — que limita tudo às faixas válidas.
     pub fn perspectiva(&self, vertical: f32, horizontal: f32) -> Perspectiva {
         Perspectiva::nova(
             self.rotacao.map(|v| v as f32),
@@ -352,6 +379,7 @@ impl Solucao {
 /// O resultado inteiro: a solução e o que ficou de fora.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resposta {
+    /// A correção, ou por que não houve.
     pub resolucao: Resolucao,
     /// Uma entrada por guia recebida, na mesma ordem: `None` é "entrou na conta".
     pub ignoradas: Vec<Option<GuiaIgnorada>>,

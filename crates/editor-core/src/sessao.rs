@@ -43,9 +43,14 @@ pub const TOLERANCIA_DA_LATA: u8 = 32;
 /// Um cadeado do painel Camadas ("Bloquear:").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cadeado {
+    /// Bloquear pixels transparentes ([`Bloqueio::transparencia`]).
     Transparencia,
+    /// Bloquear pixels ([`Bloqueio::pixels`]).
     Pixels,
+    /// Bloquear posição ([`Bloqueio::posicao`]).
     Posicao,
+    /// Bloquear tudo: liga os três se faltar algum, desliga os três se
+    /// estiverem todos ligados.
     Tudo,
 }
 
@@ -56,6 +61,7 @@ pub struct OpcoesDoCarimbo {
     /// a distância, e os seguintes copiam à mesma distância. Desligado, cada
     /// traço novo volta a copiar da origem escolhida.
     pub alinhado: bool,
+    /// De onde o carimbo copia (o padrão é a camada atual e as de baixo).
     pub amostra: crate::carimbo::AmostraDoCarimbo,
 }
 
@@ -86,9 +92,12 @@ pub enum AmostraDaVarinha {
 pub struct OpcoesDaVarinha {
     /// 0–255 por canal (32 no Photoshop).
     pub tolerancia: u8,
+    /// Contígua (o padrão): só a região parecida ligada ao pixel clicado.
+    /// Desligada, todos os pixels parecidos da foto.
     pub contigua: bool,
     /// Antisserrilhado na borda do que ela pega.
     pub suavizar: bool,
+    /// De onde a varinha lê a cor (a foto como aparece, por padrão).
     pub amostra: AmostraDaVarinha,
 }
 
@@ -126,8 +135,13 @@ struct SelecaoSolta {
 /// Um pedido de lupa: o que a vista do pedaço precisa para ser montada fora
 /// da thread da tela. Barato de tirar: a base e os tiles são `Arc`.
 pub struct PedidoDeLupa {
+    /// O número do pedido — o que [`Sessao::receber_lupa`] confere para só
+    /// aceitar a lupa do último pedido.
     pub id: u64,
+    /// O pedaço da foto que a lupa cobre, em pixels da foto.
     pub regiao: Retangulo,
+    /// Quantos pixels da foto cada pixel da lupa cobre, por lado (1 = a
+    /// resolução cheia).
     pub fator: u32,
     base: Arc<RgbImage>,
     doc: Documento,
@@ -150,6 +164,28 @@ impl PedidoDeLupa {
     }
 }
 
+/// Uma edição aberta: a base, o documento, o histórico, a vista, a camada
+/// escolhida, a seleção e os gestos em curso. A janela chama os métodos a cada
+/// evento e sobe os ladrilhos sujos da [`Vista`].
+///
+/// ```rust
+/// use std::sync::Arc;
+///
+/// use editor_core::{BaseRef, Documento, Historico, Sessao};
+///
+/// let base = Arc::new(image::RgbImage::new(800, 600));
+/// let doc = Documento::novo(BaseRef::da_imagem(&base));
+/// let mut sessao = Sessao::nova(base, doc, Historico::novo(), 400);
+/// assert_eq!(sessao.vista().fator(), 2); // 800 px no maior lado, vista de 400
+///
+/// sessao.nova_camada();
+/// assert_eq!(sessao.documento().camadas.len(), 2);
+/// assert!(sessao.alterado());
+///
+/// assert!(sessao.desfazer());
+/// assert_eq!(sessao.documento().camadas.len(), 1);
+/// assert!(!sessao.alterado());
+/// ```
 pub struct Sessao {
     base: Arc<RgbImage>,
     doc: Documento,
@@ -175,6 +211,8 @@ pub struct Sessao {
     /// lupa que chega é refeita ali antes de entrar.
     lupa_pedida: Option<(u64, Retangulo)>,
     pedidos: u64,
+    /// O pincel de agora (ponta, cores, opacidade, fluxo…). Cada traço leva
+    /// uma cópia ao começar.
     pub pincel: Pincel,
     /// Alinhado e amostra do carimbo — opções da ferramenta, fora do desfazer.
     pub carimbo: OpcoesDoCarimbo,
@@ -289,7 +327,10 @@ struct Flutuante {
 }
 
 impl Sessao {
-    /// `lado_da_vista` é o maior lado da vista reduzida, em pixels.
+    /// Abre a edição de `doc` sobre `base`, com o histórico `hist` (o novo,
+    /// ou o da reabertura) e a camada de cima escolhida. `lado_da_vista` é o
+    /// maior lado da vista reduzida, em pixels. A base tem de ter as
+    /// dimensões do documento.
     pub fn nova(base: Arc<RgbImage>, doc: Documento, hist: Historico, lado_da_vista: u32) -> Self {
         debug_assert_eq!((base.width(), base.height()), (doc.largura(), doc.altura()));
         let vista = Vista::nova(&base, &doc, lado_da_vista);
@@ -341,22 +382,28 @@ impl Sessao {
         }
     }
 
+    /// A base neutra, em resolução cheia (RGB8 sRGB).
     pub fn base(&self) -> &Arc<RgbImage> {
         &self.base
     }
 
+    /// O documento de agora, com o que um gesto em curso já mudou ao vivo.
     pub fn documento(&self) -> &Documento {
         &self.doc
     }
 
+    /// O histórico da edição — a lista do painel Histórico.
     pub fn historico(&self) -> &Historico {
         &self.hist
     }
 
+    /// A vista inteira, reduzida para a tela.
     pub fn vista(&self) -> &Vista {
         &self.vista
     }
 
+    /// A vista, para a janela levar os ladrilhos sujos
+    /// ([`Vista::levar_os_sujos`]).
     pub fn vista_mut(&mut self) -> &mut Vista {
         &mut self.vista
     }
@@ -388,10 +435,13 @@ impl Sessao {
 
     // ---------------------------------------------------------------- lupa
 
+    /// A lupa que está valendo (a vista do pedaço visível, com a foto
+    /// ampliada), se alguma chegou.
     pub fn lupa(&self) -> Option<&Vista> {
         self.lupa.as_ref()
     }
 
+    /// A lupa, para a janela levar os ladrilhos sujos dela.
     pub fn lupa_mut(&mut self) -> Option<&mut Vista> {
         self.lupa.as_mut()
     }
@@ -459,6 +509,7 @@ impl Sessao {
         true
     }
 
+    /// O Antes/Depois está ligado (ver [`Self::mostrar_antes`]).
     pub fn mostrando_antes(&self) -> bool {
         self.mostrando_antes
     }
@@ -574,6 +625,7 @@ impl Sessao {
         self.ativa.min(self.doc.camadas.len().saturating_sub(1))
     }
 
+    /// A camada escolhida (a de [`Self::ativa`]).
     pub fn camada_ativa(&self) -> &Camada {
         &self.doc.camadas[self.ativa()]
     }
@@ -1494,6 +1546,8 @@ impl Sessao {
         self.distancia_do_carimbo = None;
     }
 
+    /// A origem do carimbo escolhida com ⌥+clique, em pixels da foto. `None`
+    /// antes da primeira.
     pub fn origem(&self) -> Option<(f32, f32)> {
         self.origem
     }
@@ -1778,6 +1832,7 @@ impl Sessao {
         true
     }
 
+    /// Um arrasto do Mover sem seleção está em curso.
     pub fn movendo(&self) -> bool {
         self.movendo.is_some()
     }
@@ -2259,6 +2314,7 @@ impl Sessao {
         true
     }
 
+    /// O Liquidificar está aberto.
     pub fn liquidificando(&self) -> bool {
         self.liquido.is_some()
     }
@@ -2334,6 +2390,7 @@ impl Sessao {
 
     // --------------------------------------------------------------- guias
 
+    /// As guias do documento, como estão agora (também durante o arrasto).
     pub fn guias(&self) -> &[crate::documento::Guia] {
         &self.doc.guias
     }
@@ -2394,6 +2451,7 @@ impl Sessao {
         Some((original, self.selecao.clone()))
     }
 
+    /// Um filtro está com o diálogo aberto (a prévia pode estar na camada).
     pub fn filtrando(&self) -> bool {
         self.filtro.is_some()
     }
@@ -2484,6 +2542,7 @@ impl Sessao {
         f.malha.map(|(m, _)| (f.conteudo.caixa, m))
     }
 
+    /// O ⌘T está no modo Deformar (há uma malha).
     pub fn deformando(&self) -> bool {
         self.flutuante.as_ref().is_some_and(|f| f.malha.is_some())
     }
@@ -2555,6 +2614,9 @@ impl Sessao {
             .is_none_or(|(atual, inicial)| atual.quase_igual(&inicial))
     }
 
+    /// Há uma transformação aberta: o ⌘T (ou o Mover com seleção), o
+    /// "Transformar seleção" ou o "Transformar caminho". Enter aplica, Esc
+    /// volta.
     pub fn transformando(&self) -> bool {
         self.flutuante.is_some() || self.selecao_solta.is_some() || self.caminho_solto.is_some()
     }
@@ -2841,10 +2903,14 @@ impl Sessao {
 
     // ------------------------------------------------------------- seleção
 
+    /// Sobe só quando a seleção muda — a borda dela não se refaz a cada
+    /// pincelada.
     pub fn versao_da_selecao(&self) -> u64 {
         self.versao_da_selecao
     }
 
+    /// A seleção de agora (o letreiro). `None` = nada selecionado: os gestos
+    /// valem para a camada inteira.
     pub fn selecao(&self) -> Option<&Selecao> {
         self.selecao.as_deref()
     }
@@ -3138,6 +3204,7 @@ impl Sessao {
         }
     }
 
+    /// Um arrasto do contorno da seleção (sem os pixels) está em curso.
     pub fn movendo_o_contorno(&self) -> bool {
         self.contorno_movendo.is_some()
     }
@@ -3531,6 +3598,8 @@ impl Sessao {
         }
     }
 
+    /// Um traço está em curso (o botão apertado com uma ferramenta de
+    /// pintura).
     pub fn tracando(&self) -> bool {
         self.traco.is_some()
     }
@@ -3611,6 +3680,8 @@ impl Sessao {
 
     // ------------------------------------------------------ desfazer
 
+    /// ⌘Z: fecha o que estiver em curso e volta um passo; a camada escolhida
+    /// e a seleção seguem o passo. Falso sem nada para desfazer.
     pub fn desfazer(&mut self) -> bool {
         self.fechar_o_que_esta_aberto();
         let passo = self.hist.a_desfazer().cloned();
@@ -3642,6 +3713,8 @@ impl Sessao {
         andou
     }
 
+    /// ⇧⌘Z: fecha o que estiver em curso e aplica de novo o próximo passo
+    /// desfeito. Falso sem nada para refazer.
     pub fn refazer(&mut self) -> bool {
         self.fechar_o_que_esta_aberto();
         let passo = self.hist.a_refazer().cloned();

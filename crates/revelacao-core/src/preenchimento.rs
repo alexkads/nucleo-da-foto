@@ -58,10 +58,20 @@ const RODADAS_DO_EM: usize = 4;
 /// O resultado: a caixa do buraco, preenchida, em RGBA.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Remendo {
+    /// A coluna do canto esquerdo da caixa, em pixels — da foto em
+    /// [`preencher`] e [`preencher_buraco`], da região do [`Pedido`] em
+    /// [`sintetizar`].
     pub x0: u32,
+    /// A linha do canto de cima da caixa (o `y` cresce para baixo), no mesmo
+    /// espaço de `x0`.
     pub y0: u32,
+    /// A largura da caixa, em pixels.
     pub largura: u32,
+    /// A altura da caixa, em pixels.
     pub altura: u32,
+    /// Os pixels da caixa, RGBA de 8 bits linha a linha:
+    /// `largura × altura × 4` bytes, alfa sempre 255. O peso com que o
+    /// remendo entra na foto é de quem aplica (a máscara do retoque).
     pub rgba: Vec<u8>,
 }
 
@@ -874,7 +884,10 @@ fn preencher_na_regiao(
 pub struct Pedido<'a> {
     /// A região de trabalho, RGBA `largura × altura` (o alfa não conta).
     pub rgba: &'a [u8],
+    /// A largura da região, em pixels.
     pub largura: u32,
+    /// A altura da região, em pixels. `destino` e `amostragem` têm
+    /// `largura × altura` entradas, linha a linha.
     pub altura: u32,
     /// A máscara de **destino**: o que será reconstruído (um por pixel).
     pub destino: &'a [bool],
@@ -882,7 +895,11 @@ pub struct Pedido<'a> {
     /// `None` = toda a região fora do destino. Um patch só serve se o suporte
     /// inteiro estiver aqui e fora do destino.
     pub amostragem: Option<&'a [bool]>,
+    /// Os botões da síntese — [`Qualidade::default`] é o da Revelação,
+    /// [`Qualidade::recomendada`] o do editor em camadas.
     pub qualidade: Qualidade,
+    /// A semente do sorteio do PatchMatch: a mesma semente com o mesmo pedido
+    /// dá o mesmo remendo, bit a bit. A Revelação usa [`semente`].
     pub semente: u64,
 }
 
@@ -950,17 +967,24 @@ pub enum Falha {
 /// Onde a síntese está, para a barra de progresso: etapas reais do método.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Progresso {
+    /// A etapa em curso.
     pub etapa: Etapa,
     /// `0..=1` dentro da síntese inteira.
     pub fracao: f32,
 }
 
+/// As etapas reais da síntese, na ordem em que acontecem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Etapa {
     /// Montando a pirâmide e as fontes.
     Preparando,
     /// O nível `n` de `de` (1 = o mais grosso), na busca + voto.
-    Nivel { n: usize, de: usize },
+    Nivel {
+        /// O nível em curso, de 1 (o mais grosso) a `de`.
+        n: usize,
+        /// Quantos níveis a pirâmide tem.
+        de: usize,
+    },
     /// A síntese coerente, casca a casca, na resolução cheia.
     Textura,
 }
@@ -968,11 +992,16 @@ pub enum Etapa {
 /// O cancelamento cooperativo e o aviso de progresso. A síntese olha o
 /// `cancelado` entre as etapas e entre as cascas da síntese final.
 pub struct Controle<'a> {
+    /// Quando vira `true` (de outra thread), a síntese para na próxima
+    /// conferência e devolve [`Falha::Cancelado`]. `None` é nunca cancelar.
     pub cancelado: Option<&'a std::sync::atomic::AtomicBool>,
+    /// Chamado a cada avanço, com a fração já presa em `0..=1`. `None` é
+    /// sem aviso.
     pub progresso: Option<&'a (dyn Fn(Progresso) + Sync)>,
 }
 
 impl Controle<'_> {
+    /// Sem cancelamento e sem aviso — o que a Revelação usa.
     pub fn sem_controle() -> Self {
         Self {
             cancelado: None,

@@ -44,6 +44,10 @@ pub struct Liquido {
 }
 
 impl Liquido {
+    /// Começa o Liquidificar sobre `original` — a camada (ou a máscara) como
+    /// estava ao abrir —, com o campo todo em zero e a [`area`](Liquido::area)
+    /// vazia. A grade cobre a camada inteira; a camada é guardada (barato: os
+    /// tiles são `Arc`) para cada passo ser refeito dela.
     pub fn novo(original: CamadaDePixels) -> Self {
         let (l, a) = (original.largura(), original.altura());
         let colunas = l.div_ceil(PASSO_DA_GRADE);
@@ -57,6 +61,8 @@ impl Liquido {
         }
     }
 
+    /// A camada de antes de qualquer empurrão — o "Restaurar tudo" e o Esc
+    /// voltam a ela, e o Enter registra a diferença entre ela e a atual.
     pub fn original(&self) -> &CamadaDePixels {
         &self.original
     }

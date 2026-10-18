@@ -71,7 +71,10 @@ pub fn afim_da_transformacao(
 pub struct OpcoesDaSelecaoDoCaminho {
     /// Difusão em pixels do documento (0 = a borda como a curva).
     pub difusao: u32,
+    /// Antisserrilhado: a borda leva a fração coberta de cada pixel (ligado
+    /// por padrão). Desligado, cada pixel entra inteiro ou não entra.
     pub suavizar: bool,
+    /// Como a seleção nova se combina com a que existe (Nova por padrão).
     pub operacao: Operacao,
 }
 
@@ -95,6 +98,7 @@ impl Sessao {
             .filter(|l| self.doc.caminho(*l).is_some())
     }
 
+    /// O caminho do [`Self::alvo_vetorial`], como está agora no documento.
     pub fn caminho_alvo(&self) -> Option<&Caminho> {
         self.alvo_vetorial().and_then(|l| self.doc.caminho(l))
     }
@@ -218,6 +222,8 @@ impl Sessao {
 
     // ------------------------------------------------------ os gestos
 
+    /// Troca a ferramenta de caminho (Caneta, Seleção direta…). O gesto
+    /// vetorial aberto termina antes, com o passo dele.
     pub fn usar_ferramenta_vetorial(&mut self, f: FerramentaVetorial) {
         self.terminar_gesto_vetorial();
         self.caneta.usar(f);
@@ -579,6 +585,10 @@ impl Sessao {
         Some(lugar)
     }
 
+    /// "Renomear caminho" no painel, num passo. O nome vai sem os espaços das
+    /// pontas. Renomear o de trabalho é salvá-lo como nomeado (como no
+    /// Photoshop). Falso — e nada muda — com nome vazio, igual ao de agora,
+    /// caminho que não existe ou a máscara vetorial (que leva o nome da camada).
     pub fn renomear_caminho(&mut self, lugar: LugarDoCaminho, nome: &str) -> bool {
         let nome = nome.trim();
         if nome.is_empty() || matches!(lugar, LugarDoCaminho::Mascara(_)) {
@@ -715,6 +725,9 @@ impl Sessao {
         true
     }
 
+    /// "Transformar caminho" está aberto (entre o
+    /// [`Self::comecar_a_transformar_caminho`] e o Enter ou o Esc): a
+    /// transformação do ⌘T vai para o caminho, e não para os pixels.
     pub fn transformando_o_caminho(&self) -> bool {
         self.caminho_solto.is_some()
     }
@@ -852,6 +865,8 @@ impl Sessao {
         })
     }
 
+    /// Exclui a máscara vetorial da camada `i`, num passo; se ela era o
+    /// caminho escolhido, o painel fica sem nenhum. Falso quando não havia.
     pub fn excluir_mascara_vetorial(&mut self, i: usize) -> bool {
         let ok = self.trocar_mascara_vetorial(i, |m| *m = None);
         if ok && self.alvo_vetorial == Some(LugarDoCaminho::Mascara(i)) {

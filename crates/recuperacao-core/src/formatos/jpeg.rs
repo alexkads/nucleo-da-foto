@@ -27,6 +27,13 @@ use super::MAIOR_FOTO;
 /// lixo com cara de JPEG.
 const MENOR_JPEG: u64 = 1024;
 
+/// A assinatura do JPEG: `FF D8 FF` seguido de um marcador que começa
+/// arquivo de verdade (APPn, DQT, DHT, SOF0 ou COM).
+///
+/// # Pânico
+///
+/// Se `cabeca` tiver menos de 4 bytes — quem chama é
+/// [`assinatura`](super::assinatura), que garante [`CABECA`](super::CABECA).
 pub fn parece(cabeca: &[u8]) -> bool {
     // FF D8 FF e um marcador que começa arquivo de verdade: APPn, DQT, DHT,
     // SOF0 ou COM.
@@ -40,6 +47,17 @@ fn e_sof(marcador: u8) -> bool {
     matches!(marcador, 0xC0..=0xCF) && !matches!(marcador, 0xC4 | 0xC8 | 0xCC)
 }
 
+/// O tamanho em bytes do JPEG que começa em `inicio` (posição absoluta no
+/// dispositivo), lido da estrutura: os segmentos até o `EOI` da foto, com as
+/// prévias MPF anexadas depois dele; tem de ter SOF e SOS e ao menos 1 KiB.
+/// `None` quando a estrutura não fecha.
+///
+/// Não confere o fim contra o tamanho do cartão: use
+/// [`formatos::medir`](super::medir), que confere.
+///
+/// # Erros
+///
+/// O erro de E/S do dispositivo, como veio.
 pub fn medir<R: Read + Seek>(leitor: &mut Leitor<R>, inicio: u64) -> io::Result<Option<u64>> {
     let limite = inicio + MAIOR_FOTO;
     let mut pos = inicio + 2;

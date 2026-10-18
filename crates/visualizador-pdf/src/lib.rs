@@ -43,6 +43,38 @@
 //! Cada página é desenhada dentro de `catch_unwind`, como lá: um pânico do
 //! rasterizador vira [`Erro::Desenho`] daquela página, e o documento é lido de
 //! novo para a próxima.
+//!
+//! # Exemplo
+//!
+//! Abrir um livro gerado na hora pelo `fotolivro` e desenhar a capa — o mesmo
+//! caminho da tela, sem a thread da [`Fila`]:
+//!
+//! ```rust
+//! use std::sync::Arc;
+//! use visualizador_pdf::{Documento, Ordem};
+//!
+//! let capa = fotolivro::Capa {
+//!     titulo: "Ensaio".into(),
+//!     ..Default::default()
+//! };
+//! let foto = fotolivro::FotoDaFolha {
+//!     imagem: image::DynamicImage::ImageRgb8(image::RgbImage::new(40, 30)),
+//!     nome: "a.jpg".into(),
+//!     levada: true,
+//!     link: None,
+//! };
+//! let pdf = fotolivro::gerar(&capa, vec![foto]).unwrap();
+//!
+//! let mut documento = Documento::abrir(Arc::new(pdf)).unwrap();
+//! assert!(!documento.folhas().is_empty());
+//!
+//! // A 0,25 pixel por ponto: uma miniatura, rápida de desenhar.
+//! let imagem = documento.desenhar(0, 0.25).unwrap();
+//! assert_eq!(imagem.ordem, Ordem::Rgba);
+//! assert_eq!(imagem.pixels.len(), (imagem.largura * imagem.altura * 4) as usize);
+//! ```
+
+#![deny(missing_docs)]
 
 use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -64,7 +96,9 @@ pub const PIXELS_MAXIMOS: f32 = 64.0e6;
 /// Uma folha do documento, em pontos (1/72 de polegada), já com a rotação.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Folha {
+    /// Largura em pontos, como a folha aparece na tela (depois da rotação).
     pub largura: f32,
+    /// Altura em pontos, depois da rotação.
     pub altura: f32,
 }
 
@@ -91,12 +125,14 @@ pub struct Link {
     /// origem no canto de cima à esquerda, já com a rotação): a tela multiplica
     /// pelo tamanho em que a página estiver desenhada.
     pub caixa: [f32; 4],
+    /// Para onde o clique leva.
     pub destino: Destino,
 }
 
 /// A ordem dos canais nos pixels entregues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Ordem {
+    /// Vermelho, verde, azul, alfa — a do `hayro`, e o padrão.
     #[default]
     Rgba,
     /// A que o GPUI espera (`imagem.rs` do `ui-gpui`).
@@ -107,9 +143,13 @@ pub enum Ordem {
 /// é branco, então não há o que pré-multiplicar).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Imagem {
+    /// Largura em pixels. Nunca passa de [`LADO_MAXIMO`].
     pub largura: u32,
+    /// Altura em pixels. Nunca passa de [`LADO_MAXIMO`].
     pub altura: u32,
+    /// `largura × altura × 4` bytes, de cima para baixo, alfa sempre 255.
     pub pixels: Vec<u8>,
+    /// A ordem dos canais em [`pixels`](Self::pixels).
     pub ordem: Ordem,
 }
 
@@ -296,6 +336,14 @@ pub struct Documento {
 }
 
 impl Documento {
+    /// Lê o PDF. Os bytes ficam guardados (por isso o `Arc`, que a [`Fila`]
+    /// divide com a thread dela): depois de um pânico do rasterizador o
+    /// documento é lido de novo a partir deles.
+    ///
+    /// # Erros
+    ///
+    /// [`Erro::Ilegivel`] se os bytes não forem um PDF que o `hayro` leia —
+    /// inclusive se a leitura entrar em pânico, que aqui não escapa.
     pub fn abrir(bytes: Arc<Vec<u8>>) -> Result<Self, Erro> {
         let pdf = ler(&bytes)?;
         Ok(Self { bytes, pdf })
@@ -397,14 +445,18 @@ pub enum Resposta {
     /// O documento abriu: as folhas dele e os links de cada uma. É sempre a
     /// primeira resposta.
     Aberto {
+        /// As folhas, na ordem do documento — o mesmo que [`Documento::folhas`].
         folhas: Vec<Folha>,
+        /// Os links de cada folha, no mesmo índice de `folhas`.
         links: Vec<Vec<Link>>,
     },
     /// O documento não abriu. Nada mais vem depois.
     Falhou(Erro),
     /// Uma página pedida ficou pronta, ou falhou.
     Pagina {
+        /// O pedido atendido, como veio em [`Fila::pedir`].
         pedido: Pedido,
+        /// A página desenhada, já na [`Ordem`] da fila, ou por que não saiu.
         imagem: Result<Imagem, Erro>,
     },
 }

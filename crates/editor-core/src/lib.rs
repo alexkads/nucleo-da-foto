@@ -12,6 +12,8 @@
 //! que o motor de revelação recebe, e pintar noutro espaço seria uma conversão a
 //! mais entre o editor e a Revelação.
 
+#![deny(missing_docs)]
+
 pub mod ajuste;
 pub mod carimbo;
 pub mod composicao;

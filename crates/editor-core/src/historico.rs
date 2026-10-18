@@ -22,73 +22,129 @@ use crate::vetor::{Caminho, LugarDoCaminho, MascaraVetorial};
 /// O teto de memória do histórico (tiles guardados), em bytes.
 pub const TETO_DO_HISTORICO: usize = 256 * 1024 * 1024;
 
+/// Um passo do histórico: o que um gesto mudou, com o antes e o depois.
+///
+/// 🔑 O passo é registrado **já aplicado** ([`Historico::registrar`]):
+/// [`Comando::aplicar`] com `para_frente = true` é o refazer, e com `false` o
+/// desfazer. Os índices de camada são os do [`Documento::camadas`] no momento
+/// em que o passo vale — de baixo para cima.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Comando {
+    /// Uma pincelada (ou qualquer gesto que troca tiles: borracha,
+    /// preenchimento, Delete, filtro, Mover…).
     Traco {
+        /// O índice da camada no documento (de baixo para cima).
         camada: usize,
         /// O traço foi na máscara da camada, e não nos pixels dela.
         na_mascara: bool,
+        /// Os tiles tocados, antes e depois (`Arc`: guardar custa contadores).
         mudanca: Mudanca,
     },
     /// A máscara da camada antes e depois: `None → Some` é adicionar, `Some →
     /// None` é excluir, e de `Some` a `Some` é ligar ou desligar. Os tiles
     /// são `Arc` — guardar os dois lados custa contadores.
     Mascara {
+        /// O índice da camada no documento (de baixo para cima).
         camada: usize,
+        /// A máscara antes do gesto (`None` = a camada não tinha).
         antes: Option<Box<Mascara>>,
+        /// A máscara depois do gesto (`None` = a camada ficou sem).
         depois: Option<Box<Mascara>>,
     },
     /// Os parâmetros de uma camada de ajuste — o arrasto inteiro do slider.
     Ajuste {
+        /// O índice da camada no documento (de baixo para cima).
         camada: usize,
+        /// Os parâmetros de quando o arrasto começou.
         antes: Ajuste,
+        /// Os parâmetros de quando o arrasto terminou.
         depois: Ajuste,
     },
+    /// O olho do painel Camadas.
     Visibilidade {
+        /// O índice da camada no documento (de baixo para cima).
         camada: usize,
+        /// Visível antes do clique.
         antes: bool,
+        /// Visível depois do clique.
         depois: bool,
     },
     /// A máscara de corte da camada ligada (`depois = true`) ou liberada.
     Recorte {
+        /// O índice da camada no documento (de baixo para cima).
         camada: usize,
+        /// Recortada antes.
         antes: bool,
+        /// Recortada depois.
         depois: bool,
     },
     /// Os cadeados da camada antes e depois.
     Bloqueio {
+        /// O índice da camada no documento (de baixo para cima).
         camada: usize,
+        /// Os cadeados antes do clique.
         antes: Bloqueio,
+        /// Os cadeados depois do clique.
         depois: Bloqueio,
     },
+    /// A opacidade da camada — o arrasto inteiro do slider é um passo só.
     Opacidade {
+        /// O índice da camada no documento (de baixo para cima).
         camada: usize,
+        /// A opacidade antes, `0..=1`.
         antes: f32,
+        /// A opacidade depois, `0..=1`.
         depois: f32,
     },
+    /// O modo de mesclagem da camada.
     Modo {
+        /// O índice da camada no documento (de baixo para cima).
         camada: usize,
+        /// O modo antes.
         antes: Modo,
+        /// O modo depois.
         depois: Modo,
     },
+    /// O nome da camada no painel.
     Renomear {
+        /// O índice da camada no documento (de baixo para cima).
         camada: usize,
+        /// O nome antes.
         antes: String,
+        /// O nome depois.
         depois: String,
     },
     /// Para a frente, a camada entra em `indice`; para trás, sai. Nova e
     /// duplicada são o mesmo passo — o que muda é o que a camada traz.
-    CriarCamada { indice: usize, camada: Box<Camada> },
+    CriarCamada {
+        /// Onde a camada entra (de baixo para cima); as de cima sobem um.
+        indice: usize,
+        /// A camada inteira, como entra — com pixels, máscara e ajuste.
+        camada: Box<Camada>,
+    },
     /// O contrário de [`Comando::CriarCamada`]: guarda a camada inteira, para
     /// o desfazer devolvê-la com os pixels.
-    ExcluirCamada { indice: usize, camada: Box<Camada> },
+    ExcluirCamada {
+        /// De onde a camada sai (de baixo para cima).
+        indice: usize,
+        /// A camada inteira, como estava ao sair.
+        camada: Box<Camada>,
+    },
     /// A camada de `de` passa a ficar em `para` (índices de baixo para cima).
-    MoverCamada { de: usize, para: usize },
+    MoverCamada {
+        /// O índice de antes.
+        de: usize,
+        /// O índice de depois.
+        para: usize,
+    },
     /// ⌘E: a camada `indice` sai, e a de baixo (`indice − 1`) recebe os
     /// pixels dela (`mudanca`). Para trás, a de baixo volta e a de cima entra.
     Mesclar {
+        /// O índice da camada de cima, a que sai (sempre ≥ 1).
         indice: usize,
+        /// A camada de cima inteira, para o desfazer devolvê-la.
         de_cima: Box<Camada>,
+        /// Os tiles da camada de baixo antes e depois de receber a de cima.
         mudanca: Mudanca,
     },
     /// A seleção antes e depois — os passos de seleção do Photoshop
@@ -96,21 +152,32 @@ pub enum Comando {
     /// na sessão, que a troca ao seguir o passo. **Não vai para o projeto**
     /// (a seleção não é salva; ver [`Comando::sem_selecao`]).
     Selecao {
+        /// O nome do passo no painel Histórico ("Seleção retangular"…).
         nome: String,
+        /// A seleção antes (`None` = nada selecionado).
         antes: Option<Arc<Selecao>>,
+        /// A seleção depois (`None` = desmarcada).
         depois: Option<Arc<Selecao>>,
     },
     /// Vários passos que são um gesto só — a camada via recorte (o pedaço sai
     /// da origem e entra na camada nova), o Mover que leva a seleção junto.
     /// Um desfazer volta todos, do último ao primeiro.
-    Varios { nome: String, passos: Vec<Comando> },
+    Varios {
+        /// O nome do gesto no painel Histórico ("Camada via recorte"…).
+        nome: String,
+        /// Os passos, na ordem em que foram aplicados.
+        passos: Vec<Comando>,
+    },
     /// As guias antes e depois ("Nova guia", "Mover guia", "Excluir guia",
     /// "Limpar guias"). Como a seleção, **não** vai para o histórico do
     /// projeto: as guias de agora vão no manifesto (`guias`), e o formato não
     /// muda — a versão de antes só as ignora.
     Guias {
+        /// O nome do passo no painel Histórico.
         nome: String,
+        /// Todas as guias antes do gesto.
         antes: Vec<crate::documento::Guia>,
+        /// Todas as guias depois do gesto.
         depois: Vec<crate::documento::Guia>,
     },
     /// Um caminho antes e depois de um gesto da Caneta (ou de um comando do
@@ -118,17 +185,27 @@ pub enum Comando {
     /// que entra vai para a posição `indice` da lista. Só vetores — nenhum
     /// tile é copiado; na máscara vetorial, a foto muda onde a curva passou.
     Caminho {
+        /// O nome do passo no painel Histórico ("Caneta", "Excluir caminho"…).
         nome: String,
+        /// Onde o caminho mora: o de trabalho, um nomeado ou a máscara
+        /// vetorial de uma camada.
         lugar: LugarDoCaminho,
+        /// A posição do nomeado na lista do painel Caminhos (ignorada nos
+        /// outros lugares).
         indice: usize,
+        /// O caminho antes (`None` = não existia).
         antes: Option<Box<Caminho>>,
+        /// O caminho depois (`None` = excluído).
         depois: Option<Box<Caminho>>,
     },
     /// A máscara vetorial da camada antes e depois: criar, excluir, ligar,
     /// desligar, vincular.
     MascaraVetorial {
+        /// O índice da camada no documento (de baixo para cima).
         camada: usize,
+        /// A máscara vetorial antes (`None` = a camada não tinha).
         antes: Option<Box<MascaraVetorial>>,
+        /// A máscara vetorial depois (`None` = excluída).
         depois: Option<Box<MascaraVetorial>>,
     },
 }
@@ -641,6 +718,33 @@ fn nome(doc: &Documento, camada: usize) -> String {
         .unwrap_or_default()
 }
 
+/// A pilha de passos do documento, com a posição atual e o ponto de
+/// salvamento.
+///
+/// `passos[..posicao]` estão aplicados; os de depois são o que dá para
+/// refazer, e um gesto novo os corta. Um teto de memória
+/// ([`TETO_DO_HISTORICO`], ou [`Historico::com_teto`]) descarta os passos mais
+/// antigos — nunca o último.
+///
+/// ```rust
+/// use editor_core::{BaseRef, Comando, Documento, Historico};
+///
+/// let foto = image::RgbImage::new(64, 64);
+/// let mut doc = Documento::novo(BaseRef::da_imagem(&foto));
+/// let mut hist = Historico::novo();
+///
+/// // O gesto muda o documento, e só então vira passo.
+/// let antes = std::mem::replace(&mut doc.camadas[0].nome, "Retoque".into());
+/// hist.registrar(Comando::Renomear { camada: 0, antes, depois: "Retoque".into() });
+/// assert!(hist.alterado());
+///
+/// hist.desfazer(&mut doc);
+/// assert_eq!(doc.camadas[0].nome, "Pintura");
+/// assert!(!hist.alterado()); // de volta ao que foi salvo
+///
+/// hist.refazer(&mut doc);
+/// assert_eq!(doc.camadas[0].nome, "Retoque");
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Historico {
     passos: Vec<Comando>,
@@ -674,12 +778,17 @@ impl Historico {
         }
     }
 
+    /// O mesmo histórico com outro teto de memória, em bytes de tiles
+    /// guardados (o padrão é [`TETO_DO_HISTORICO`]). Os testes usam um teto
+    /// pequeno para ver o descarte.
     pub fn com_teto(mut self, teto: usize) -> Self {
         self.teto = teto;
         self
     }
 
-    /// Reconstruído da gravação.
+    /// Reconstruído da gravação: os `passos`, quantos estão aplicados
+    /// (`posicao`, limitada ao total) e onde foi o último salvamento
+    /// (`salvo_em`; fora do alcance vira `None`). O teto é o padrão.
     pub fn de_partes(passos: Vec<Comando>, posicao: usize, salvo_em: Option<usize>) -> Self {
         let posicao = posicao.min(passos.len());
         Self {
@@ -691,14 +800,19 @@ impl Historico {
         }
     }
 
+    /// Todos os passos, os aplicados e os que dá para refazer — a lista do
+    /// painel Histórico.
     pub fn passos(&self) -> &[Comando] {
         &self.passos
     }
 
+    /// Quantos passos estão aplicados: `passos()[..posicao()]`.
     pub fn posicao(&self) -> usize {
         self.posicao
     }
 
+    /// A posição do último salvamento; `None` quando o estado salvo não está
+    /// mais ao alcance (descartado pelo teto ou cortado por um gesto novo).
     pub fn salvo_em(&self) -> Option<usize> {
         self.salvo_em
     }
@@ -810,14 +924,18 @@ impl Historico {
         self.passos.get(self.posicao)
     }
 
+    /// Há passo aplicado para voltar.
     pub fn pode_desfazer(&self) -> bool {
         self.posicao > 0
     }
 
+    /// Há passo desfeito para aplicar de novo.
     pub fn pode_refazer(&self) -> bool {
         self.posicao < self.passos.len()
     }
 
+    /// Volta o último passo aplicado em `doc` e devolve a região da foto que
+    /// mudou (para recompor só ali). `None` quando não há o que desfazer.
     pub fn desfazer(&mut self, doc: &mut Documento) -> Option<Retangulo> {
         if !self.pode_desfazer() {
             return None;
@@ -826,6 +944,8 @@ impl Historico {
         Some(self.passos[self.posicao].aplicar(doc, false))
     }
 
+    /// Aplica de novo o próximo passo desfeito em `doc` e devolve a região da
+    /// foto que mudou. `None` quando não há o que refazer.
     pub fn refazer(&mut self, doc: &mut Documento) -> Option<Retangulo> {
         if !self.pode_refazer() {
             return None;
@@ -863,6 +983,8 @@ impl Historico {
         (passos, posicao)
     }
 
+    /// O estado atual foi salvo: a posição de agora vira o ponto de
+    /// salvamento, e [`Historico::alterado`] passa a dizer `false`.
     pub fn marcar_salvo(&mut self) {
         self.salvo_em = Some(self.posicao);
     }

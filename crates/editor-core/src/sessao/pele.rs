@@ -39,7 +39,9 @@ pub enum OrigemDaSeparacao {
 /// Uma das frequências do conjunto.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Frequencia {
+    /// A baixa frequência: cor e tom, sem a textura.
     Baixa,
+    /// A alta frequência: só a textura, em volta do cinza 50%.
     Alta,
 }
 
@@ -114,8 +116,9 @@ fn curvas_do_dodge_and_burn(clarear: bool) -> Ajuste {
     }
 }
 
-/// Os nomes das camadas do Dodge & Burn.
+/// Os nomes das camadas do Dodge & Burn: a que clareia.
 pub const NOME_DO_CLAREAR: &str = "Clarear (D&B)";
+/// O nome da camada do Dodge & Burn que escurece.
 pub const NOME_DO_ESCURECER: &str = "Escurecer (D&B)";
 
 impl Sessao {

@@ -65,6 +65,8 @@ impl FerramentaVetorial {
         )
     }
 
+    /// É uma das duas de seleção (a Seleção de caminho e a Seleção direta) —
+    /// as que a letra A alterna e o ⌘ chama temporariamente.
     pub fn e_de_selecao(self) -> bool {
         matches!(
             self,
@@ -77,8 +79,13 @@ impl FerramentaVetorial {
 /// macOS e o Ctrl no Windows e no Linux; `alt` é o ⌥ e o Alt.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modificadores {
+    /// ⇧: prende em 45° (âncora, alça, arrasto) e soma à escolha.
     pub shift: bool,
+    /// ⌥ / Alt: alça independente, Converter ponto temporário, duplicar ao
+    /// arrastar componentes.
     pub alt: bool,
+    /// ⌘ / Ctrl: a última ferramenta de seleção enquanto segurado, e o
+    /// "encerrar" do clique fora.
     pub comando: bool,
     /// O segundo clique de um duplo clique (a Caneta de curvatura faz canto).
     pub duplo: bool,
@@ -88,6 +95,8 @@ pub struct Modificadores {
 /// clique estáveis na tela, com qualquer zoom (o giro não muda distâncias).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Medida {
+    /// Quantos pixels do documento cabem num ponto da tela: `1 / escala` da
+    /// vista (2 com zoom de 50%, 0,25 com 400%). Deve ser positivo.
     pub por_ponto: f64,
 }
 
@@ -138,8 +147,11 @@ impl Default for OpcoesDaCaneta {
 /// caminho, ou uma camada de forma (Cor sólida com máscara vetorial).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ModoDaCaneta {
+    /// Desenha no caminho de trabalho (ou no caminho escolhido). O padrão.
     #[default]
     Caminho,
+    /// Desenha uma camada de forma: a camada de Cor sólida com o desenho como
+    /// máscara vetorial.
     Forma,
 }
 
@@ -147,7 +159,12 @@ pub enum ModoDaCaneta {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Depois {
     /// Continua desenhando por esta ponta.
-    Construir { sub: u64, extremo: Extremo },
+    Construir {
+        /// O [`Subcaminho::id`](super::Subcaminho::id) em construção.
+        sub: u64,
+        /// Por qual ponta ele cresce.
+        extremo: Extremo,
+    },
     /// O subcaminho acabou de fechar: o desenho termina.
     Fechado,
 }
@@ -155,32 +172,46 @@ pub enum Depois {
 /// O estado da ferramenta — um só, explícito.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Estado {
+    /// Nada em curso: o próximo clique da Caneta começa um componente novo.
     Ocioso,
     /// Um subcaminho aberto à espera do próximo clique, crescendo por
     /// `extremo`.
     Construindo {
+        /// O [`Subcaminho::id`](super::Subcaminho::id) em construção.
         sub: u64,
+        /// A ponta por onde entram as âncoras novas.
         extremo: Extremo,
     },
     /// O botão apertado numa âncora nova (ou na primeira, ao fechar): o
     /// arrasto puxa as alças. `lado` é a alça que aponta para a frente do
     /// desenho; com ⌥ no meio do arrasto, só ela anda.
     CriandoAncora {
+        /// A âncora recém-criada (ou a primeira, ao fechar).
         r: RefAncora,
+        /// A alça que segue o ponteiro; a oposta é espelhada.
         lado: Lado,
+        /// O que acontece ao soltar.
         depois: Depois,
+        /// O ponteiro já andou mais que o [`Medida::arrasto`]: soltar deixa
+        /// alças; sem isso, a âncora fica de canto.
         arrastou: bool,
     },
     /// O botão apertado na ponta de um subcaminho aberto: soltar continua o
     /// desenho dali; arrastar puxa as alças dela antes.
     RetomandoExtremo {
+        /// A âncora da ponta.
         r: RefAncora,
+        /// Qual ponta do subcaminho ela é.
         extremo: Extremo,
+        /// O ponteiro já passou do [`Medida::arrasto`].
         arrastou: bool,
     },
     /// As âncoras escolhidas andando juntas (com as alças).
     MovendoAncoras {
+        /// As âncoras que andam.
         refs: Vec<RefAncora>,
+        /// Onde o botão desceu: o deslocamento é `ponteiro − inicio`, sempre a
+        /// partir do caminho de antes do gesto.
         inicio: Ponto,
         /// Para onde volta ao soltar (a Caneta de curvatura continua
         /// desenhando depois de pôr ou mover um ponto).
@@ -189,8 +220,12 @@ pub enum Estado {
     /// Uma alça andando — com a ligação da âncora, ou sozinha
     /// (`independente`, o ⌥).
     MovendoAlca {
+        /// A âncora dona da alça.
         r: RefAncora,
+        /// Qual das duas alças anda.
         lado: Lado,
+        /// Ignora a [`Ligacao`](super::Ligacao) da âncora: a oposta não se
+        /// mexe (o ⌥, no apertar ou segurado durante o arrasto).
         independente: bool,
         /// Para onde volta ao soltar (a Caneta que ajustava a última âncora).
         voltar: Option<(u64, Extremo)>,
@@ -198,35 +233,57 @@ pub enum Estado {
     /// A Converter ponto (ou ⌥ na Caneta) apertada numa âncora: arrastar
     /// puxa alças novas; clicar sem arrastar a faz canto.
     ConvertendoPonto {
+        /// A âncora sendo convertida.
         r: RefAncora,
+        /// O ponteiro já passou do [`Medida::arrasto`]: soltar deixa as alças
+        /// novas; sem isso, a âncora vira canto sem alças.
         arrastou: bool,
+        /// Para onde volta ao soltar: o subcaminho e a ponta em que a
+        /// Caneta seguia desenhando (`None` = volta a [`Estado::Ocioso`]).
         voltar: Option<(u64, Extremo)>,
     },
     /// Um segmento curvo dobrando pelo ponto agarrado em `t`.
     DobrandoSegmento {
+        /// O [`Subcaminho::id`](super::Subcaminho::id).
         sub: u64,
+        /// O índice do segmento no subcaminho.
         indice: usize,
+        /// O parâmetro da cúbica onde o segmento foi agarrado, `0..=1`: esse
+        /// ponto da curva segue o ponteiro.
         t: f64,
+        /// Onde o botão desceu.
         inicio: Ponto,
     },
     /// Componentes inteiros andando (a Seleção de caminho). Com `fontes`,
     /// o ⌥ + arrasto: as cópias delas é que andam (refeitas a cada movimento a
     /// partir do caminho de antes, com os mesmos ids).
     MovendoComponentes {
+        /// Os ids dos componentes que andam.
         subs: Vec<u64>,
+        /// Onde o botão desceu.
         inicio: Ponto,
+        /// No ⌥ + arrasto, os componentes de onde saem as cópias (que ficam
+        /// no lugar); `None` no arrasto simples.
         fontes: Option<Vec<u64>>,
     },
     /// O traço à mão da Caneta de forma livre (pontos do documento), que pode
     /// continuar a ponta de um aberto.
     DesenhandoLivre {
+        /// Os pontos do traço, um a cada ponto da tela andado, em pixels do
+        /// documento; ao soltar viram curvas ajustadas.
         pontos: Vec<Ponto>,
+        /// A ponta aberta que o traço continua (começou sobre ela), ou `None`
+        /// para um componente novo.
         continuar: Option<(u64, Extremo)>,
     },
     /// O retângulo de seleção (das âncoras ou dos componentes).
     Retangulo {
+        /// O canto onde o botão desceu.
         inicio: Ponto,
+        /// O canto sob o ponteiro agora.
         atual: Ponto,
+        /// ⇧ no apertar: o que o retângulo pega soma à escolha, em vez de
+        /// substituí-la.
         somar: bool,
     },
 }
@@ -235,58 +292,86 @@ pub enum Estado {
 /// apertar e para o cursor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Acao {
+    /// O clique não faz nada aqui (o cursor fica o padrão).
     Nada,
     /// Um subcaminho novo (o primeiro ponto).
     NovoComponente,
     /// A próxima âncora do subcaminho em construção.
     Continuar {
+        /// O subcaminho em construção.
         sub: u64,
+        /// A ponta por onde ele cresce.
         extremo: Extremo,
     },
     /// Fechar no primeiro ponto.
     Fechar {
+        /// O subcaminho em construção.
         sub: u64,
+        /// A âncora da outra ponta, onde o clique caiu.
         primeira: RefAncora,
+        /// A ponta por onde ele crescia.
         extremo: Extremo,
     },
     /// Retomar uma ponta aberta.
     Retomar {
+        /// A âncora da ponta.
         r: RefAncora,
+        /// Qual ponta do subcaminho ela é.
         extremo: Extremo,
     },
     /// Ligar a ponta em construção à ponta de outro componente.
     Unir {
+        /// A ponta do componente em construção.
         de: RefAncora,
+        /// A ponta do outro componente aberto.
         ate: RefAncora,
     },
+    /// Inserir uma âncora no segmento sem mudar a forma da curva (a curva é
+    /// dividida em `t`).
     Adicionar {
+        /// O [`Subcaminho::id`](super::Subcaminho::id).
         sub: u64,
+        /// O índice do segmento no subcaminho.
         indice: usize,
+        /// O parâmetro da cúbica no ponto do clique, `0..=1`.
         t: f64,
     },
+    /// Tirar a âncora; os vizinhos se ligam por um segmento.
     Excluir(RefAncora),
     /// Converter a âncora (arrastar puxa alças, clicar faz canto).
     Converter(RefAncora),
     /// Tirar ou refazer a alça da frente da última âncora (⌥ nela).
     AjustarUltima {
+        /// A âncora da ponta em construção.
         r: RefAncora,
+        /// Qual ponta ela é.
         extremo: Extremo,
     },
+    /// Arrastar uma alça visível.
     MoverAlca {
+        /// A âncora dona da alça.
         r: RefAncora,
+        /// Qual das duas.
         lado: Lado,
+        /// Sem aplicar a ligação da âncora (o ⌥).
         independente: bool,
     },
+    /// Arrastar âncoras com a Seleção direta: esta e as outras escolhidas.
     MoverAncoras(RefAncora),
     /// Arrastar um segmento curvo com a Seleção direta: a curva dobra pelo
     /// ponto agarrado (as duas alças do segmento mudam; as pontas ficam).
     DobrarSegmento {
+        /// O [`Subcaminho::id`](super::Subcaminho::id).
         sub: u64,
+        /// O índice do segmento no subcaminho.
         indice: usize,
+        /// O parâmetro da cúbica no ponto agarrado, `0..=1`.
         t: f64,
     },
     /// Duplo clique numa âncora com a Caneta de curvatura: suave ↔ canto.
     AlternarCanto(RefAncora),
+    /// Arrastar o componente (pelo id) com a Seleção de caminho, com os outros
+    /// escolhidos.
     MoverComponente(u64),
     /// Arrastar no vazio: o retângulo.
     Retangulo,
@@ -320,9 +405,46 @@ struct Gesto {
 
 /// A ferramenta: qual está na mão, as opções, o estado e o que está
 /// escolhido (âncoras na Seleção direta, componentes na Seleção de caminho).
+///
+/// Não guarda caminho: cada evento recebe o [`Caminho`] que está sendo
+/// editado (o de trabalho, um nomeado ou o de uma máscara vetorial) e o muda
+/// no lugar. O ponteiro chega em pixels do documento, e as tolerâncias pela
+/// [`Medida`] da vista. Quem conduz no app é a sessão, que registra cada
+/// [`Resultado::Passo`] no histórico.
+///
+/// ```rust
+/// use editor_core::vetor::caneta::{Caneta, Medida, Modificadores, Resultado};
+/// use editor_core::vetor::{Caminho, Ponto};
+///
+/// let mut caneta = Caneta::nova();
+/// let mut caminho = Caminho::novo(1, "Caminho de trabalho");
+/// let (nada, medida) = (Modificadores::default(), Medida { por_ponto: 1.0 });
+///
+/// // Três cliques fazem três cantos…
+/// for (x, y) in [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)] {
+///     caneta.apertar(&mut caminho, Ponto::novo(x, y), nada, medida);
+///     caneta.soltar(&mut caminho, medida);
+/// }
+/// // …e um arrasto puxa as alças da quarta âncora: uma curva.
+/// caneta.apertar(&mut caminho, Ponto::novo(0.0, 100.0), nada, medida);
+/// caneta.arrastar(&mut caminho, Ponto::novo(-30.0, 100.0), nada, medida);
+/// caneta.soltar(&mut caminho, medida);
+///
+/// // Clicar na primeira fecha o caminho: um passo para o histórico.
+/// caneta.apertar(&mut caminho, Ponto::novo(0.5, 0.5), nada, medida);
+/// assert_eq!(caneta.soltar(&mut caminho, medida), Resultado::Passo("Fechar caminho"));
+///
+/// let componente = &caminho.subcaminhos[0];
+/// assert!(componente.fechado);
+/// assert_eq!(componente.ancoras.len(), 4);
+/// assert_eq!(componente.ancoras[3].saida, Some(Ponto::novo(-30.0, 100.0)));
+/// ```
 #[derive(Clone, Debug)]
 pub struct Caneta {
+    /// A ferramenta na mão; troque por [`usar`](Caneta::usar), que encerra o
+    /// desenho aberto.
     pub ferramenta: FerramentaVetorial,
+    /// As opções da barra da Caneta.
     pub opcoes: OpcoesDaCaneta,
     estado: Estado,
     gesto: Option<Gesto>,
@@ -342,6 +464,8 @@ impl Default for Caneta {
 }
 
 impl Caneta {
+    /// A Caneta clássica na mão, com as opções padrão, ociosa e sem nada
+    /// escolhido.
     pub fn nova() -> Self {
         Self {
             ferramenta: FerramentaVetorial::Caneta,
@@ -355,6 +479,8 @@ impl Caneta {
         }
     }
 
+    /// O estado da máquina, para a tela decidir o que desenhar (a faixa
+    /// elástica, o retângulo, o traço livre).
     pub fn estado(&self) -> &Estado {
         &self.estado
     }
@@ -376,14 +502,19 @@ impl Caneta {
         }
     }
 
+    /// As âncoras escolhidas (a Seleção direta as desenha cheias).
     pub fn pontos_escolhidos(&self) -> &BTreeSet<RefAncora> {
         &self.pontos
     }
 
+    /// Os ids dos componentes escolhidos (a Seleção de caminho).
     pub fn componentes_escolhidos(&self) -> &BTreeSet<u64> {
         &self.componentes
     }
 
+    /// Troca a escolha de componentes por estes ids — o que vem de fora (o
+    /// componente recém-criado, o desfazer). Não confere se existem; para
+    /// isso, [`conferir`](Caneta::conferir).
     pub fn escolher_componentes(&mut self, subs: impl IntoIterator<Item = u64>) {
         self.componentes = subs.into_iter().collect();
     }

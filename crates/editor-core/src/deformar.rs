@@ -68,6 +68,9 @@ pub enum Pega {
 /// linha 0 em cima, coluna 0 à esquerda).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Malha {
+    /// `pontos[linha][coluna]` = `(x, y)` em pixels do documento: os cantos são
+    /// `[0][0]`, `[0][3]`, `[3][0]` e `[3][3]`, os outros da borda são as alças,
+    /// e os quatro do meio, os internos (o `P[j][i]` da fórmula do módulo).
     pub pontos: [[(f32, f32); 4]; 4],
 }
 

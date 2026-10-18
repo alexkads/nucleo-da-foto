@@ -39,58 +39,185 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(default)]
 pub struct Ajustes {
+    // ------------------------------------------------------------ Básico
+    /// Exposição, em EV — a `Exposição` do Lightroom. Neutro 0.
+    ///
+    /// No processo 0 multiplica o valor sRGB por `2^EV`, sem limite; no
+    /// processo 1 lê a curva medida no Lightroom, presa em −5 a +5 EV (o
+    /// alcance do slider), que guarda o branco em vez de estourá-lo.
     pub exposure: f32,
+    /// Contraste, como **multiplicador**: `1 + contraste/100` do Lightroom, de
+    /// 0,0 (−100) a 2,0 (+100). 🔑 Neutro **1,0**, e não zero.
+    ///
+    /// No processo 0 é a reta em torno do cinza 128 (`(v − 128)·c + 128`, e
+    /// 0,0 vira cinza chapado); no processo 1, a curva medida, que guarda o
+    /// preto e o branco nas duas pontas.
     pub contrast: f32,
+    /// Temperatura, de −10 (frio) a +10 (quente); neutro 0 — a `Temperatura`
+    /// relativa que o Lightroom mostra num JPEG, dividida por 10.
+    ///
+    /// No processo 0 soma `10·v` níveis ao vermelho e tira do azul, depois do
+    /// contraste; no processo 1 lê o balanço medido (o slider de −100 a +100,
+    /// preso nessa faixa), antes da exposição.
     pub temperature: f32,
+    /// Matiz do balanço de branco, de −10 (verde) a +10 (magenta); neutro 0 —
+    /// o `Matiz` do Lightroom dividido por 10. No processo 0 move `5·v` níveis
+    /// (vermelho e azul para um lado, verde para o outro).
     pub tint: f32,
+    /// Realces, de −100 (recupera) a +100; neutro 0 — os `Realces` do
+    /// Lightroom. Age no alto da escala sem mover o ponto de branco; no
+    /// processo 1 é local (age na base, pela guia — ver [`Ajustes::usa_a_guia`]).
     pub highlights: f32,
+    /// Sombras, de −100 a +100 (clareia); neutro 0 — as `Sombras` do
+    /// Lightroom. No processo 1 é local, como os Realces.
     pub shadows: f32,
+    /// Brancos, de −100 a +100; neutro 0 — os `Brancos` do Lightroom, o topo da
+    /// escala.
     pub whites: f32,
+    /// Pretos, de −100 a +100; neutro 0 — os `Pretos` do Lightroom, o pé da
+    /// escala.
     pub blacks: f32,
+    /// Claridade, em **fração**: a `Claridade` do Lightroom dividida por 100
+    /// (−1 a +1); neutro 0. Contraste local largo (σ = 1,2 % do lado maior),
+    /// pela guia — ver [`crate::guia`].
     pub clarity: f32,
+    /// Vibração, em **fração**: a `Vibração` do Lightroom dividida por 100
+    /// (−1 a +1); neutro 0. Não age com o P&B ligado ([`Ajustes::bw_ativo`]).
     pub vibrance: f32,
+    /// Saturação, em **fração**: a `Saturação` do Lightroom dividida por 100
+    /// (−1 a +1, e −1 é cinza no processo 0); neutro 0. Não age com o P&B
+    /// ligado — para P&B, ligue [`Ajustes::bw_ativo`] em vez de zerar a cor.
     pub saturation: f32,
+    // ------------------------------------------ Curva paramétrica
+    /// Curva paramétrica, zona das **Sombras** (de 0 até
+    /// [`Ajustes::tone_curve_split_shadows`]), de −100 a +100; neutro 0.
     pub tone_curve_shadows: f32,
+    /// Curva paramétrica, zona dos **Escuros** (entre a primeira e a segunda
+    /// divisão), de −100 a +100; neutro 0.
     pub tone_curve_darks: f32,
+    /// Curva paramétrica, zona dos **Claros** (entre a segunda e a terceira
+    /// divisão), de −100 a +100; neutro 0.
     pub tone_curve_lights: f32,
+    /// Curva paramétrica, zona dos **Realces** (da terceira divisão até o
+    /// branco), de −100 a +100; neutro 0.
     pub tone_curve_highlights: f32,
+    // ------------------------------------------ HSL: saturação
+    // As oito faixas do HSL do Lightroom, com centro e meia-largura em graus
+    // de matiz: vermelho 0 (±15), laranja 30 (±15), amarelo 60 (±15), verde
+    // 120 (±45), água 187,5 (±22,5), azul 240 (±30), roxo 290 (±20) e magenta
+    // 327,5 (±17,5). O peso cai linear do centro à borda da faixa.
+    /// HSL, saturação do **vermelho** (matiz 0°, ±15°), de −100 a +100;
+    /// neutro 0.
     pub hsl_red_sat: f32,
+    /// HSL, saturação do **laranja** (30°, ±15°), de −100 a +100; neutro 0.
     pub hsl_orange_sat: f32,
+    /// HSL, saturação do **amarelo** (60°, ±15°), de −100 a +100; neutro 0.
     pub hsl_yellow_sat: f32,
+    /// HSL, saturação do **verde** (120°, ±45°), de −100 a +100; neutro 0.
     pub hsl_green_sat: f32,
+    /// HSL, saturação da **água** (187,5°, ±22,5°), de −100 a +100; neutro 0.
     pub hsl_aqua_sat: f32,
+    /// HSL, saturação do **azul** (240°, ±30°), de −100 a +100; neutro 0.
     pub hsl_blue_sat: f32,
+    /// HSL, saturação do **roxo** (290°, ±20°), de −100 a +100; neutro 0.
     pub hsl_purple_sat: f32,
+    /// HSL, saturação do **magenta** (327,5°, ±17,5°), de −100 a +100;
+    /// neutro 0.
     pub hsl_magenta_sat: f32,
+    // ------------------------------------------ HSL: matiz
+    /// HSL, giro do matiz do **vermelho**, **em graus** (−180 a +180, aplicado
+    /// sem escala); neutro 0. O cinza não gira: o efeito pesa pela saturação do
+    /// pixel. 🔑 Não é a escala do Lightroom: o `Matiz` dele (−100 a +100) chega
+    /// aqui multiplicado por 0,3 (±30°, o giro medido no extremo do controle),
+    /// e é quem traduz o XMP que faz a conta. Vale para os oito `hsl_*_hue`.
     pub hsl_red_hue: f32,
+    /// HSL, giro do matiz do **laranja**, em graus (−180 a +180); neutro 0.
     pub hsl_orange_hue: f32,
+    /// HSL, giro do matiz do **amarelo**, em graus (−180 a +180); neutro 0.
     pub hsl_yellow_hue: f32,
+    /// HSL, giro do matiz do **verde**, em graus (−180 a +180); neutro 0.
     pub hsl_green_hue: f32,
+    /// HSL, giro do matiz da **água**, em graus (−180 a +180); neutro 0.
     pub hsl_aqua_hue: f32,
+    /// HSL, giro do matiz do **azul**, em graus (−180 a +180); neutro 0.
     pub hsl_blue_hue: f32,
+    /// HSL, giro do matiz do **roxo**, em graus (−180 a +180); neutro 0.
     pub hsl_purple_hue: f32,
+    /// HSL, giro do matiz do **magenta**, em graus (−180 a +180); neutro 0.
     pub hsl_magenta_hue: f32,
+    // ------------------------------------------ HSL: luminância
+    /// HSL, luminância do **vermelho**, de −100 (rumo ao preto) a +100 (rumo
+    /// ao branco), proporcional e sem estourar; neutro 0. O cinza não muda: o
+    /// efeito pesa pela saturação do pixel.
     pub hsl_red_lum: f32,
+    /// HSL, luminância do **laranja**, de −100 a +100; neutro 0.
     pub hsl_orange_lum: f32,
+    /// HSL, luminância do **amarelo**, de −100 a +100; neutro 0.
     pub hsl_yellow_lum: f32,
+    /// HSL, luminância do **verde**, de −100 a +100; neutro 0.
     pub hsl_green_lum: f32,
+    /// HSL, luminância da **água**, de −100 a +100; neutro 0.
     pub hsl_aqua_lum: f32,
+    /// HSL, luminância do **azul**, de −100 a +100; neutro 0.
     pub hsl_blue_lum: f32,
+    /// HSL, luminância do **roxo**, de −100 a +100; neutro 0.
     pub hsl_purple_lum: f32,
+    /// HSL, luminância do **magenta**, de −100 a +100; neutro 0.
     pub hsl_magenta_lum: f32,
+    // ------------------------------------------ Lente
+    /// Distorção da lente, de −100 a +100; neutro 0 — a `Distorção` das
+    /// correções manuais do Lightroom. Modelo radial `r' = r·(1 + k·r²)`, com
+    /// `k = v·0,005` e raio 1 no canto: negativo puxa os cantos para dentro
+    /// (corrige barril), positivo empurra para fora (corrige almofada).
     pub lens_distortion: f32,
+    /// Vinheta da lente, quantidade de −100 (escurece os cantos) a +100
+    /// (clareia); neutro 0 — a `Vinheta` das correções de lente do Lightroom.
+    /// Ganho `1 + v/100·t²`, medido no quadro do arquivo que sai.
     pub lens_vignette_amount: f32,
+    /// Vinheta da lente, ponto onde a queda **começa**, de 0 (no centro) a 100
+    /// (no canto), em fração da distância centro–canto; neutro **0** (ver
+    /// [`Ajustes::default`] para a história do 50).
     pub lens_vignette_midpoint: f32,
+    // ------------------------------------------ Detalhe
+    /// Redução de ruído da luminância, de 0 a 100; neutro 0 (só age acima de
+    /// zero) — a `Luminância` da Redução de ruído do Lightroom. Filtro
+    /// bilateral 5×5.
     pub nr_luminance: f32,
+    /// Redução de ruído da cor, de 0 a 100; neutro 0 (só age acima de zero) —
+    /// a `Cor` da Redução de ruído do Lightroom. Desfoque do U/V numa
+    /// vizinhança 5×5.
     pub nr_color: f32,
+    /// Nitidez, quantidade de 0 a 100; neutro 0 (só age acima de zero) — a
+    /// `Quantidade` da Nitidez do Lightroom. Máscara de nitidez sobre a
+    /// luminância.
     pub sharpen_amount: f32,
+    /// Nitidez, raio do desfoque da máscara, em pixels (σ, com piso de 0,5 e
+    /// a vizinhança 5×5 como teto prático); neutro **1,0** — o `Raio` do
+    /// Lightroom. Só conta com [`Ajustes::sharpen_amount`] acima de zero.
     pub sharpen_radius: f32,
+    // ------------------------------------------ Tonalização (Divisão de tons)
+    /// Divisão de tons, matiz das **sombras**, em graus (0 a 360, dá a volta);
+    /// neutro 0 — o matiz da roda de Sombras da Gradação de cores do
+    /// Lightroom. Sem [`Ajustes::split_shadow_sat`] não faz nada.
     pub split_shadow_hue: f32,
+    /// Divisão de tons, saturação das **sombras**, de 0 a 100 (preso nessa
+    /// faixa); neutro 0.
     pub split_shadow_sat: f32,
+    /// Divisão de tons, matiz dos **realces**, em graus (0 a 360); neutro 0.
     pub split_highlight_hue: f32,
+    /// Divisão de tons, saturação dos **realces**, de 0 a 100; neutro 0.
     pub split_highlight_sat: f32,
+    /// Equilíbrio entre sombras e realces, de −100 a +100 (preso); neutro 0 —
+    /// o `Equilíbrio` do Lightroom. Positivo dá mais foto aos realces,
+    /// negativo às sombras.
     pub split_balance: f32,
+    // ------------------------------------------ Grão
+    /// Grão, quantidade de 0 a 100 (preso); neutro 0 — a `Quantidade` da
+    /// Granulação do Lightroom. Monocromático, e some no preto e no branco.
     pub grain_amount: f32,
+    /// Grão, tamanho de 0 a 100 (preso): a aresta da célula vai de 1 pixel
+    /// (0) a 5 (100). Neutro 0 — ⚠️ o `Tamanho` do Lightroom abre em 25, aqui
+    /// abre no grão fino. Só conta com [`Ajustes::grain_amount`] acima de zero.
     pub grain_size: f32,
     // ------------------------------------------------ Calibração de câmera
     // 🚨 **É a base da maioria dos presets de filme**, e faltava inteira até
@@ -105,21 +232,41 @@ pub struct Ajustes {
     // revelado). Aqui ela é rotação de matiz e escala de saturação em torno de
     // cada primário, com queda larga — o comportamento visível é o mesmo nos
     // valores que os presets usam; o que muda é o extremo.
+    /// Calibração, matiz do **primário vermelho**, de −100 a +100; neutro 0 —
+    /// o `Matiz` do Primário vermelho do Lightroom. O extremo gira ~30°
+    /// (`v·0,3` graus), com queda larga (120°) em torno do primário.
     pub calib_red_hue: f32,
+    /// Calibração, saturação do **primário vermelho**, de −100 a +100 (escala
+    /// a saturação por `1 + v/100`); neutro 0.
     pub calib_red_sat: f32,
+    /// Calibração, matiz do **primário verde**, de −100 a +100 (~±30°);
+    /// neutro 0.
     pub calib_green_hue: f32,
+    /// Calibração, saturação do **primário verde**, de −100 a +100; neutro 0.
     pub calib_green_sat: f32,
+    /// Calibração, matiz do **primário azul**, de −100 a +100 (~±30°);
+    /// neutro 0.
     pub calib_blue_hue: f32,
+    /// Calibração, saturação do **primário azul**, de −100 a +100; neutro 0.
     pub calib_blue_sat: f32,
+    /// Calibração, matiz das **sombras**, de −100 (verde) a +100 (magenta);
+    /// neutro 0 — o `Matiz` de Sombras da Calibração do Lightroom. Até 12
+    /// níveis no preto, e some até o meio-tom.
     pub calib_shadow_tint: f32,
     // ------------------------------------- Color Grading: os eixos que faltavam
     // O split toning clássico tem duas pontas; o "Color Grading" do LR 10 em
     // diante tem três mais um global, e os presets modernos usam os quatro. Sem
     // os tons médios, um preset cinematográfico perde justamente onde a pele
     // vive.
+    /// Gradação de cores, matiz dos **tons médios**, em graus (0 a 360);
+    /// neutro 0.
     pub split_midtone_hue: f32,
+    /// Gradação de cores, saturação dos **tons médios**, de 0 a 100; neutro 0.
     pub split_midtone_sat: f32,
+    /// Gradação de cores, matiz **global** (a foto inteira), em graus (0 a
+    /// 360); neutro 0.
     pub split_global_hue: f32,
+    /// Gradação de cores, saturação **global**, de 0 a 100; neutro 0.
     pub split_global_sat: f32,
     /// Quanto as três faixas se misturam — o `Blending` da Adobe, 0 a 100.
     ///
@@ -133,14 +280,26 @@ pub struct Ajustes {
     // separa um P&B de retrato (pele clara, céu escuro) de um cinza chapado.
     /// Liga o mixer. Sem ele os oito abaixo não fazem nada, como no Lightroom:
     /// o mixer só existe com a foto convertida para P&B.
+    ///
+    /// 0 desligado, qualquer outro valor ligado (grave 1). Ligado, Saturação,
+    /// Vibração e HSL deixam de agir — o Lightroom os apaga no painel.
     pub bw_ativo: f32,
+    /// Mixer P&B, luminância do **vermelho** (mesma faixa do HSL), de −100 a
+    /// +100; neutro 0. Ganho `1 + v/100·saturação` sobre a luminância do pixel.
     pub bw_red: f32,
+    /// Mixer P&B, luminância do **laranja**, de −100 a +100; neutro 0.
     pub bw_orange: f32,
+    /// Mixer P&B, luminância do **amarelo**, de −100 a +100; neutro 0.
     pub bw_yellow: f32,
+    /// Mixer P&B, luminância do **verde**, de −100 a +100; neutro 0.
     pub bw_green: f32,
+    /// Mixer P&B, luminância da **água**, de −100 a +100; neutro 0.
     pub bw_aqua: f32,
+    /// Mixer P&B, luminância do **azul**, de −100 a +100; neutro 0.
     pub bw_blue: f32,
+    /// Mixer P&B, luminância do **roxo**, de −100 a +100; neutro 0.
     pub bw_purple: f32,
+    /// Mixer P&B, luminância do **magenta**, de −100 a +100; neutro 0.
     pub bw_magenta: f32,
     // ---------------------------------------------------- Curva por ponto
     // 🚨 **O maior buraco da importação de presets**: numa amostra de 400
@@ -157,45 +316,86 @@ pub struct Ajustes {
     //
     // ⚠️ **O neutro não é zero: é a identidade.** O ponto `i` vale `i·255/8`,
     // que é a reta que devolve a foto como ela entrou. Ver `Ajustes::default`.
+    //
+    // Cada altura vai de 0 a 255 (a saída é presa nessa faixa); o ponto `i`
+    // fica em `x = i·255/8`. Os canais R, G e B são aplicados primeiro e o
+    // mestre depois, na ordem da Adobe.
     // Canal mestre.
+    /// Curva por ponto, canal **mestre** (RGB), altura em `x = 0` (o preto),
+    /// de 0 a 255; neutro 0 ([`Ajustes::CURVA_NEUTRA`]).
     pub curva_m0: f32,
+    /// Curva mestre, altura em `x = 31,875` (0–255); neutro 31,875.
     pub curva_m1: f32,
+    /// Curva mestre, altura em `x = 63,75` (0–255); neutro 63,75.
     pub curva_m2: f32,
+    /// Curva mestre, altura em `x = 95,625` (0–255); neutro 95,625.
     pub curva_m3: f32,
+    /// Curva mestre, altura em `x = 127,5` (0–255); neutro 127,5.
     pub curva_m4: f32,
+    /// Curva mestre, altura em `x = 159,375` (0–255); neutro 159,375.
     pub curva_m5: f32,
+    /// Curva mestre, altura em `x = 191,25` (0–255); neutro 191,25.
     pub curva_m6: f32,
+    /// Curva mestre, altura em `x = 223,125` (0–255); neutro 223,125.
     pub curva_m7: f32,
+    /// Curva mestre, altura em `x = 255` (o branco), de 0 a 255; neutro 255.
     pub curva_m8: f32,
     // Canal vermelho.
+    /// Curva por ponto, canal **vermelho**, altura em `x = 0` (0–255); neutro 0.
     pub curva_r0: f32,
+    /// Curva vermelha, altura em `x = 31,875` (0–255); neutro 31,875.
     pub curva_r1: f32,
+    /// Curva vermelha, altura em `x = 63,75` (0–255); neutro 63,75.
     pub curva_r2: f32,
+    /// Curva vermelha, altura em `x = 95,625` (0–255); neutro 95,625.
     pub curva_r3: f32,
+    /// Curva vermelha, altura em `x = 127,5` (0–255); neutro 127,5.
     pub curva_r4: f32,
+    /// Curva vermelha, altura em `x = 159,375` (0–255); neutro 159,375.
     pub curva_r5: f32,
+    /// Curva vermelha, altura em `x = 191,25` (0–255); neutro 191,25.
     pub curva_r6: f32,
+    /// Curva vermelha, altura em `x = 223,125` (0–255); neutro 223,125.
     pub curva_r7: f32,
+    /// Curva vermelha, altura em `x = 255` (0–255); neutro 255.
     pub curva_r8: f32,
     // Canal verde.
+    /// Curva por ponto, canal **verde**, altura em `x = 0` (0–255); neutro 0.
     pub curva_g0: f32,
+    /// Curva verde, altura em `x = 31,875` (0–255); neutro 31,875.
     pub curva_g1: f32,
+    /// Curva verde, altura em `x = 63,75` (0–255); neutro 63,75.
     pub curva_g2: f32,
+    /// Curva verde, altura em `x = 95,625` (0–255); neutro 95,625.
     pub curva_g3: f32,
+    /// Curva verde, altura em `x = 127,5` (0–255); neutro 127,5.
     pub curva_g4: f32,
+    /// Curva verde, altura em `x = 159,375` (0–255); neutro 159,375.
     pub curva_g5: f32,
+    /// Curva verde, altura em `x = 191,25` (0–255); neutro 191,25.
     pub curva_g6: f32,
+    /// Curva verde, altura em `x = 223,125` (0–255); neutro 223,125.
     pub curva_g7: f32,
+    /// Curva verde, altura em `x = 255` (0–255); neutro 255.
     pub curva_g8: f32,
     // Canal azul.
+    /// Curva por ponto, canal **azul**, altura em `x = 0` (0–255); neutro 0.
     pub curva_b0: f32,
+    /// Curva azul, altura em `x = 31,875` (0–255); neutro 31,875.
     pub curva_b1: f32,
+    /// Curva azul, altura em `x = 63,75` (0–255); neutro 63,75.
     pub curva_b2: f32,
+    /// Curva azul, altura em `x = 95,625` (0–255); neutro 95,625.
     pub curva_b3: f32,
+    /// Curva azul, altura em `x = 127,5` (0–255); neutro 127,5.
     pub curva_b4: f32,
+    /// Curva azul, altura em `x = 159,375` (0–255); neutro 159,375.
     pub curva_b5: f32,
+    /// Curva azul, altura em `x = 191,25` (0–255); neutro 191,25.
     pub curva_b6: f32,
+    /// Curva azul, altura em `x = 223,125` (0–255); neutro 223,125.
     pub curva_b7: f32,
+    /// Curva azul, altura em `x = 255` (0–255); neutro 255.
     pub curva_b8: f32,
     // ------------------------------------------ Os controles do Lightroom
     // 🔑 **Paridade com o painel do Lightroom** (dono, 2026-09-30: *"na
@@ -207,36 +407,81 @@ pub struct Ajustes {
     // Textura e Remover névoa: os dois que o Básico do Lightroom tem e este
     // não tinha. A Claridade (`clarity`) passou a ser contraste local de verdade
     // no mesmo dia — ver `corpo.wgsl`.
+    /// Textura, de −100 a +100; neutro 0 — a `Textura` do Lightroom. Contraste
+    /// local de vizinhança média (σ = 0,25 % do lado maior), pela guia.
     pub texture: f32,
+    /// Remover névoa, de −100 (põe névoa) a +100 (tira); neutro 0 — o
+    /// `Remover névoa` do Lightroom. Canal escuro de He et al., pela guia.
     pub dehaze: f32,
     // As três divisões da curva paramétrica (o Lightroom abre em 25/50/75).
+    /// Curva paramétrica, divisão entre Sombras e Escuros, de 0 a 100 (em %
+    /// da luminância); neutro **25**.
+    ///
+    /// As três divisões ficam em ordem mesmo quando o JSON traz outra coisa: o
+    /// shader prende cada uma entre a anterior e 100.
     pub tone_curve_split_shadows: f32,
+    /// Curva paramétrica, divisão entre Escuros e Claros, de 0 a 100; neutro
+    /// **50**.
     pub tone_curve_split_midtones: f32,
+    /// Curva paramétrica, divisão entre Claros e Realces, de 0 a 100; neutro
+    /// **75**.
     pub tone_curve_split_highlights: f32,
     // A luminância das três faixas e do global da Gradação de cores.
+    /// Gradação de cores, luminância das **sombras**, de −100 (rumo ao preto) a
+    /// +100 (rumo ao branco), sem estourar; neutro 0.
     pub split_shadow_lum: f32,
+    /// Gradação de cores, luminância dos **tons médios**, de −100 a +100;
+    /// neutro 0.
     pub split_midtone_lum: f32,
+    /// Gradação de cores, luminância dos **realces**, de −100 a +100; neutro 0.
     pub split_highlight_lum: f32,
+    /// Gradação de cores, luminância **global**, de −100 a +100; neutro 0.
     pub split_global_lum: f32,
     // Nitidez: Detalhe (neutro 25, o do Lightroom) e Máscara.
+    /// Nitidez, `Detalhe` do Lightroom, de 0 a 100; neutro **25**. Abaixo de
+    /// 25 contém o detalhe grande (tira halo), acima reforça o fino.
     pub sharpen_detail: f32,
+    /// Nitidez, `Máscara` do Lightroom, de 0 a 100; neutro 0 (a foto inteira).
+    /// Quanto maior, mais a nitidez fica só nas bordas.
     pub sharpen_masking: f32,
     // Redução de ruído: Detalhe e Contraste da luminância, Detalhe e
     // Suavidade da cor (neutros 50/0/50/50, os do Lightroom).
+    /// Redução de ruído, `Detalhe` da luminância, de 0 a 100; neutro **50**.
+    /// Mais detalhe estreita o filtro. Só conta com [`Ajustes::nr_luminance`].
     pub nr_luminance_detail: f32,
+    /// Redução de ruído, `Contraste` da luminância, de 0 a 100; neutro 0.
+    /// Devolve parte do contraste fino que o filtro levou (até metade, em 100).
     pub nr_luminance_contrast: f32,
+    /// Redução de ruído, `Detalhe` da cor, de 0 a 100; neutro **50**. Só conta
+    /// com [`Ajustes::nr_color`].
     pub nr_color_detail: f32,
+    /// Redução de ruído, `Suavidade` da cor, de 0 a 100; neutro **50**. Mais
+    /// suavidade abre o filtro.
     pub nr_color_smoothness: f32,
     // Vinheta pós-corte: estilo (0 prioridade de realces, 1 prioridade de
     // cores, 2 sobreposição de tinta), quantidade, ponto médio, arredondamento,
     // difusão e realces. A `lens_vignette_*` continua sendo a da Lente.
+    /// Vinheta pós-corte, `Estilo`: 0 prioridade de realces, 1 prioridade de
+    /// cores, 2 sobreposição de tinta (arredondado ao inteiro); neutro 0. No
+    /// processo 1, 0 e 1 dão o mesmo resultado, como no Lightroom.
     pub pcv_style: f32,
+    /// Vinheta pós-corte, `Quantidade`, de −100 (escurece) a +100 (clareia),
+    /// presa nessa faixa; neutro 0. Medida no quadro do arquivo que sai.
     pub pcv_amount: f32,
+    /// Vinheta pós-corte, `Ponto médio`, de 0 a 100; neutro **50**. Leva a
+    /// linha de força total da borda (0) até o canto (100).
     pub pcv_midpoint: f32,
+    /// Vinheta pós-corte, `Arredondamento`, de −100 (retângulo de cantos
+    /// redondos) a +100 (círculo); neutro 0 (a elipse do quadro).
     pub pcv_roundness: f32,
+    /// Vinheta pós-corte, `Difusão`, de 0 (borda dura) a 100; neutro **50**.
     pub pcv_feather: f32,
+    /// Vinheta pós-corte, `Realces`, de 0 a 100; neutro 0. Poupa os claros ao
+    /// escurecer — só no processo 0, nos estilos 0 e 1.
     pub pcv_highlights: f32,
     // Aspereza do grão (neutro 50).
+    /// Grão, `Aspereza` do Lightroom, de 0 (liso) a 100 (irregular); neutro
+    /// **50**. Só conta com [`Ajustes::grain_amount`] acima de zero.
     pub grain_roughness: f32,
     // ------------------------------------------ A versão de processo
     // 🔑 **0 é a conta de antes; 1 é a do Lightroom medida** (dono, 2026-10-01:
@@ -247,6 +492,11 @@ pub struct Ajustes {
     // `serde(default)` o completa com 0, e a foto que o operador já entregou
     // continua igual até alguém a atualizar. Quem liga o 1 é a foto nova e o
     // preset do Lightroom.
+    /// A versão de processo: 0 a conta de antes, 1 as tabelas medidas no
+    /// Lightroom ([`crate::lightroom`]); 0,5 ou mais conta como 1. Neutro 0.
+    ///
+    /// No neutro de todos os outros campos os dois processos dão a mesma foto
+    /// — por isso [`Ajustes::sem_efeito`] o ignora.
     pub processo: f32,
     // ------------------------------------------ A vinheta do darktable
     // 🎞️ O módulo `vignette` do darktable (`src/iop/vignette.c`,
@@ -261,16 +511,39 @@ pub struct Ajustes {
     // entra: é sempre ligado (o 0–255 do fim do shader prende). Prefixo
     // `darktable_`, e não `dt_`: os `dt_*` são a receita antiga, que
     // `migrar_do_darktable` traduz e apaga.
+    /// Vinheta do darktable, o botão do módulo: 0 desligada, 1 ligada (0,5 ou
+    /// mais conta como ligada); neutro 0. Sem ele os dez abaixo não fazem nada
+    /// — ver [`Ajustes::vinheta_do_darktable_ligada`].
     pub darktable_vignette_ativo: f32,
+    /// Vinheta do darktable, início do decaimento (`scale`), de 0 a 200 % do
+    /// meio-quadro; padrão do módulo **80**.
     pub darktable_vignette_scale: f32,
+    /// Vinheta do darktable, raio do decaimento (`falloff_scale`), de 0 a
+    /// 200 % do meio-quadro; padrão **50** (com o piso anti-serrilhado do
+    /// darktable).
     pub darktable_vignette_falloff_scale: f32,
+    /// Vinheta do darktable, brilho, de −1 a +1; padrão **−0,5**. Negativo
+    /// multiplica a luz linear, positivo **soma** (a borda branca).
     pub darktable_vignette_brightness: f32,
+    /// Vinheta do darktable, saturação, de −1 a +1; padrão **−0,5**.
     pub darktable_vignette_saturation: f32,
+    /// Vinheta do darktable, centro em x, de −1 a +1 (fração do meio-quadro, 0
+    /// no meio); padrão 0.
     pub darktable_vignette_center_x: f32,
+    /// Vinheta do darktable, centro em y, de −1 a +1 (o `y` cresce para
+    /// baixo); padrão 0.
     pub darktable_vignette_center_y: f32,
+    /// Vinheta do darktable, proporção automática: 1 segue a proporção do
+    /// quadro, 0 usa [`Ajustes::darktable_vignette_whratio`]; padrão 0.
     pub darktable_vignette_autoratio: f32,
+    /// Vinheta do darktable, largura/altura, de 0 a 2 (preso em 0,001..1,999);
+    /// padrão **1** (círculo). Só conta sem a proporção automática.
     pub darktable_vignette_whratio: f32,
+    /// Vinheta do darktable, forma, de 0 a 5 (expoente `2/forma` da
+    /// superelipse); padrão **1** (círculo/elipse).
     pub darktable_vignette_shape: f32,
+    /// Vinheta do darktable, matização: 0 desligada, 1 ruído de 8 bits, 2 de
+    /// 16 bits (arredondado ao inteiro); padrão 0.
     pub darktable_vignette_dithering: f32,
 }
 
@@ -612,13 +885,15 @@ impl Ajustes {
         "darktable_vignette_dithering",
     ];
 
-    /// Os 46 valores, por posição — o que a GPU recebe, como `f32`.
+    /// Os [`QUANTIDADE`] valores, por posição — o que a GPU recebe, como `f32`,
+    /// na ordem de [`Ajustes::NOMES`].
     pub fn como_vetor(&self) -> [f32; QUANTIDADE] {
         let campos: &[f32] = bytemuck::cast_slice(bytemuck::bytes_of(self));
         campos.try_into().expect("53 campos de quatro bytes")
     }
 
-    /// De um vetor posicional de 46 `f32`; `None` se o tamanho for outro.
+    /// De um vetor posicional de [`QUANTIDADE`] `f32`, na ordem de
+    /// [`Ajustes::NOMES`]; `None` se o tamanho for outro.
     ///
     /// 🚨 É por aqui que o navegador manda os ajustes, e o tamanho é a única
     /// conferência possível: 52 valores seriam 52 campos certos e um lixo.

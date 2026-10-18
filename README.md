@@ -91,8 +91,17 @@ receber como argumento (`scripts/construir-fotolivro.sh ../photokads-plataforma/
 | `cargo doc -D warnings` | nenhum link quebrado nem item privado citado na documentação pública |
 | `cargo deny check` | licenças permitidas, nenhuma vulnerabilidade conhecida (RustSec), só o crates.io como fonte |
 
-Além dele: `make cobertura` (cobertura por crate, `cargo llvm-cov`), `make semver` (a API pública
-contra a última tag, `cargo semver-checks`) e `make msrv`.
+Além dele:
+
+- `make cobertura` — cobertura por arquivo (`cargo llvm-cov`), com **piso de 90 % de linhas** sem
+  o `vendor/` (hoje 94 %);
+- `make semver` — a API pública de cada crate contra a última tag (`cargo semver-checks`);
+- `make msrv` — compila com o Rust mínimo declarado.
+
+Regras que o compilador cobra: todo item público documentado (`#![deny(missing_docs)]` em todo
+crate) e nenhum `unsafe`. As que a revisão cobra: mudança vem com o teste que falha sem ela, e
+quem lê arquivo (RAW, JPEG, PDF, cartão) tem teste de arquivo cortado e torto — erro, nunca
+pânico, porque no site o wasm roda com `panic = "abort"`.
 
 **Rust mínimo (MSRV): 1.92**, conferido compilando com o toolchain 1.92 — é o que o `hayro` (o
 desenho dos PDFs) exige. Subir o MSRV é mudança que quebra: vai no CHANGELOG.

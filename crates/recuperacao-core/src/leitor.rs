@@ -17,6 +17,12 @@ use std::io::{self, Read, Seek, SeekFrom};
 /// setores de 512 e de 4K.
 pub const JANELA: u64 = 1 << 20;
 
+/// O dispositivo (ou a imagem, ou o `Cursor`) lido em janelas de [`JANELA`]
+/// alinhadas, com a última guardada. Os formatos leem por posição absoluta,
+/// sem se preocupar com alinhamento.
+///
+/// Toda leitura que não alcança o que pediu devolve `None` (ou menos bytes),
+/// e não erro: o fim do cartão é o fim natural de uma foto cortada.
 pub struct Leitor<R> {
     fonte: R,
     total: Option<u64>,
@@ -41,6 +47,7 @@ impl<R: Read + Seek> Leitor<R> {
         }
     }
 
+    /// O tamanho do dispositivo, em bytes, se foi dado em [`novo`](Self::novo).
     pub fn total(&self) -> Option<u64> {
         self.total
     }
@@ -68,21 +75,25 @@ impl<R: Read + Seek> Leitor<R> {
         Ok((self.ler_em(pos, buf)? == buf.len()).then_some(()))
     }
 
+    /// O byte em `pos`, ou `None` depois do fim.
     pub fn u8_em(&mut self, pos: u64) -> io::Result<Option<u8>> {
         let mut b = [0u8; 1];
         Ok(self.ler_exato(pos, &mut b)?.map(|_| b[0]))
     }
 
+    /// O `u16` big-endian em `pos`, ou `None` se não couber antes do fim.
     pub fn u16_be(&mut self, pos: u64) -> io::Result<Option<u16>> {
         let mut b = [0u8; 2];
         Ok(self.ler_exato(pos, &mut b)?.map(|_| u16::from_be_bytes(b)))
     }
 
+    /// O `u32` big-endian em `pos`, ou `None` se não couber antes do fim.
     pub fn u32_be(&mut self, pos: u64) -> io::Result<Option<u32>> {
         let mut b = [0u8; 4];
         Ok(self.ler_exato(pos, &mut b)?.map(|_| u32::from_be_bytes(b)))
     }
 
+    /// O `u64` big-endian em `pos`, ou `None` se não couber antes do fim.
     pub fn u64_be(&mut self, pos: u64) -> io::Result<Option<u64>> {
         let mut b = [0u8; 8];
         Ok(self.ler_exato(pos, &mut b)?.map(|_| u64::from_be_bytes(b)))

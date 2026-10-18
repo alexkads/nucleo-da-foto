@@ -22,16 +22,27 @@ pub mod tiff;
 /// copiar meio cartão como se fosse uma foto só.
 pub const MAIOR_FOTO: u64 = 1 << 30;
 
+/// O formato de uma foto achada — o que decide a extensão do arquivo
+/// recuperado.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Formato {
+    /// JPEG, com as prévias MPF anexadas quando a câmera as grava.
     Jpeg,
+    /// Canon antes de 2018 (TIFF com `CR` no byte 8, ou `Make` Canon).
     Cr2,
+    /// Canon desde 2018 (caixas ISO BMFF, `ftyp` `crx `).
     Cr3,
+    /// Nikon (TIFF com `Make` Nikon).
     Nef,
+    /// Sony (TIFF com `Make` Sony).
     Arw,
+    /// Adobe DNG, de qualquer marca (TIFF com a tag `DNGVersion`).
     Dng,
+    /// Olympus e OM System (assinatura `IIRO`/`IIRS`/`MMOR`, ou `Make`).
     Orf,
+    /// Panasonic e Leica (mágica TIFF `0x55`, ou `Make`).
     Rw2,
+    /// Fujifilm (cabeçalho `FUJIFILMCCD-RAW `).
     Raf,
     /// Um TIFF que não é de nenhuma das marcas acima.
     Tiff,
@@ -55,6 +66,8 @@ impl Formato {
         }
     }
 
+    /// Se é o arquivo cru do sensor. Só [`Jpeg`](Self::Jpeg) e
+    /// [`Tiff`](Self::Tiff) não são.
     pub fn e_raw(self) -> bool {
         !matches!(self, Formato::Jpeg | Formato::Tiff)
     }
@@ -63,9 +76,13 @@ impl Formato {
 /// Qual família a assinatura sugere. A medida é quem confirma.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Familia {
+    /// `FF D8 FF` e um marcador de começo de arquivo.
     Jpeg,
+    /// Um cabeçalho TIFF: o TIFF puro e os RAW que moram nele.
     Tiff,
+    /// Uma caixa `ftyp` da Canon.
     Cr3,
+    /// O cabeçalho do RAF.
     Raf,
 }
 
@@ -73,6 +90,9 @@ pub enum Familia {
 pub const CABECA: usize = 16;
 
 /// Os primeiros bytes de um setor parecem o começo de uma foto?
+///
+/// Olha só os [`CABECA`] primeiros bytes; com menos, `None`. Barato de
+/// propósito: roda em todo setor do cartão.
 pub fn assinatura(cabeca: &[u8]) -> Option<Familia> {
     if cabeca.len() < CABECA {
         return None;
@@ -92,6 +112,15 @@ pub fn assinatura(cabeca: &[u8]) -> Option<Familia> {
 
 /// Onde termina a foto que começa em `inicio`, e de que formato ela é.
 /// `None` quando a estrutura não fecha.
+///
+/// O `u64` devolvido é o **tamanho** em bytes (o fim menos `inicio`), já
+/// conferido: maior que zero, até [`MAIOR_FOTO`] e, quando o leitor sabe o
+/// total, dentro do cartão. Chame-a depois que [`assinatura`] deu a família.
+///
+/// # Erros
+///
+/// O erro de E/S do dispositivo, como veio. Estrutura estragada não é erro: é
+/// `Ok(None)`.
 pub fn medir<R: Read + Seek>(
     leitor: &mut Leitor<R>,
     inicio: u64,

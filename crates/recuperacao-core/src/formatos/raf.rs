@@ -15,10 +15,27 @@ const ASSINATURA: &[u8; 16] = b"FUJIFILMCCD-RAW ";
 /// Onde começam os três pares (deslocamento, tamanho).
 const PARES: u64 = 84;
 
+/// A assinatura do RAF: os 16 bytes `FUJIFILMCCD-RAW `.
+///
+/// # Pânico
+///
+/// Se `cabeca` tiver menos de 16 bytes — quem chama é
+/// [`assinatura`](super::assinatura), que garante [`CABECA`](super::CABECA).
 pub fn parece(cabeca: &[u8]) -> bool {
     &cabeca[..16] == ASSINATURA
 }
 
+/// O tamanho em bytes do RAF que começa em `inicio` (posição absoluta no
+/// dispositivo), lido da estrutura: o fim da parte mais distante entre prévia,
+/// cabeçalho e dados do sensor; sem dados do sensor, não é foto. `None` quando
+/// a estrutura não fecha.
+///
+/// Não confere o fim contra o tamanho do cartão: use
+/// [`formatos::medir`](super::medir), que confere.
+///
+/// # Erros
+///
+/// O erro de E/S do dispositivo, como veio.
 pub fn medir<R: Read + Seek>(leitor: &mut Leitor<R>, inicio: u64) -> io::Result<Option<u64>> {
     let mut fim = 0u64;
     let mut partes = [(0u64, 0u64); 3];

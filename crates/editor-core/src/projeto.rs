@@ -88,24 +88,44 @@ use crate::vetor::{Caminho, Caminhos, LugarDoCaminho, MascaraVetorial};
 ///   difusão — recusa com o aviso. Os formatos 1–12 se leem como estão.
 pub const FORMATO: u32 = 13;
 
+/// O nome do manifesto dentro da pasta do projeto. É o último arquivo que a
+/// gravação troca, e quem diz qual revisão está de pé.
 pub const MANIFESTO: &str = "projeto.json";
 const PASTA_DOS_TILES: &str = "tiles";
 
+/// Por que gravar ou reabrir o projeto falhou. A mensagem (`Display`) é a que
+/// o operador lê.
 #[derive(thiserror::Error, Debug)]
 pub enum ErroDoProjeto {
+    /// Uma leitura ou escrita no disco falhou. Na gravação, a revisão anterior
+    /// continua de pé (C33).
     #[error("o disco recusou: {0}")]
     Disco(#[from] io::Error),
+    /// O manifesto não é JSON válido ou não tem a forma esperada, ou cita um
+    /// tile com chave ilegível. Leva a mensagem do leitor.
     #[error("o projeto não pôde ser lido: {0}")]
     Formato(String),
+    /// O manifesto tem um formato maior que [`FORMATO`] (o número achado):
+    /// foi gravado por um app mais novo, e este não o lê nem grava por cima.
     #[error("o projeto foi gravado por uma versão mais nova do app (formato {0})")]
     FormatoNovo(u32),
+    /// A base entregue a [`Projeto::abrir`] não é a do manifesto (impressão
+    /// ou dimensões diferentes).
     #[error(
         "a foto de origem mudou desde a edição (esperada {esperada}, achada {achada}): \
          pintar por cima desalinharia tudo"
     )]
-    BaseDiferente { esperada: String, achada: String },
+    BaseDiferente {
+        /// A impressão da base gravada no manifesto ([`BaseRef::sha256`]).
+        esperada: String,
+        /// A impressão da base que chegou agora.
+        achada: String,
+    },
+    /// Um tile não descomprime, não tem o tamanho de um tile ou não bate com
+    /// o hash que é o nome dele. Leva o hash (e o erro, quando houver).
     #[error("um pedaço da camada está corrompido ({0})")]
     TileCorrompido(String),
+    /// O PNG da imagem editada não pôde ser codificado ou lido.
     #[error("a imagem editada não saiu: {0}")]
     Codificacao(String),
 }
@@ -116,8 +136,11 @@ pub enum ErroDoProjeto {
 /// falhar em cada um.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Etapa {
+    /// Passo 1: os tiles novos em `tiles/`.
     Tiles,
+    /// Passo 2: a imagem editada da revisão (`composta-<rev>.png`).
     Composta,
+    /// Passo 3: o [`MANIFESTO`], que vira a revisão de uma vez.
     Manifesto,
 }
 
@@ -127,13 +150,18 @@ pub trait Disco: Send + Sync {
     /// Grava `bytes` em `destino` **atomicamente**: quem lê vê o arquivo
     /// anterior ou o novo inteiro, nunca a metade.
     fn gravar(&self, destino: &Path, bytes: &[u8], etapa: Etapa) -> io::Result<()>;
+    /// O arquivo inteiro.
     fn ler(&self, caminho: &Path) -> io::Result<Vec<u8>>;
+    /// O arquivo existe (o padrão olha o sistema de arquivos).
     fn existe(&self, caminho: &Path) -> bool {
         caminho.exists()
     }
+    /// Apaga um arquivo — os `.tmp` e o que a coleta solta.
     fn apagar(&self, caminho: &Path) -> io::Result<()> {
         std::fs::remove_file(caminho)
     }
+    /// Os caminhos dentro de `pasta`, sem descer em subpastas e sem ordem
+    /// garantida. Pasta que não existe é uma lista vazia, não erro.
     fn listar(&self, pasta: &Path) -> io::Result<Vec<PathBuf>> {
         match std::fs::read_dir(pasta) {
             Ok(itens) => Ok(itens.filter_map(|i| i.ok().map(|i| i.path())).collect()),
@@ -141,6 +169,7 @@ pub trait Disco: Send + Sync {
             Err(e) => Err(e),
         }
     }
+    /// Cria `pasta` e as de cima que faltarem; já existir não é erro.
     fn criar_pasta(&self, pasta: &Path) -> io::Result<()> {
         std::fs::create_dir_all(pasta)
     }
@@ -198,6 +227,7 @@ impl Disco for DiscoReal {
 /// O disco que falha na `n`-ésima escrita de uma etapa — e, como um corte de
 /// energia, deixa o `.tmp` para trás.
 pub struct DiscoComFalha {
+    /// A etapa em que a falha acontece; as escritas das outras passam.
     pub etapa: Etapa,
     /// Quantas escritas daquela etapa passam antes da que falha.
     pub depois_de: usize,
@@ -205,6 +235,8 @@ pub struct DiscoComFalha {
 }
 
 impl DiscoComFalha {
+    /// Falha na escrita de número `depois_de + 1` (contando de 1) da `etapa`
+    /// — e em todas as seguintes dela.
     pub fn novo(etapa: Etapa, depois_de: usize) -> Self {
         Self {
             etapa,
@@ -231,12 +263,20 @@ impl Disco for DiscoComFalha {
 
 // -------------------------------------------------------------- manifesto
 
+/// O `projeto.json`: o documento e o histórico sem os pixels, com os tiles
+/// citados pelo hash.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Manifesto {
+    /// O formato em que foi gravado (ver [`FORMATO`]).
     pub formato: u32,
+    /// A revisão que este manifesto descreve — a que quem gravou passou a
+    /// [`Projeto::salvar`]; sobe a cada gravação (C33).
     pub revisao: u64,
+    /// A base neutra de que o documento partiu.
     pub base: BaseRef,
+    /// As camadas, de baixo para cima.
     pub camadas: Vec<CamadaSalva>,
+    /// O histórico, sem os passos de seleção e de guias.
     pub historico: HistoricoSalvo,
     /// `None` quando o projeto não tem efeito (C30).
     pub composta: Option<CompostaSalva>,
@@ -250,10 +290,14 @@ pub struct Manifesto {
     pub caminhos: Caminhos,
 }
 
+/// Uma [`Camada`] no manifesto: as propriedades e os hashes dos tiles.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CamadaSalva {
+    /// [`Camada::nome`].
     pub nome: String,
+    /// [`Camada::visivel`].
     pub visivel: bool,
+    /// [`Camada::opacidade`], `0..=1`.
     pub opacidade: f32,
     /// Ausente no formato 1: Normal.
     #[serde(default)]
@@ -284,10 +328,14 @@ fn sem_bloqueio(b: &Bloqueio) -> bool {
     !b.algum()
 }
 
+/// Uma [`Mascara`] no manifesto.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MascaraSalva {
+    /// [`Mascara::fundo`]: 255 revela, 0 esconde.
     pub fundo: u8,
+    /// [`Mascara::ativa`].
     pub ativa: bool,
+    /// `"coluna,linha"` → hash do tile, como em [`CamadaSalva::tiles`].
     pub tiles: BTreeMap<String, String>,
     /// Formato 9: a corrente com a camada (ausente = vinculada).
     #[serde(default = "verdadeiro", skip_serializing_if = "Clone::clone")]
@@ -316,118 +364,194 @@ fn e_zero(v: &f32) -> bool {
     *v == 0.0
 }
 
+/// O [`Historico`] no manifesto, já sem os passos de seleção e de guias.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoricoSalvo {
+    /// Os passos, na ordem, inclusive os desfeitos (o refazer sobrevive à
+    /// reabertura).
     pub passos: Vec<PassoSalvo>,
+    /// Quantos passos estão aplicados. Ao reabrir, é também o ponto de
+    /// salvamento.
     pub posicao: usize,
 }
 
+/// Um [`Comando`] no manifesto, com os tiles trocados pelos hashes. Cada
+/// variante é a do comando de mesmo nome; o `tipo` no JSON é o nome em
+/// `snake_case`. Não há variante para a seleção nem para as guias: não vão
+/// para o projeto.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tipo", rename_all = "snake_case")]
 pub enum PassoSalvo {
+    /// [`Comando::Traco`].
     Traco {
+        /// O índice da camada (de baixo para cima).
         camada: usize,
+        /// O traço foi na máscara (ausente = nos pixels).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         na_mascara: bool,
+        /// Os tiles tocados, antes do traço.
         antes: Vec<TileSalvo>,
+        /// Os mesmos tiles, depois do traço.
         depois: Vec<TileSalvo>,
     },
+    /// Formato 4: [`Comando::Mascara`].
     Mascara {
+        /// O índice da camada (de baixo para cima).
         camada: usize,
+        /// A máscara antes (`None` = não havia).
         antes: Option<MascaraSalva>,
+        /// A máscara depois (`None` = excluída).
         depois: Option<MascaraSalva>,
     },
+    /// Formato 5: [`Comando::Ajuste`].
     Ajuste {
+        /// O índice da camada (de baixo para cima).
         camada: usize,
+        /// Os parâmetros antes.
         antes: Ajuste,
+        /// Os parâmetros depois.
         depois: Ajuste,
     },
+    /// [`Comando::Visibilidade`].
     Visibilidade {
+        /// O índice da camada (de baixo para cima).
         camada: usize,
+        /// Visível antes.
         antes: bool,
+        /// Visível depois.
         depois: bool,
     },
     /// Formato 8: a máscara de corte ligada ou liberada.
     Recorte {
+        /// O índice da camada (de baixo para cima).
         camada: usize,
+        /// Recortada antes.
         antes: bool,
+        /// Recortada depois.
         depois: bool,
     },
     /// Formato 9: os cadeados da camada.
     Bloqueio {
+        /// O índice da camada (de baixo para cima).
         camada: usize,
+        /// Os cadeados antes.
         antes: Bloqueio,
+        /// Os cadeados depois.
         depois: Bloqueio,
     },
+    /// [`Comando::Opacidade`].
     Opacidade {
+        /// O índice da camada (de baixo para cima).
         camada: usize,
+        /// A opacidade antes, `0..=1`.
         antes: f32,
+        /// A opacidade depois, `0..=1`.
         depois: f32,
     },
+    /// Formato 2: [`Comando::Modo`].
     Modo {
+        /// O índice da camada (de baixo para cima).
         camada: usize,
+        /// O modo antes.
         antes: Modo,
+        /// O modo depois.
         depois: Modo,
     },
+    /// Formato 2: [`Comando::Renomear`].
     Renomear {
+        /// O índice da camada (de baixo para cima).
         camada: usize,
+        /// O nome antes.
         antes: String,
+        /// O nome depois.
         depois: String,
     },
+    /// Formato 2: [`Comando::CriarCamada`].
     CriarCamada {
+        /// Onde a camada entra.
         indice: usize,
+        /// A camada inteira, com os tiles dela.
         camada: CamadaSalva,
     },
+    /// Formato 2: [`Comando::ExcluirCamada`].
     ExcluirCamada {
+        /// De onde a camada sai.
         indice: usize,
+        /// A camada inteira, para o desfazer devolvê-la.
         camada: CamadaSalva,
     },
+    /// Formato 2: [`Comando::MoverCamada`].
     MoverCamada {
+        /// O índice de antes.
         de: usize,
+        /// O índice de depois.
         para: usize,
     },
+    /// Formato 3: [`Comando::Mesclar`] (⌘E).
     Mesclar {
+        /// O índice da camada de cima, a que sai.
         indice: usize,
+        /// A camada de cima inteira.
         de_cima: CamadaSalva,
+        /// Os tiles da camada de baixo antes da mesclagem.
         antes: Vec<TileSalvo>,
+        /// Os mesmos tiles depois.
         depois: Vec<TileSalvo>,
     },
     /// Formato 6: vários passos que são um gesto só (camada via recorte).
     Varios {
+        /// O nome do gesto no painel Histórico.
         nome: String,
+        /// Os passos, na ordem em que foram aplicados.
         passos: Vec<PassoSalvo>,
     },
     /// Formato 11: um caminho antes e depois (um gesto da Caneta).
     Caminho {
+        /// O nome do passo no painel Histórico.
         nome: String,
+        /// Onde o caminho mora.
         lugar: LugarDoCaminho,
+        /// A posição do nomeado na lista (ausente = 0).
         #[serde(default)]
         indice: usize,
+        /// O caminho antes (`None` = não existia).
         antes: Option<Caminho>,
+        /// O caminho depois (`None` = excluído).
         depois: Option<Caminho>,
     },
     /// Formato 11: a máscara vetorial antes e depois.
     MascaraVetorial {
+        /// O índice da camada (de baixo para cima).
         camada: usize,
+        /// A máscara vetorial antes (`None` = não havia).
         antes: Option<MascaraVetorial>,
+        /// A máscara vetorial depois (`None` = excluída).
         depois: Option<MascaraVetorial>,
     },
 }
 
+/// Um tile citado por um passo: a posição e o conteúdo (pelo hash).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TileSalvo {
-    /// Com sinal desde o formato 7: o tile pode estar fora da foto.
+    /// A coluna do tile, em tiles ([`LADO_DO_TILE`](crate::tiles::LADO_DO_TILE)
+    /// pixels cada). Com sinal desde o formato 7: o tile pode estar fora da foto.
     pub c: i32,
+    /// A linha do tile, em tiles; com sinal, como a coluna.
     pub l: i32,
     /// `None` = o tile não existia (transparente).
     pub hash: Option<String>,
 }
 
+/// A imagem editada da revisão, como o manifesto a cita.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompostaSalva {
+    /// O nome do arquivo dentro da pasta do projeto ([`nome_da_composta`]).
     pub arquivo: String,
+    /// O SHA-256 dos bytes do PNG, em hexadecimal.
     pub sha256: String,
+    /// Largura da imagem, em pixels (a da base).
     pub largura: u32,
+    /// Altura da imagem, em pixels (a da base).
     pub altura: u32,
 }
 
@@ -866,6 +990,7 @@ fn posicao_da_chave(chave: &str) -> Option<Posicao> {
 /// O que uma gravação produziu.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Salvo {
+    /// A revisão gravada — a que foi pedida a [`Projeto::salvar`].
     pub revisao: u64,
     /// `None` quando o documento é neutro (C30): não há imagem editada.
     pub versao: Option<VersaoEditada>,
@@ -873,11 +998,41 @@ pub struct Salvo {
 
 /// O que se lê do projeto ao reabrir.
 pub struct Aberto {
+    /// O documento como foi salvo, com os pixels lidos dos tiles.
     pub documento: Documento,
+    /// O histórico gravado, com o refazer; o ponto de salvamento é a posição
+    /// gravada (aberto = sem alterações).
     pub historico: Historico,
+    /// A revisão do manifesto lido.
     pub revisao: u64,
 }
 
+/// A pasta de um projeto e o disco por onde ela é lida e gravada.
+///
+/// A gravação segue os passos de `03-GRAVACAO-E-CATALOGO.md`: este tipo faz o
+/// 1–3 ([`Projeto::salvar`]) e o 6 ([`Projeto::coletar`]); o 4 (confirmar no
+/// catálogo) é de quem chama, no meio.
+///
+/// ```rust
+/// use std::sync::Arc;
+///
+/// use editor_core::projeto::{DiscoReal, Projeto};
+/// use editor_core::{BaseRef, Documento, Historico};
+///
+/// let pasta = tempfile::tempdir()?;
+/// let base = image::RgbImage::new(64, 64);
+/// let doc = Documento::novo(BaseRef::da_imagem(&base));
+/// let projeto = Projeto::novo(pasta.path(), Arc::new(DiscoReal));
+///
+/// let salvo = projeto.salvar("edicao-1", &base, &doc, &Historico::novo(), 1)?;
+/// assert!(salvo.versao.is_none()); // documento neutro: sem imagem editada (C30)
+/// // ... o catálogo confirma a revisão 1, e só então:
+/// projeto.coletar(1)?;
+///
+/// let aberto = projeto.abrir(&base)?.expect("há gravação");
+/// assert_eq!((aberto.revisao, aberto.documento), (1, doc));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub struct Projeto {
     pasta: PathBuf,
     disco: Arc<dyn Disco>,
@@ -889,6 +1044,8 @@ pub struct Projeto {
 }
 
 impl Projeto {
+    /// O projeto em `pasta`, lido e gravado por `disco` ([`DiscoReal`] fora
+    /// dos testes). Não toca no disco: a pasta pode ainda não existir.
     pub fn novo(pasta: impl Into<PathBuf>, disco: Arc<dyn Disco>) -> Self {
         Self {
             pasta: pasta.into(),
@@ -897,6 +1054,7 @@ impl Projeto {
         }
     }
 
+    /// A pasta do projeto, onde moram o manifesto, `tiles/` e as compostas.
     pub fn pasta(&self) -> &Path {
         &self.pasta
     }
@@ -1287,6 +1445,7 @@ impl Projeto {
     }
 }
 
+/// O nome do arquivo da imagem editada da revisão: `composta-<revisao>.png`.
 pub fn nome_da_composta(revisao: u64) -> String {
     format!("composta-{revisao}.png")
 }

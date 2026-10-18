@@ -98,11 +98,22 @@ Compilar só com o `[patch]` ligado esconde que a tag não tem a mudança.
 - Rode a bateria inteira antes de começar, para saber que o vermelho, se vier, é seu:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo check --target wasm32-unknown-unknown -p conversao-web -p fotolivro-web -p raw-web -p revelacao-web -p tela-do-cliente-web
+make verificar   # fmt, clippy nativo e wasm32, testes e doc-tests, doc -D warnings, cargo deny
 ```
+
+### O que a casa exige de toda mudança
+
+- **Todo item `pub` documentado.** Todo crate tem `#![deny(missing_docs)]`: item público sem doc
+  não compila. Diga unidade, faixa, valor neutro e o porquê — não repita o nome.
+- **Teste junto.** Mudança de comportamento vem com o teste que falha sem ela. Leitura de arquivo
+  (RAW, JPEG, PDF, cartão) tem teste de arquivo cortado e torto: erro, nunca pânico — no site o
+  wasm roda com `panic = "abort"`, e um pânico derruba o módulo inteiro.
+- **Cobertura com piso.** `make cobertura` falha abaixo de 90 % de linhas (sem o `vendor/`).
+- **Os `*-web` são cascas.** A lógica deles mora num módulo que compila em nativo (`contrato.rs`,
+  ou uma função privada que devolve `Result<_, String>`) e é testada ali; o `#[wasm_bindgen]` só
+  converte o erro em `JsValue`. O que exige WebGPU ou canvas fica no módulo `wasm32`.
+- **Mudou o `vendor/rawler`?** Marque a linha com `// nucleo-da-foto:` e registre em
+  `vendor/rawler/MUDANCAS.md` — é LGPL, e quem recebe o binário tem direito de saber o que mudou.
 
 ### O que é mudança que quebra (bump do menor enquanto for 0.x)
 
@@ -135,7 +146,7 @@ Na dúvida entre patch e menor, é menor.
 
 ```sh
 cargo install cargo-semver-checks --locked   # uma vez
-cargo semver-checks --workspace --baseline-rev v0.1.0
+make semver          # cada crate contra a última tag
 ```
 
 Ele pega remoção, assinatura e `#[non_exhaustive]`; não pega mudança de comportamento nem a API
@@ -158,7 +169,7 @@ JavaScript dos `*-web`. Essas duas são revisão humana.
 
 ### Lançar uma versão
 
-1. Bateria inteira verde (acima), mais o `cargo semver-checks` contra a tag anterior.
+1. `make verificar`, `make cobertura` e `make semver` verdes.
 2. Suba `version` em `[workspace.package]` do `Cargo.toml` (uma versão para o workspace inteiro).
 3. Escreva a entrada no topo do `CHANGELOG.md`:
 
@@ -200,6 +211,6 @@ JavaScript dos `*-web`. Essas duas são revisão humana.
   existe para evitar.
 - Não deixar `[patch]` local num commit de nenhum consumidor.
 - Não usar `branch` nem `path` versionado para o núcleo.
-- Não lançar sem a bateria inteira, inclusive o `wasm32` dos `*-web`.
+- Não lançar sem `make verificar` inteiro, inclusive o `wasm32`.
 - Não mexer em tag publicada.
 - Não trocar a tag do núcleo nos projetos do RecordarFotos sem o dono pedir.

@@ -61,8 +61,12 @@ const ETAPAS: usize = 3;
 /// rodou nesta revelação, ou o carimbo não é confiável.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TemposDaGpu {
+    /// As passadas que rasterizam as máscaras locais ([`EtapaDaGpu::Mascaras`]).
     pub mascaras_ms: Option<f32>,
+    /// Clone, Heal e o remendo do Preencher ([`EtapaDaGpu::Retoques`]).
     pub retoques_ms: Option<f32>,
+    /// A passada dos ajustes globais, o shader de [`crate::Ajustes`]
+    /// ([`EtapaDaGpu::Revelacao`]).
     pub revelacao_ms: Option<f32>,
     /// Do começo da primeira passada ao fim da última — inclui o intervalo
     /// entre passadas, e não inclui a cópia de volta para a CPU.
@@ -203,6 +207,12 @@ pub struct Cronometro {
 impl Cronometro {
     // No navegador os recursos do wgpu não são `Send`, e o cronômetro nem é
     // criado lá (o motor só o liga no desktop) — o `Arc` é pelo desktop.
+    /// Cria o conjunto de 256 carimbos e os dois buffers (resolvido e
+    /// leitura) no `dispositivo`, e lê da `fila` o período do relógio da GPU.
+    ///
+    /// 🚨 Só num dispositivo aberto com `Features::TIMESTAMP_QUERY` — ver
+    /// [`suportado`]. Sem ele o `create_query_set` é erro de validação do
+    /// wgpu, que no tratador padrão vira pânico.
     #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn novo(dispositivo: &wgpu::Device, fila: &wgpu::Queue) -> Self {
         let bytes = u64::from(CAPACIDADE) * 8;

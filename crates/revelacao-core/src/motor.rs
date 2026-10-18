@@ -497,7 +497,11 @@ impl std::error::Error for ErroAoAbrir {}
 /// Uma tentativa de abrir o motor: quais APIs, e qual placa preferir.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tentativa {
+    /// As APIs gráficas que a instância do wgpu pode usar nesta tentativa —
+    /// uma só (DX12, Vulkan, a forçada por `VLB_GPU`) ou `Backends::all()`.
     pub backends: wgpu::Backends,
+    /// Qual placa pedir ao `request_adapter`: `None` no Windows (a primeira
+    /// listada, a da janela), `HighPerformance` nos outros.
     pub preferencia: wgpu::PowerPreference,
 }
 
@@ -602,16 +606,24 @@ pub struct Motor {
 /// Quem é a GPU do motor — para o relatório de desempenho.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InfoDoAdaptador {
+    /// O nome da placa, como o driver o dá ("Apple M2", "NVIDIA GeForce …").
     pub nome: String,
+    /// A API gráfica, por extenso: `Metal`, `Vulkan`, `DirectX 12`, `OpenGL`,
+    /// `WebGPU` ou `sem GPU`.
     pub backend: &'static str,
     /// `integrada`, `dedicada`, `virtual`, `cpu` ou `outra`.
     pub tipo: &'static str,
     /// O nome do driver e a versão, quando o backend diz (Vulkan e DX12
     /// costumam dizer; Metal não).
     pub driver: String,
+    /// O complemento do driver (em geral a versão), quando o backend diz;
+    /// vazio senão.
     pub driver_info: String,
     /// Os ids PCI do fabricante e da placa (0 quando o backend não diz).
+    ///
+    /// Este é o do fabricante (`0x10de` NVIDIA, `0x1002` AMD, `0x8086` Intel…).
     pub fabricante_id: u32,
+    /// O id PCI da placa, dentro do fabricante (0 quando o backend não diz).
     pub placa_id: u32,
     /// O motor mede o tempo de GPU por timestamp query (no adaptador que o
     /// motor abriu); nos da lista, se o adaptador oferece.

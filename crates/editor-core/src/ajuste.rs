@@ -11,19 +11,48 @@
 
 use serde::{Deserialize, Serialize};
 
+/// O que uma camada de ajuste faz com a cor de baixo — o campo `ajuste` da
+/// [`Camada`](crate::Camada): com `Some`, a camada não tem pixels próprios e
+/// muda a foto composta até ela.
+///
+/// Os parâmetros andam em `f32` nas unidades dos sliders do Photoshop (não em
+/// `0..=1`); [`limitado`](Ajuste::limitado) os corta nos limites de cada um, e
+/// [`neutro`](Ajuste::neutro) diz se ainda estão na posição que não muda nada.
+/// No projeto vai
+/// como objeto com a etiqueta `"tipo"` (`{"tipo": "niveis", "preto": 10, …}`).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tipo", rename_all = "snake_case")]
 pub enum Ajuste {
     /// Brilho −150..150 e contraste −50..100, os limites do Photoshop. O
     /// brilho mexe mais nos meios-tons e preserva o preto e o branco.
-    BrilhoContraste { brilho: f32, contraste: f32 },
+    BrilhoContraste {
+        /// −150..150; positivo clareia. `0` não muda nada.
+        brilho: f32,
+        /// −50..100, em volta do cinza médio; `100` dobra a distância ao meio.
+        contraste: f32,
+    },
     /// Os níveis de entrada: o preto (0..253), o branco (2..255) e o gama dos
     /// meios-tons (0,10..9,99; 1 = sem mudança).
-    Niveis { preto: f32, gama: f32, branco: f32 },
+    Niveis {
+        /// O nível de entrada que vira preto, 0..=253 (padrão 0). Tudo abaixo
+        /// dele também.
+        preto: f32,
+        /// O gama dos meios-tons, 0,10..=9,99: `saída = entrada^(1/gama)`, então
+        /// acima de 1 clareia e abaixo escurece. Padrão 1.
+        gama: f32,
+        /// O nível de entrada que vira branco, de `preto + 2` a 255 (padrão
+        /// 255). Tudo acima dele também.
+        branco: f32,
+    },
     /// Matiz −180..180 (graus), saturação e luminosidade −100..100.
     MatizSaturacao {
+        /// O giro do matiz no círculo HSL, em graus, −180..=180.
         matiz: f32,
+        /// −100..=100: −100 tira toda a cor; positivo satura mais os tons já
+        /// meio saturados do que os neutros.
         saturacao: f32,
+        /// −100..=100: −100 leva ao preto, 100 ao branco, em linha reta no `L`
+        /// do HSL.
         luminosidade: f32,
     },
     /// O negativo.
@@ -31,15 +60,22 @@ pub enum Ajuste {
     /// Curvas: a curva composta (RGB) e uma por canal. Cada canal passa pela
     /// curva dele e depois pela composta (`saída = rgb(canal(entrada))`).
     Curvas {
+        /// A curva composta, aplicada aos três canais por último.
         rgb: Curva,
+        /// A curva só do vermelho, antes da composta.
         vermelho: Curva,
+        /// A curva só do verde, antes da composta.
         verde: Curva,
+        /// A curva só do azul, antes da composta.
         azul: Curva,
     },
     /// A camada de preenchimento "Cor sólida": a cor no lugar do que está
     /// embaixo, com a opacidade, o modo e as máscaras da camada. Com uma
     /// máscara vetorial, é a camada de forma do Photoshop.
-    CorSolida { cor: [u8; 3] },
+    CorSolida {
+        /// A cor, RGB8 em sRGB codificado (C29).
+        cor: [u8; 3],
+    },
 }
 
 /// Quantos pontos uma curva aceita — os 14 do Photoshop.
@@ -101,6 +137,9 @@ impl Curva {
         Curva { n: 2, pontos }
     }
 
+    /// Os pontos `[entrada, saída]` de fato (de 2 a [`PONTOS_DA_CURVA`]), em
+    /// ordem estrita de entrada — o que vai para o projeto e o que a tela
+    /// desenha como alças.
     pub fn pontos(&self) -> &[[u8; 2]] {
         &self.pontos[..self.n as usize]
     }
@@ -284,6 +323,8 @@ pub const CURVAS: Ajuste = Ajuste::Curvas {
 };
 
 impl Ajuste {
+    /// O nome do Photoshop em português, para o painel de camadas e o
+    /// histórico.
     pub fn nome(&self) -> &'static str {
         match self {
             Ajuste::BrilhoContraste { .. } => "Brilho/Contraste",
@@ -307,6 +348,11 @@ impl Ajuste {
         }
     }
 
+    /// O ajuste recém-criado (o de [`TODOS`], neutro) da chave do roteiro;
+    /// `None` se a chave não é de nenhum.
+    ///
+    /// 🚨 `"cor"` dá `None`: a [`CorSolida`](Ajuste::CorSolida) é camada de
+    /// preenchimento, fora do menu de ajustes, e nasce com a cor escolhida.
     pub fn da_chave(chave: &str) -> Option<Ajuste> {
         TODOS.iter().copied().find(|a| a.chave() == chave)
     }
@@ -370,7 +416,10 @@ impl Ajuste {
         }
     }
 
-    /// A conta pronta para a composição.
+    /// A conta pronta para a composição: as tabelas montadas, os parâmetros do
+    /// HSL já em fração. Quem compõe chama uma vez por camada de ajuste e
+    /// depois [`Preparado::aplicar`] em cada pixel. Não corta os parâmetros —
+    /// para isso há [`limitado`](Ajuste::limitado).
     pub fn preparar(&self) -> Preparado {
         let tabela = |f: &dyn Fn(f32) -> f32| -> Box<[u8; 256]> {
             let mut t = Box::new([0u8; 256]);
@@ -446,9 +495,14 @@ pub enum Preparado {
     Tabela(Box<[u8; 256]>),
     /// Uma tabela por canal (R, G, B) — as Curvas com canal mexido.
     Tabelas([Box<[u8; 256]>; 3]),
+    /// Matiz/Saturação, que não cabe numa tabela por canal: cada pixel passa
+    /// por HSL. Os parâmetros são os do [`Ajuste::MatizSaturacao`] em fração.
     Hsl {
+        /// O giro do matiz em voltas (graus / 360), −0,5..=0,5.
         matiz: f32,
+        /// A saturação / 100, −1..=1.
         saturacao: f32,
+        /// A luminosidade / 100, −1..=1.
         luminosidade: f32,
     },
     /// A cor sólida, seja o que for embaixo.
@@ -456,6 +510,9 @@ pub enum Preparado {
 }
 
 impl Preparado {
+    /// O pixel de baixo (RGB8) depois do ajuste, com a força total. A
+    /// opacidade, o modo e a máscara da camada de ajuste entram depois, na
+    /// composição, como numa camada de pixels.
     #[inline]
     pub fn aplicar(&self, p: [u8; 3]) -> [u8; 3] {
         match self {

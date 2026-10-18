@@ -16,10 +16,26 @@ const CAIXAS_DE_CIMA: [&[u8; 4]; 8] = [
     b"ftyp", b"moov", b"uuid", b"mdat", b"free", b"skip", b"meta", b"wide",
 ];
 
+/// A assinatura do CR3: uma caixa `ftyp` com a marca `crx ` logo no começo.
+///
+/// # Pânico
+///
+/// Se `cabeca` tiver menos de 12 bytes — quem chama é
+/// [`assinatura`](super::assinatura), que garante [`CABECA`](super::CABECA).
 pub fn parece(cabeca: &[u8]) -> bool {
     &cabeca[4..8] == b"ftyp" && &cabeca[8..12] == b"crx "
 }
 
+/// O tamanho em bytes do CR3 que começa em `inicio` (posição absoluta no
+/// dispositivo), lido da estrutura: a soma das caixas do nível de cima, que tem
+/// de incluir `moov` e `mdat`. `None` quando a estrutura não fecha.
+///
+/// Não confere o fim contra o tamanho do cartão: use
+/// [`formatos::medir`](super::medir), que confere.
+///
+/// # Erros
+///
+/// O erro de E/S do dispositivo, como veio.
 pub fn medir<R: Read + Seek>(leitor: &mut Leitor<R>, inicio: u64) -> io::Result<Option<u64>> {
     let mut pos = inicio;
     let mut viu_moov = false;

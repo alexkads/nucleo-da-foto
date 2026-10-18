@@ -106,14 +106,28 @@ pub enum Alvo {
     /// Uma âncora.
     Ancora(RefAncora),
     /// Um segmento: o subcaminho, o índice do segmento e o `t` mais próximo.
-    Segmento { sub: u64, indice: usize, t: f64 },
+    Segmento {
+        /// O [`Subcaminho::id`](super::Subcaminho::id).
+        sub: u64,
+        /// O índice do segmento no subcaminho (o de
+        /// [`Subcaminho::segmento`](super::Subcaminho::segmento)).
+        indice: usize,
+        /// O parâmetro da cúbica no ponto mais próximo, em `0..=1` (0 na
+        /// âncora de partida) — onde a Caneta insere a âncora nova.
+        t: f64,
+    },
     /// Dentro da área preenchida de um componente (a Seleção de caminho).
-    Area { sub: u64 },
+    Area {
+        /// O [`Subcaminho::id`](super::Subcaminho::id) do componente.
+        sub: u64,
+    },
 }
 
 /// Que alças aparecem (e podem ser pegas): as das âncoras escolhidas e as
 /// vizinhas delas, como no Photoshop.
 pub struct Visiveis<'a> {
+    /// `true` para as âncoras cujas alças estão à vista; as alças das outras
+    /// não são alvo de clique.
     pub alcas_de: &'a dyn Fn(RefAncora) -> bool,
 }
 

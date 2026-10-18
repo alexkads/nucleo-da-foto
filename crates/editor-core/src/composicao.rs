@@ -273,9 +273,14 @@ fn compor_deslocado(
 /// a foto (`\`). Só a tela: a imagem editada é sempre a foto.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Exibicao {
+    /// A foto composta, como a imagem editada sai (o padrão).
     #[default]
     Foto,
+    /// A máscara da camada de índice dado, sozinha, em cinza: branco revela,
+    /// preto esconde.
     SoAMascara(usize),
+    /// A foto com o vermelho rubi por cima onde a máscara da camada de índice
+    /// dado esconde (50% onde esconde tudo).
     Rubi(usize),
     /// Só os pixels da camada, sobre cinza 50% onde ela é transparente — a
     /// baixa ou a alta frequência isolada para inspeção.

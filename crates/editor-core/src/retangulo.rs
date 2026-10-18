@@ -3,13 +3,19 @@
 /// `[x, x + largura) × [y, y + altura)`, em pixels da foto inteira de pé.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Retangulo {
+    /// Coluna do canto esquerdo, inclusiva.
     pub x: u32,
+    /// Linha do canto de cima, inclusiva (o `y` cresce para baixo).
     pub y: u32,
+    /// Largura em pixels; `0` faz o retângulo [`vazio`](Retangulo::vazio).
     pub largura: u32,
+    /// Altura em pixels; `0` faz o retângulo [`vazio`](Retangulo::vazio).
     pub altura: u32,
 }
 
 impl Retangulo {
+    /// O retângulo com canto em `(x, y)` e esse tamanho. Não limita nada: quem
+    /// precisa dele dentro da foto chama [`limitado`](Retangulo::limitado).
     pub fn novo(x: u32, y: u32, largura: u32, altura: u32) -> Self {
         Self {
             x,
@@ -24,14 +30,17 @@ impl Retangulo {
         Self::novo(0, 0, largura, altura)
     }
 
+    /// Não cobre pixel nenhum (largura ou altura zero). O [`Default`] é vazio.
     pub fn vazio(&self) -> bool {
         self.largura == 0 || self.altura == 0
     }
 
+    /// A primeira coluna **fora** do retângulo, à direita (`x + largura`).
     pub fn direita(&self) -> u32 {
         self.x + self.largura
     }
 
+    /// A primeira linha **fora** do retângulo, embaixo (`y + altura`).
     pub fn baixo(&self) -> u32 {
         self.y + self.altura
     }

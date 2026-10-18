@@ -41,6 +41,8 @@ use image::{DynamicImage, ImageDecoder, ImageReader};
 /// O espaço de cor de uma foto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EspacoDeCor {
+    /// sRGB: o padrão da web e o que o motor revela. É também a leitura de
+    /// tudo que não se reconhece — não converter é o seguro.
     Srgb,
     /// Adobe RGB (1998): primários mais largos no verde, curva de gama 563/256.
     AdobeRgb,
@@ -176,6 +178,9 @@ impl EspacoDeCor {
         }
     }
 
+    /// O inverso de [`codigo`](Self::codigo), do lado de cá do wasm. Código
+    /// fora de 0–2 vira [`Srgb`](Self::Srgb): um site mais novo que o wasm
+    /// recebe a foto sem conversão, nunca uma conversão errada.
     pub fn do_codigo(codigo: u8) -> Self {
         match codigo {
             1 => Self::AdobeRgb,

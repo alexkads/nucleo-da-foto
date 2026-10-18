@@ -37,9 +37,16 @@ use crate::retangulo::Retangulo;
 use crate::selecao::Selecao;
 use crate::tiles::{indice, CamadaDePixels, Posicao, Tile, LADO_DO_TILE};
 
+/// A ferramenta que pinta com o [`Pincel`]: todas usam a mesma ponta (raio,
+/// dureza, fluxo, espaçamento) e a mesma máscara do traço; muda o que vai para
+/// cada pixel. As letras entre parênteses são os atalhos do Photoshop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ferramenta {
+    /// Pinta a [`cor`](Pincel::cor) de frente no [`modo`](Pincel::modo) da
+    /// ferramenta (B).
     Pincel,
+    /// Tira alfa da camada e deixa a cor (E); numa máscara, pinta a
+    /// [`cor_de_fundo`](Pincel::cor_de_fundo).
     Borracha,
     /// Copia da [`Fonte`] em vez de pintar uma cor — o carimbo (S).
     Carimbo,
@@ -76,15 +83,21 @@ impl Ferramenta {
 /// Os tons que a subexposição e a superexposição mexem — as do Photoshop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Faixa {
+    /// Os tons escuros: peso `(1 − l)²`, cheio no preto e nulo no branco.
     Sombras,
+    /// Os tons do meio: peso `1 − (2l − 1)²`, cheio no cinza 50% e nulo nas
+    /// pontas. O padrão, como no Photoshop.
     #[default]
     MeiosTons,
+    /// Os tons claros: peso `l²`, cheio no branco e nulo no preto.
     Realces,
 }
 
 impl Faixa {
+    /// As três, na ordem do menu "Faixa" da barra.
     pub const TODAS: [Faixa; 3] = [Faixa::Sombras, Faixa::MeiosTons, Faixa::Realces];
 
+    /// O nome em português que a barra mostra.
     pub fn nome(self) -> &'static str {
         match self {
             Faixa::Sombras => "Sombras",
@@ -138,8 +151,18 @@ pub fn cor_da_ferramenta(ferramenta: Ferramenta, foto: [u8; 3], suave: [u8; 3]) 
     }
 }
 
+/// As opções da ponta e da tinta — a barra de opções do pincel do Photoshop,
+/// valendo para todas as [`Ferramenta`]s de pintura. Copiado em cada
+/// [`Traco`]: mexer no pincel no meio do traço não muda o traço em curso.
+///
+/// Os campos não são validados aqui: o raio é cortado entre [`RAIO_MINIMO`] e
+/// [`RAIO_MAXIMO`] por quem edita, e o espaçamento entre
+/// [`ESPACAMENTO_MINIMO`] e [`ESPACAMENTO_MAXIMO`] pelo traço. O
+/// [`Default`] é a ponta redonda de 80 px de diâmetro, dureza 80%, preto
+/// sobre branco.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pincel {
+    /// O que o traço faz com os pixels (padrão [`Ferramenta::Pincel`]).
     pub ferramenta: Ferramenta,
     /// Raio em pixels **da foto**.
     pub raio: f32,
@@ -197,6 +220,8 @@ impl Default for Pincel {
 pub const ESPACAMENTO_PADRAO: f32 = 0.25;
 /// O espaçamento mínimo e o máximo (1% e 1000%, como no painel de pincéis).
 pub const ESPACAMENTO_MINIMO: f32 = 0.01;
+/// O maior espaçamento, 10 diâmetros (1000%): os carimbos ficam soltos, um a
+/// cada dez diâmetros.
 pub const ESPACAMENTO_MAXIMO: f32 = 10.0;
 
 /// O comprimento do cordão com a suavização em 100%, em **pontos da tela** —
@@ -206,11 +231,17 @@ pub const CORDAO_MAXIMO_NA_TELA: f32 = 60.0;
 /// Uma predefinição de pincel: o que ela muda e o nome na lista.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Predefinicao {
+    /// O nome na lista de predefinições.
     pub nome: &'static str,
+    /// O [`Pincel::raio`], em pixels da foto.
     pub raio: f32,
+    /// A [`Pincel::dureza`], `0..=1`.
     pub dureza: f32,
+    /// A [`Pincel::opacidade`], `0..=1`.
     pub opacidade: f32,
+    /// O [`Pincel::fluxo`], `0..=1`.
     pub fluxo: f32,
+    /// O [`Pincel::espacamento`], em fração do diâmetro.
     pub espacamento: f32,
 }
 
@@ -302,6 +333,7 @@ pub const PREDEFINICOES: [Predefinicao; 7] = [
 
 /// O menor e o maior raio, em pixels da foto.
 pub const RAIO_MINIMO: f32 = 0.5;
+/// O maior raio, em pixels da foto (uma ponta de 4000 px de diâmetro).
 pub const RAIO_MAXIMO: f32 = 2000.0;
 
 impl Pincel {
@@ -381,11 +413,40 @@ impl Tabela {
 /// do desfazer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mudanca {
+    /// Cada tile tocado como era antes do traço (`None` = não existia, era
+    /// transparente) — o que o desfazer põe de volta.
     pub antes: Vec<(Posicao, Option<Tile>)>,
+    /// Os mesmos tiles, na mesma ordem, como o traço os deixou (`None` = o
+    /// traço os apagou inteiros) — o que o refazer põe de volta.
     pub depois: Vec<(Posicao, Option<Tile>)>,
 }
 
-/// Um traço em curso.
+/// Um traço em curso: do ponteiro descer ao ponteiro subir, sobre uma
+/// [`CamadaDePixels`] (a camada ou a máscara dela).
+///
+/// Monta-se com [`novo`](Traco::novo) e os `com_*`/`dentro_de`/`copiando_de`,
+/// alimenta-se com [`ate`](Traco::ate) a cada evento de ponteiro (em pixels da
+/// foto, que já pinta na camada e devolve o retângulo a redesenhar) e fecha-se
+/// com [`terminar`](Traco::terminar), que devolve a [`Mudanca`] para o
+/// histórico. Quem conduz no app é a [`Sessao`](crate::Sessao).
+///
+/// ```rust
+/// use editor_core::pincel::Traco;
+/// use editor_core::{CamadaDePixels, Pincel};
+///
+/// let mut camada = CamadaDePixels::nova(200, 100);
+/// let pincel = Pincel { raio: 10.0, dureza: 1.0, cor: [255, 0, 0], ..Pincel::default() };
+///
+/// let mut traco = Traco::novo(pincel);
+/// traco.ate(&mut camada, 20.0, 50.0);
+/// let sujo = traco.ate(&mut camada, 180.0, 50.0);
+/// assert!(!sujo.vazio());
+///
+/// let mudanca = traco.terminar(&mut camada).expect("o traço pintou");
+/// assert!(!mudanca.antes.is_empty());
+/// assert_eq!(camada.pixel(100, 50), [255, 0, 0, 255]);
+/// assert_eq!(camada.pixel(100, 5), [0, 0, 0, 0]);
+/// ```
 pub struct Traco {
     pincel: Pincel,
     tabela: Tabela,
@@ -418,6 +479,9 @@ pub struct Traco {
 }
 
 impl Traco {
+    /// Um traço com este pincel, sem nada pintado: sem seleção, sem fonte, sem
+    /// cordão (suavização desligada até [`com_cordao`](Traco::com_cordao)) e
+    /// com a transparência livre. O primeiro [`ate`](Traco::ate) já carimba.
     pub fn novo(pincel: Pincel) -> Self {
         Self {
             tabela: Tabela::de(&pincel),
@@ -504,6 +568,7 @@ impl Traco {
         self
     }
 
+    /// O pincel com que o traço começou (a cópia dele).
     pub fn pincel(&self) -> &Pincel {
         &self.pincel
     }

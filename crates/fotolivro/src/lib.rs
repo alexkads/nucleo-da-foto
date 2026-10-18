@@ -60,6 +60,36 @@
 //! [`Plano`] numera as páginas — é o que os links internos usam, e o defeito
 //! possível (link para a página errada) mora todo nele, testável sem escrever
 //! um byte. [`gerar`] desenha.
+//!
+//! # Exemplo
+//!
+//! Um livro de uma foto, montado como o site faz — a capa, a foto, o PDF:
+//!
+//! ```rust
+//! use fotolivro::{Capa, Montagem};
+//! use image::{DynamicImage, RgbImage};
+//!
+//! let capa = Capa {
+//!     titulo: "Ensaio em Gramado".into(),
+//!     lugar_e_data: "Gramado · 9 de outubro de 2026".into(),
+//!     galeria: Some("https://exemplo.com.br/meus-ensaios/abc".into()),
+//!     site: "exemplo.com.br".into(),
+//!     ..Default::default()
+//! };
+//! let mut montagem = Montagem::nova(capa, 1);
+//! montagem.adicionar(
+//!     DynamicImage::ImageRgb8(RgbImage::new(40, 30)),
+//!     "IMG_0001.jpg".into(),
+//!     true,
+//!     None,
+//! );
+//! assert_eq!(montagem.quantas(), 1);
+//!
+//! let pdf = montagem.gerar().unwrap();
+//! assert!(pdf.starts_with(b"%PDF"));
+//! ```
+
+#![deny(missing_docs)]
 
 use image::DynamicImage;
 use printpdf::{
@@ -72,6 +102,8 @@ use printpdf::{
 /// Uma foto do álbum.
 #[derive(Debug, Clone)]
 pub struct FotoDaFolha {
+    /// A foto já aberta, em qualquer tamanho: [`preparar`] a reduz ao entrar
+    /// no livro.
     pub imagem: DynamicImage,
     /// O nome do arquivo, como o cliente o vê na galeria.
     pub nome: String,
@@ -106,6 +138,8 @@ const LEGENDA: f32 = 10.0;
 /// Miniaturas por página no sumário.
 const SUMARIO_COLUNAS: usize = 6;
 const SUMARIO_LINHAS: usize = 3;
+/// Miniaturas por página da galeria (6 colunas × 3 linhas): a partir da 19.ª
+/// foto, a galeria ganha outra página.
 pub const POR_SUMARIO: usize = SUMARIO_COLUNAS * SUMARIO_LINHAS;
 
 /// As páginas do álbum, numeradas a partir de 1 (a régua do PDF): a capa,
@@ -113,10 +147,14 @@ pub const POR_SUMARIO: usize = SUMARIO_COLUNAS * SUMARIO_LINHAS;
 /// ensaio" e "Até a próxima viagem".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plano {
+    /// Quantas fotos o livro leva — uma página para cada.
     pub fotos: usize,
 }
 
 impl Plano {
+    /// O plano de um livro com `fotos` fotos. Zero fotos ainda dá um plano
+    /// (capa, uma galeria vazia e o fim), mas [`Montagem::gerar`] recusa o
+    /// livro vazio.
     pub fn de(fotos: usize) -> Self {
         Self { fotos }
     }
@@ -126,14 +164,19 @@ impl Plano {
         2 + i
     }
 
+    /// A primeira página depois da capa — a da primeira foto. Sempre 2.
     pub fn primeira_do_livro(&self) -> usize {
         2
     }
 
+    /// Quantas páginas a galeria ocupa: [`POR_SUMARIO`] miniaturas em cada,
+    /// e no mínimo uma.
     pub fn paginas_da_galeria(&self) -> usize {
         self.fotos.div_ceil(POR_SUMARIO).max(1)
     }
 
+    /// A primeira página da galeria, logo depois da última foto — é para
+    /// onde o "‹ Voltar à galeria" de cada página leva.
     pub fn primeira_da_galeria(&self) -> usize {
         2 + self.fotos
     }
@@ -153,6 +196,7 @@ impl Plano {
         self.pagina_final() + 1
     }
 
+    /// Quantas páginas o livro tem: a despedida é a última.
     pub fn total(&self) -> usize {
         self.despedida()
     }
@@ -161,9 +205,13 @@ impl Plano {
 /// Um retângulo, em mm, contado da **base** do papel (a régua do PDF).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Caixa {
+    /// A borda esquerda, em mm a partir da esquerda do papel.
     pub x: f32,
+    /// A borda de **baixo**, em mm a partir da base do papel.
     pub y: f32,
+    /// Em mm.
     pub largura: f32,
+    /// Em mm, para cima a partir de [`y`](Self::y).
     pub altura: f32,
 }
 
@@ -254,8 +302,11 @@ const SOMBRA: f32 = 0.9;
 /// Para que lado a foto encosta dentro da moldura, quando sobra lugar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Alinhar {
+    /// No meio da sobra — a página só da foto.
     Centro,
+    /// Encostada à esquerda — a foto na metade esquerda de uma página dupla.
     Esquerda,
+    /// Encostada à direita.
     Direita,
 }
 
@@ -732,8 +783,8 @@ impl Pagina {
     }
 }
 
-/// Encolhe para o tamanho do álbum — nunca amplia.
-/// O lado maior da foto não levada dentro do livro.
+/// O lado maior da foto não levada dentro do livro, em px: dá para ver a foto
+/// na tela do celular, não para imprimi-la.
 pub const LADO_DA_PROTEGIDA: u32 = 560;
 
 /// A qualidade do JPEG em que a não levada é recomprimida: os blocos e o
@@ -845,6 +896,7 @@ fn xobject_do_jpeg(bytes: Vec<u8>, px: (u32, u32)) -> ExternalXObject {
     }
 }
 
+/// Encolhe para o tamanho do álbum — nunca amplia.
 fn reduzida(imagem: &DynamicImage) -> DynamicImage {
     if imagem.width().max(imagem.height()) <= LADO_NA_FOLHA {
         return imagem.clone();
@@ -1292,6 +1344,19 @@ impl Montagem {
         }
     }
 
+    /// Põe a próxima foto no livro, na ordem em que chega.
+    ///
+    /// A foto é [`preparar`]ada, vira JPEG dentro do PDF e é solta antes de
+    /// voltar: a levada no tamanho de tela e na qualidade que couber na sua
+    /// parte do orçamento (o que sobrou do teto das fotos, um pouco abaixo de
+    /// [`TETO_DO_LIVRO`], dividido pelas que faltam das `previstas`); a não
+    /// levada [`protegida`]. `nome` é o do arquivo, como o cliente o vê na
+    /// galeria; `link` é a foto aberta na galeria do cliente, e `None` deixa a
+    /// foto sem toque.
+    ///
+    /// Não falha: um JPEG que não sai deixa a folha vazia em vez de derrubar o
+    /// livro. Passar das `previstas` também não: a excedente fica com o que
+    /// sobrou do orçamento.
     pub fn adicionar(
         &mut self,
         imagem: DynamicImage,
@@ -1319,11 +1384,19 @@ impl Montagem {
         });
     }
 
+    /// Quantas fotos já entraram.
     pub fn quantas(&self) -> usize {
         self.fotos.len()
     }
 
     /// O PDF, com as páginas desenhadas sobre as fotos já guardadas.
+    ///
+    /// Consome a montagem: as fotos já estão dentro do documento.
+    ///
+    /// # Erros
+    ///
+    /// A frase `"nenhuma foto para a prévia"`, se nenhuma foto entrou — um
+    /// livro só de capa e despedida não vai ao cliente.
     pub fn gerar(self) -> Result<Vec<u8>, String> {
         let Montagem {
             capa,

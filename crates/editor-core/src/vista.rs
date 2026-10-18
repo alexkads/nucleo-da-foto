@@ -27,6 +27,11 @@ use crate::retangulo::Retangulo;
 /// O lado dos ladrilhos da tela, em pixels da vista.
 pub const LADO_DO_LADRILHO: u32 = 256;
 
+/// A imagem editada (ou o que a [`Exibicao`] pede) de uma região da foto,
+/// reduzida por um fator inteiro, com a lista dos ladrilhos que mudaram desde
+/// a última subida para a GPU. Quem a mantém é a janela: a cada gesto chama
+/// [`Vista::refazer`] com o retângulo sujo e sobe os ladrilhos de
+/// [`Vista::levar_os_sujos`].
 pub struct Vista {
     fator: u32,
     /// O pedaço da foto que a vista cobre, em pixels da foto, com a origem
@@ -95,6 +100,7 @@ impl Vista {
         self.refazer(base, doc, &regiao);
     }
 
+    /// O que a vista mostra agora.
     pub fn exibicao(&self) -> Exibicao {
         self.exibicao
     }
@@ -109,14 +115,20 @@ impl Vista {
         self.fator
     }
 
+    /// A imagem reduzida inteira: `⌈largura da região / fator⌉ ×
+    /// ⌈altura da região / fator⌉` pixels, no mínimo 1 × 1.
     pub fn imagem(&self) -> &RgbImage {
         &self.imagem
     }
 
+    /// Quantas colunas de ladrilhos ([`LADO_DO_LADRILHO`] px da vista) cobrem
+    /// a imagem; a última pode ser mais estreita.
     pub fn colunas(&self) -> u32 {
         self.imagem.width().div_ceil(LADO_DO_LADRILHO)
     }
 
+    /// Quantas linhas de ladrilhos cobrem a imagem; a última pode ser mais
+    /// baixa.
     pub fn linhas(&self) -> u32 {
         self.imagem.height().div_ceil(LADO_DO_LADRILHO)
     }

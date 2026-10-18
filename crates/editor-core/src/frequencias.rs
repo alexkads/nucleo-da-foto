@@ -62,10 +62,14 @@ use crate::tiles::{indice, retangulo_do_tile, CamadaDePixels, BYTES_DO_TILE, LAD
 /// 24 MP a textura da pele (poros) mora abaixo de ~4–8 px; manchas e
 /// transições de cor, acima.
 pub const RAIO_MINIMO: f32 = 0.5;
+/// O maior raio (σ, em pixels da foto); [`separar`] corta o pedido entre
+/// [`RAIO_MINIMO`] e este. Acima disso a baixa já é uma mancha de cor, e a
+/// margem do desfoque (3σ) só gastaria memória.
 pub const RAIO_MAXIMO: f32 = 60.0;
 
 /// Os nomes das camadas que a separação cria.
 pub const NOME_DA_BAIXA: &str = "Baixa frequência";
+/// O nome da camada da alta (a textura, em Luz Linear recortada na baixa).
 pub const NOME_DA_ALTA: &str = "Alta frequência";
 
 /// O raio sugerido para uma foto: proporcional ao lado maior (≈ 5 px numa
@@ -107,7 +111,12 @@ pub fn recompor(l: u8, h: u8) -> u8 {
 /// A baixa e a alta de uma origem.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Separacao {
+    /// A baixa `L`: cor e tom, o desfoque arredondado com `I − L` ímpar, com o
+    /// alfa da origem. Vai na camada de baixo, em modo Normal.
     pub baixa: CamadaDePixels,
+    /// A alta `H = (I − L + 255) / 2`: a textura em volta do cinza 128 (127 ou
+    /// 128 onde não há detalhe), opaca onde a origem existe. Vai por cima, em
+    /// Luz Linear e recortada na baixa.
     pub alta: CamadaDePixels,
 }
 

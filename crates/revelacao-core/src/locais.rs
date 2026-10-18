@@ -70,9 +70,16 @@ pub const RAIO_MINIMO: f32 = 0.0002;
 /// Tudo o que é local numa foto: as camadas de máscara e os retoques.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ParametrosLocais {
+    /// A versão do formato em que foi gravada — [`VERSAO`] no que este crate
+    /// escreve. Maior que [`VERSAO`] é recusada por
+    /// [`ParametrosLocais::de_json`].
     pub versao: u32,
+    /// As camadas de máscara, de baixo para cima, até [`MAXIMO_DE_CAMADAS`].
+    /// Ausente no JSON é nenhuma.
     #[serde(default)]
     pub camadas: Vec<Camada>,
+    /// Os retoques (Clone, Heal, Preencher), na ordem em que são aplicados,
+    /// até [`MAXIMO_DE_RETOQUES`]. Ausente no JSON é nenhum.
     #[serde(default)]
     pub retoques: Vec<Retoque>,
 }
@@ -96,8 +103,12 @@ pub struct Camada {
     /// Oculta (o olho fechado): fica na revelação, e o motor não a aplica.
     #[serde(default = "verdadeiro", skip_serializing_if = "e_verdadeiro")]
     pub visivel: bool,
+    /// O que a camada aplica onde a máscara vale.
     #[serde(default)]
     pub ajustes: AjustesLocais,
+    /// As formas que compõem a máscara, na ordem em que entram (cada uma soma
+    /// ou subtrai do que veio antes), até [`MAXIMO_DE_COMPONENTES`]. Camada sem
+    /// componente não é aplicada.
     #[serde(default)]
     pub componentes: Vec<Componente>,
     /// A máscara invertida: o ajuste vale **fora** do que foi pintado.
@@ -143,26 +154,37 @@ pub struct AjustesLocais {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Modo {
+    /// Acrescenta à máscara: `m = s·op + m·(1 − s·op)`. O padrão.
     #[default]
     Somar,
+    /// Apaga da máscara — a borracha: `m = m·(1 − s·op)`.
     Subtrair,
 }
 
 /// Um pedaço da máscara: a forma e o modo.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Componente {
+    /// Se a forma soma à máscara ou apaga dela; ausente no JSON é
+    /// [`Modo::Somar`].
     #[serde(default)]
     pub modo: Modo,
+    /// A forma, achatada no mesmo objeto JSON (`"tipo": "pincel"`, …).
     #[serde(flatten)]
     pub forma: Forma,
 }
 
+/// A geometria de um [`Componente`]. No JSON é um objeto com `"tipo"` em
+/// `snake_case` (`pincel`, `linear`, `radial`, `laco`) e os campos da forma.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tipo", rename_all = "snake_case")]
 pub enum Forma {
+    /// Um gesto de pincel — o `Pincel` das máscaras do Lightroom.
     Pincel(BrushStroke),
+    /// Um gradiente linear — o `Gradiente linear` do Lightroom.
     Linear(GradienteLinear),
+    /// Um gradiente radial (elipse) — o `Gradiente radial` do Lightroom.
     Radial(GradienteRadial),
+    /// Um polígono fechado, livre ou clique a clique.
     Laco(Laco),
 }
 
@@ -175,7 +197,12 @@ pub enum Forma {
 /// dentro, metade para fora. Zero é borda dura.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Laco {
+    /// Os vértices, `[x, y]` em `0..1` da foto inteira de pé (presos em
+    /// `−1..2` ao sanear), até [`MAXIMO_DE_PONTOS`]. Menos de três descarta o
+    /// laço.
     pub pontos: Vec<[f32; 2]>,
+    /// A largura da transição, em fração do maior lado (presa em `0..0,25`);
+    /// zero, o padrão, é borda dura.
     #[serde(default)]
     pub feather: f32,
 }
@@ -300,16 +327,25 @@ pub struct BrushStroke {
 /// transição (`smoothstep`) entre os dois.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GradienteLinear {
+    /// Onde a máscara ainda vale 100 %, `[x, y]` em `0..1` da foto inteira
+    /// de pé.
     pub inicio: [f32; 2],
+    /// Onde ela chega a 0 %, no mesmo espaço de `inicio`. A transição é
+    /// perpendicular à reta entre os dois.
     pub fim: [f32; 2],
 }
 
 /// Um gradiente radial: uma elipse, 100% dentro e 0% fora (ou o contrário).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GradienteRadial {
+    /// O centro da elipse, `[x, y]` em `0..1` da foto inteira de pé.
     pub centro: [f32; 2],
     /// Os semi-eixos, em fração do maior lado — a mesma régua do raio do pincel.
+    ///
+    /// Este é o horizontal (antes do `angulo`), preso em
+    /// [`RAIO_MINIMO`]`..2` ao sanear.
     pub raio_x: f32,
+    /// O semi-eixo vertical (antes do `angulo`), na régua de `raio_x`.
     pub raio_y: f32,
     /// Em graus, no sentido horário da tela.
     #[serde(default)]
@@ -331,8 +367,11 @@ pub struct GradienteRadial {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tipo", rename_all = "snake_case")]
 pub enum Retoque {
+    /// O carimbo: copia os pixels da origem como estão.
     Clone(Carimbo),
+    /// O band-aid: a textura da origem, com cor e luz da vizinhança do destino.
     Heal(Carimbo),
+    /// O Content-Aware: sintetiza a área a partir da vizinhança, sem origem.
     Preencher(Preenchimento),
 }
 
@@ -358,6 +397,7 @@ impl Retoque {
         }
     }
 
+    /// A opacidade do retoque, `0..1` — a do carimbo ou a do preenchimento.
     pub fn opacidade(&self) -> f32 {
         match self {
             Retoque::Clone(c) | Retoque::Heal(c) => c.opacidade,
@@ -372,8 +412,13 @@ pub struct Preenchimento {
     /// O caminho pintado (com `raio`) — vazio quando a área é um laço.
     #[serde(default)]
     pub caminho: Vec<[f32; 2]>,
+    /// O raio do pincel que pintou o caminho, em fração do maior lado (preso
+    /// em [`RAIO_MINIMO`]`..0,25`).
     pub raio: f32,
+    /// A fração do raio em que a borda cai, `0..1` — ou, com laço, a largura
+    /// da transição em fração do maior lado.
     pub feather: f32,
+    /// A opacidade do preenchimento, `0..1`.
     pub opacidade: f32,
     /// A área cercada por um laço, em vez de pintada. Com laço, `caminho` e
     /// `raio` não contam, e `feather` é o do laço (fração do maior lado).
@@ -411,12 +456,19 @@ impl Preenchimento {
 /// `p` do caminho recebe o que está em `p + deslocamento`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Carimbo {
+    /// De onde os pixels vêm, `[x, y]` em `0..1` da foto inteira de pé — o
+    /// ponto que casa com `destino_inicial`.
     pub origem: [f32; 2],
+    /// O primeiro ponto do destino, no mesmo espaço de `origem`.
     pub destino_inicial: [f32; 2],
     /// O caminho do destino, começando em `destino_inicial`.
     pub caminho: Vec<[f32; 2]>,
+    /// O raio do pincel, em fração do maior lado (preso em
+    /// [`RAIO_MINIMO`]`..1`).
     pub raio: f32,
+    /// A fração do raio em que a borda cai, `0..1`; zero é borda dura.
     pub feather: f32,
+    /// A opacidade do retoque, `0..1`.
     pub opacidade: f32,
 }
 

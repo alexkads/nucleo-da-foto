@@ -30,31 +30,70 @@ use crate::tiles::{indice, CamadaDePixels, BYTES_DO_TILE, LADO_DO_TILE};
 /// foto de 24 MP e mantém a conta em segundos.
 pub const RAIO_MAXIMO: f32 = 250.0;
 
+/// Um filtro do menu Filtro com os parâmetros da caixa de diálogo dele —
+/// o que [`filtrada`] aplica e o que o histórico guarda pelo [`nome`](Filtro::nome).
+///
+/// Os raios são em pixels da foto e são cortados na hora da conta (de 0,1 a
+/// [`RAIO_MAXIMO`] nos gaussianos, de 1 a [`SUPERFICIE_MAXIMA`] e a
+/// [`MEDIANA_MAXIMA`] nos outros); fora disso nada é validado aqui.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Filtro {
     /// "Desfoque gaussiano…": o raio é o σ, em pixels.
-    DesfoqueGaussiano { raio: f32 },
+    DesfoqueGaussiano {
+        /// O σ da gaussiana, em pixels da foto (0,1..=[`RAIO_MAXIMO`]; abaixo
+        /// de 0,1 o filtro é [`neutro`](Filtro::neutro)). Espalha até ~3σ.
+        raio: f32,
+    },
     /// "Máscara de nitidez…": quantidade (1 = 100%), raio (σ) e limiar (0–255).
     MascaraDeNitidez {
+        /// Quanto da diferença para a desfocada é somado: 1 = 100% do
+        /// Photoshop, 5 = 500% (o máximo dele; aqui não há teto). `≤ 0` não
+        /// muda nada.
         quantidade: f32,
+        /// O σ do desfoque que define o que é "detalhe", em pixels da foto.
         raio: f32,
+        /// Diferenças menores que isto, em níveis de 0..=255, ficam como estão
+        /// — protege a pele lisa e o ruído fino. 0 realça tudo.
         limiar: u8,
     },
     /// "Desfoque de superfície…": alisa o que é parecido e guarda as bordas
     /// (a pele sem perder olho e boca). Raio em px, limiar em níveis.
-    DesfoqueDeSuperficie { raio: f32, limiar: u8 },
+    DesfoqueDeSuperficie {
+        /// A meia-largura da janela (lado `2·raio + 1`), em pixels da foto,
+        /// arredondada e cortada em 1..=[`SUPERFICIE_MAXIMA`].
+        raio: f32,
+        /// Em níveis de 0..=255: variações menores que ele são alisadas, as
+        /// maiores (bordas) ficam. Mais alto alisa mais.
+        limiar: u8,
+    },
     /// "Alta frequência…" (Outros): o detalhe menor que o raio, sobre 50%
     /// cinza — a camada de cima da separação de frequências.
-    AltaFrequencia { raio: f32 },
+    ///
+    /// 🚨 É `original − desfocada + 128`, sem dividir por dois: não recompõe
+    /// em Luz Linear (dobra o detalhe). A separação exata é a de
+    /// [`frequencias`](crate::frequencias).
+    AltaFrequencia {
+        /// O σ do desfoque subtraído, em pixels da foto: o detalhe menor que
+        /// isso fica.
+        raio: f32,
+    },
     /// "Mediana…" (Ruído): cada pixel vira a mediana do quadrado de lado
     /// 2 × raio + 1 — tira pontinhos e poeira.
-    Mediana { raio: u32 },
+    Mediana {
+        /// A meia-largura do quadrado, em pixels (1..=[`MEDIANA_MAXIMA`]).
+        raio: u32,
+    },
     /// "Adicionar ruído…" (Ruído): quantidade (1 = 100%), gaussiano ou
     /// uniforme, colorido ou monocromático. O ruído sai da posição do pixel —
     /// a prévia e o OK dão o mesmo grão.
     AdicionarRuido {
+        /// A amplitude, em fração de 255: o uniforme vai até `±quantidade·255`
+        /// e o gaussiano tem desvio de metade disso. `≤ 0` não muda nada.
         quantidade: f32,
+        /// `true`: distribuição gaussiana (Box–Muller); `false`: uniforme.
         gaussiano: bool,
+        /// `true`: o mesmo desvio nos três canais (grão sem cor); `false`: um
+        /// por canal.
         monocromatico: bool,
     },
     /// "Suavizar tons…" (Tratamento de pele): o desfoque gaussiano **pesado
@@ -63,7 +102,10 @@ pub enum Filtro {
     /// escorrem para a pele (o gaussiano comum os puxaria pela borda). Para a
     /// baixa frequência: alisa manchas e transições de cor e guarda o volume
     /// que passa do raio.
-    SuavizarTons { raio: f32 },
+    SuavizarTons {
+        /// O σ do desfoque pesado, em pixels da foto (como no gaussiano).
+        raio: f32,
+    },
 }
 
 /// O raio máximo da Mediana, em px.

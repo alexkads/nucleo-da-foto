@@ -43,33 +43,66 @@
 pub const LARGURA: u32 = 256;
 /// Exposição: 41 linhas, de −5 a +5 EV — o alcance inteiro do slider.
 pub const LINHA_EXPOSICAO: u32 = 0;
+/// Quantas linhas a Exposição ocupa a partir de [`LINHA_EXPOSICAO`]: de −5 a
+/// +5 EV, de 0,25 em 0,25. A linha 20 é o 0 EV, a identidade.
 pub const LINHAS_DE_EXPOSICAO: u32 = 41;
 /// Os cinco sliders de −100 a +100: 21 linhas cada.
+///
+/// Esta é a primeira linha do Contraste (o −100); a linha `+ 10` é o 0, a
+/// identidade, e a `+ 20` é o +100.
 pub const LINHA_CONTRASTE: u32 = 41;
+/// Primeira linha dos Realces, de −100 a +100 em 21 linhas (`+ 10` é o 0).
 pub const LINHA_REALCES: u32 = 62;
+/// Primeira linha das Sombras, de −100 a +100 em 21 linhas (`+ 10` é o 0).
 pub const LINHA_SOMBRAS: u32 = 83;
+/// Primeira linha dos Brancos, de −100 a +100 em 21 linhas (`+ 10` é o 0).
 pub const LINHA_BRANCOS: u32 = 104;
+/// Primeira linha dos Pretos, de −100 a +100 em 21 linhas (`+ 10` é o 0).
 pub const LINHA_PRETOS: u32 = 125;
 /// A força da vinheta: estilos 1 e 2 (iguais no Lightroom, até em cor) e o 3.
+///
+/// Esta é a dos estilos 1 e 2 (prioridade de realces e de cores — no
+/// [`crate::Ajustes::pcv_style`], 0 e 1): 21 linhas, da Quantidade −100 a +100.
 pub const LINHA_VINHETA: u32 = 146;
+/// A vinheta no estilo 3, sobreposição de tinta (o 2 de
+/// [`crate::Ajustes::pcv_style`]): 21 linhas, da Quantidade −100 a +100.
 pub const LINHA_SOBREPOSICAO: u32 = 167;
 /// A máscara: 9 pontos médios × 9 difusões.
+///
+/// A linha `LINHA_MASCARA + ponto_médio·9 + difusão` (cada índice de 0 a 8, de
+/// 12,5 em 12,5) vai de 0 no centro a 1 no canto; a coluna é a distância
+/// elíptica, de 0 a [`DISTANCIA_MAXIMA`].
 pub const LINHA_MASCARA: u32 = 188;
+/// Quantos valores de Ponto médio e de Difusão a máscara mede: 9 de cada, de
+/// 0 a 100 de 12,5 em 12,5 — 81 linhas a partir de [`LINHA_MASCARA`].
 pub const PASSOS_DA_MASCARA: u32 = 9;
 /// O balanço de branco de um JPEG: Temperatura e Matiz de −100 a +100, de 10
 /// em 10, **três curvas por valor** (R, G, B — o ganho de cada canal cai para
 /// o branco, que o Lightroom preserva).
+///
+/// Esta é a da Temperatura: 63 linhas, a do valor `passo` (0 = −100,
+/// 10 = 0, 20 = +100) no canal `c` em `LINHA_TEMPERATURA + passo·3 + c`.
 pub const LINHA_TEMPERATURA: u32 = 269;
+/// O balanço do Matiz (verde ↔ magenta), no mesmo desenho de
+/// [`LINHA_TEMPERATURA`]: 21 valores × R, G, B.
 pub const LINHA_MATIZ: u32 = 332;
 /// Saturação e Vibração de −100 a +100 (21 linhas cada): o **fator de croma**
 /// em Lab de cada matiz × saturação de entrada — 24 matizes de 15° × 6
 /// saturações HSV (0,1 0,25 0,4 0,55 0,75 1), na coluna `matiz·6 + saturação`.
 /// Medido na carta de cores (`casos=cor`); o zero é 1 em tudo.
+///
+/// Esta é a da Saturação; a linha `+ 10` é o 0, fator 1 em tudo.
 pub const LINHA_SATURACAO: u32 = 395;
+/// O fator de croma da Vibração, no mesmo desenho de [`LINHA_SATURACAO`]:
+/// 21 linhas de −100 a +100, coluna `matiz·6 + saturação`.
 pub const LINHA_VIBRACAO: u32 = 416;
 /// O ΔL* de cada matiz × saturação, nos mesmos valores e colunas: o Lightroom
 /// não guarda o L* ao tirar ou pôr cor. O zero é 0 em tudo.
+///
+/// Esta é a da Saturação.
 pub const LINHA_SATURACAO_L: u32 = 437;
+/// O ΔL* que a Vibração põe junto com o croma, no desenho de
+/// [`LINHA_SATURACAO_L`]. O zero é 0 em tudo.
 pub const LINHA_VIBRACAO_L: u32 = 458;
 /// A Divisão de tons (régua `viragem`, na faixa cinza da rampa): por região
 /// (0 sombras, 1 realces) e matiz (12, de 30 em 30°), o Δa* e o Δb* que o
@@ -81,6 +114,9 @@ pub const LINHA_VIRAGEM_SATURACAO: u32 = 527;
 /// O ganho de cada nível com o Equilíbrio de −100 a +100 (9 valores, de 25 em
 /// 25) sobre o Equilíbrio 0, por região: `+ região·9 + passo`.
 pub const LINHA_VIRAGEM_EQUILIBRIO: u32 = 529;
+/// Quantas linhas a textura tem — o fim da última tabela
+/// ([`LINHA_VIRAGEM_EQUILIBRIO`] + 18). [`tabelas`] devolve
+/// `ALTURA × LARGURA` valores.
 pub const ALTURA: u32 = 547;
 /// A distância elíptica da última coluna da máscara: além do canto (√2).
 pub const DISTANCIA_MAXIMA: f32 = 1.45;

@@ -19,24 +19,36 @@ const FALHAS_SEGUIDAS: u32 = 16;
 /// Uma foto achada: onde começa, quanto mede e de que formato é.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Achado {
+    /// A posição do primeiro byte no dispositivo — sempre começo de setor.
     pub inicio: u64,
+    /// O tamanho do arquivo, em bytes, medido pela estrutura.
     pub tamanho: u64,
+    /// O formato, de onde sai a extensão.
     pub formato: Formato,
 }
 
+/// Onde a varredura está — para a barra de progresso, a cada bloco.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Andamento {
+    /// Bytes já percorridos desde o começo (nunca passa de `total`).
     pub lidos: u64,
+    /// O tamanho do cartão, se o [`Leitor`] sabe; sem ele, a barra é
+    /// indeterminada.
     pub total: Option<u64>,
+    /// Fotos achadas até aqui.
     pub achadas: usize,
 }
 
+/// Como a varredura terminou.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Resumo {
+    /// Fotos achadas (e entregues a `achou`).
     pub achadas: usize,
+    /// Até onde se leu, em bytes. Menor que o total se foi interrompida.
     pub lidos: u64,
     /// Blocos de 4 MiB que o cartão não deixou ler.
     pub ilegiveis: u32,
+    /// `parar` respondeu sim antes do fim do cartão.
     pub interrompida: bool,
 }
 
@@ -51,6 +63,12 @@ pub struct Resumo {
 /// 🔑 **Depois de uma foto, a varredura pula para o fim dela.** A prévia JPEG
 /// dentro de um RAW não vira uma segunda foto, e os setores do sensor não são
 /// testados à toa.
+///
+/// # Erros
+///
+/// O erro de `achou`, ou de E/S ao medir uma foto; e, depois de 16 blocos
+/// ilegíveis seguidos, "o cartão parou de responder". Bloco ilegível isolado
+/// não é erro: é pulado e contado em [`Resumo::ilegiveis`].
 pub fn varrer<R: Read + Seek>(
     leitor: &mut Leitor<R>,
     parar: &dyn Fn() -> bool,
@@ -129,7 +147,14 @@ fn alinhar(pos: u64) -> u64 {
     pos.div_ceil(SETOR) * SETOR
 }
 
-/// Copia a foto achada para `destino`.
+/// Copia a foto achada para `destino`, em pedaços de 1 MiB — normalmente de
+/// dentro do `achou` de [`varrer`], com o leitor que ele recebe.
+///
+/// # Erros
+///
+/// [`io::ErrorKind::UnexpectedEof`] se o cartão acabar antes do fim da foto;
+/// e os erros de E/S da leitura ou da gravação, como vieram. O que já foi
+/// gravado em `destino` fica: apagar o arquivo pela metade é de quem chama.
 pub fn copiar<R: Read + Seek, W: Write>(
     leitor: &mut Leitor<R>,
     achado: &Achado,
