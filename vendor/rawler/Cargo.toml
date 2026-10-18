@@ -36,7 +36,7 @@ keywords = [
     "raw",
 ]
 categories = ["multimedia::images"]
-license = "LGPL-2.1"
+license = "LGPL-2.1-only"
 repository = "https://github.com/dnglab/dnglab"
 resolver = "2"
 

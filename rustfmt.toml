@@ -1,0 +1,2 @@
+# O formato da casa: o padrão do rustfmt, que é o que os dois produtos usam.
+edition = "2021"

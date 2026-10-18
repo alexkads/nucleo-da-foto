@@ -19,6 +19,9 @@
 //! cargo run -q -p revelacao-core --example referencia-da-tela
 //! node scripts/conferir-enquadramento-da-tela.mjs   # no outro repositório
 //! ```
+
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
 use image::{Rgba, RgbaImage};
 use revelacao_core::transformacao::{uvs_do_enquadramento, Corte};
 use std::path::PathBuf;

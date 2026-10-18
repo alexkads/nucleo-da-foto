@@ -640,7 +640,7 @@ impl Sessao {
     }
 
     /// A cor de frente escolhida no seletor ou nas amostras — na máscara, o
-    /// cinza dela (a regra de [`Self::cores_em_cinza_na_mascara`]).
+    /// cinza dela (a regra de `Self::cores_em_cinza_na_mascara`).
     pub fn definir_cor_de_frente(&mut self, cor: [u8; 3]) {
         self.pincel.cor = cor;
         self.cores_em_cinza_na_mascara();

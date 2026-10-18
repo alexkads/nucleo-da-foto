@@ -15,7 +15,7 @@
 //! ```
 //!
 //! 🔑 **Um gesto, um passo.** O apertar guarda o caminho como estava
-//! ([`Gesto`]); cada movimento refaz a prévia **a partir dele** (nada se
+//! (`Gesto`); cada movimento refaz a prévia **a partir dele** (nada se
 //! acumula); o soltar devolve [`Resultado::Passo`] com o nome — quem chama
 //! registra o antes e o depois no histórico. Esc no meio do arrasto devolve o
 //! caminho de antes e o estado de antes.
@@ -718,14 +718,14 @@ impl Caneta {
         r
     }
 
-    /// Delete / ⌫ (ver [`Self::excluir_cru`]).
+    /// Delete / ⌫ (ver `Self::excluir_cru`).
     pub fn excluir(&mut self, c: &mut Caminho) -> Resultado {
         let r = self.excluir_cru(c);
         edicao::recalcular_automaticas(c);
         r
     }
 
-    /// As setas (ver [`Self::empurrar_cru`]).
+    /// As setas (ver `Self::empurrar_cru`).
     pub fn empurrar(&mut self, c: &mut Caminho, d: (f64, f64)) -> Resultado {
         let r = self.empurrar_cru(c, d);
         edicao::recalcular_automaticas(c);

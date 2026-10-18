@@ -17,6 +17,9 @@
 //!
 //! O desenho das linhas está em `src/lightroom.rs`.
 
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
+
 use std::{collections::BTreeMap, path::Path};
 
 use image::RgbImage;

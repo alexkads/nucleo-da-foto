@@ -16,6 +16,9 @@
 //! A página abre o `Exportador` do `revelacao-web` (WebGPU, ou WebGL2 com
 //! `navigator.gpu` removido), exporta a mesma foto com a mesma revelação e compara.
 
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
+
 use std::sync::Arc;
 
 use revelacao_core::locais::*;

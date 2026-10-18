@@ -6,7 +6,7 @@
 //! cliente. Até 10/10/2026 o operador só via o livro abrindo o arquivo em outro
 //! programa; o dono, olhando o diálogo de exportação: *"Acho que cabe uma
 //! visualização de PDF, crie um módulo de visualização de PDF com base nesse
-//! projeto https://github.com/storytold/pdfcraft"*. Este crate é a metade sem
+//! projeto <https://github.com/storytold/pdfcraft"*.> Este crate é a metade sem
 //! janela desse módulo; a tela mora em `ui-gpui/src/pdf`.
 //!
 //! # De onde vem

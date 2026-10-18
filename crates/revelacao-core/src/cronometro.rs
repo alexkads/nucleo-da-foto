@@ -32,8 +32,8 @@
 //! As máscaras e os retoques abrem as passadas em `mascaras::passe`, fundo
 //! dentro de `atualizar`. Em vez de atravessar o cronômetro por cinco
 //! assinaturas, a medição em curso fica numa `thread_local` enquanto o encoder é
-//! gravado ([`na_etapa`]). O motor vive numa thread só, e a variável só existe
-//! entre [`Cronometro::comecar`] e [`Cronometro::encerrar`].
+//! gravado (`na_etapa`). O motor vive numa thread só, e a variável só existe
+//! entre `Cronometro::comecar` e `Cronometro::encerrar`.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU8, Ordering};

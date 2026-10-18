@@ -1,4 +1,4 @@
-//! O motor de revelação no navegador — ver [`web`].
+//! O motor de revelação no navegador — ver `web`.
 //!
 //! 🔑 **Só existe no alvo `wasm32`.** `wgpu::SurfaceTarget::Canvas` e o
 //! `HtmlCanvasElement` não têm par em nativo, e um crate que só compila num

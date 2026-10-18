@@ -9,6 +9,9 @@
 //! `02D-nome.jpg` é disponível (já com a marca d'água do servidor, que o
 //! exemplo `marca_resistente` do e-commerce aplica).
 
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
+
 use std::path::PathBuf;
 
 use fotolivro::{Capa, Montagem};

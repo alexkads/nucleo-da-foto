@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["photo", "editor", "layers", "image", "compositing"]
+categories = ["multimedia::images", "graphics"]
 description = "O editor de fotos em camadas sem janela: documento, tiles, pincel, histórico, composição e a gravação do projeto"
 
 # 🔑 **Sem GPUI e sem `revelacao-core`** (docs/editor-em-camadas/02-CONTRATO.md).
@@ -29,3 +35,6 @@ kurbo = "0.13"
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[lints]
+workspace = true

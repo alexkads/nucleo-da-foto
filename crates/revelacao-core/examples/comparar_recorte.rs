@@ -4,6 +4,9 @@
 //! ```text
 //! cargo run --release -p revelacao-core --example comparar_recorte -- foto.jpg x0 y0 lado cx cy raio saida.ppm
 //! ```
+
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
 use revelacao_core::preenchimento::{sintetizar, Controle, Pedido, Qualidade};
 
 fn main() {

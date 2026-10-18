@@ -1280,7 +1280,7 @@ pub struct Montagem {
 
 impl Montagem {
     /// `previstas` é quantas fotos vão entrar: é por ela que o orçamento de
-    /// [`TETO_DAS_FOTOS`] se divide. Errar para mais só deixa o livro menor.
+    /// `TETO_DAS_FOTOS` se divide. Errar para mais só deixa o livro menor.
     pub fn nova(capa: Capa, previstas: usize) -> Self {
         Self {
             documento: PdfDocument::new(&titulo_de(&capa)),

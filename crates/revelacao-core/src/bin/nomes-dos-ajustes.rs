@@ -5,6 +5,9 @@
 //! compara a lista dele com esta. Um campo fora de lugar não é erro em lugar
 //! nenhum — é a foto saindo com o ajuste errado — e a lista é a única defesa.
 
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
+
 fn main() {
     println!(
         "{}",

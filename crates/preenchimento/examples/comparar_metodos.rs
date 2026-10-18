@@ -5,6 +5,9 @@
 //! ```text
 //! VLB_MODELOS=… cargo run --release -p preenchimento --example comparar_metodos -- foto.jpg saida/
 //! ```
+
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 

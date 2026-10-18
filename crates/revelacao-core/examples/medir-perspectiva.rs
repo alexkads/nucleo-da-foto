@@ -5,6 +5,9 @@
 //! Mede `transformacao::aplicar` em três tamanhos: a prévia reduzida do arrasto
 //! (1024 px), a cópia de trabalho (2560 px) e o arquivo (6000×4000, 24 MP).
 
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
+
 use std::time::Instant;
 
 use image::{DynamicImage, Rgba, RgbaImage};

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["wasm", "webgpu", "photo", "browser"]
+categories = ["wasm", "graphics"]
 description = "O motor de revelação compilado para o navegador: wasm-bindgen sobre o revelacao-core, com WebGPU e WebGL2"
 
 [lib]
@@ -48,3 +54,6 @@ image = { version = "0.25", default-features = false, features = [
   "bmp",
   "gif",
 ] }
+
+[lints]
+workspace = true

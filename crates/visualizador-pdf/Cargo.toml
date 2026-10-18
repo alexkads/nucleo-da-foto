@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["pdf", "render", "raster", "viewer"]
+categories = ["rendering", "multimedia::images"]
 description = "As páginas de um PDF desenhadas em pixels, para o app mostrar o fotolivro sem sair dele — sem tela e sem GPU"
 
 [dependencies]
@@ -16,3 +22,6 @@ hayro = "0.7.1"
 # O livro de verdade, para o teste desenhar o que o balcão vai abrir.
 fotolivro = { path = "../fotolivro" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+[lints]
+workspace = true

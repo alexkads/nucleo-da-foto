@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["recovery", "forensics", "jpeg", "raw", "sd-card"]
+categories = ["filesystem", "multimedia::images"]
 description = "Recupera fotos de um cartão formatado: varre os setores atrás de JPEG e RAW e diz onde cada arquivo começa e termina"
 
 [lib]
@@ -13,3 +19,6 @@ path = "src/lib.rs"
 [dependencies]
 # Nada. O motor é leitura e aritmética sobre `Read + Seek`: o cartão de
 # verdade, a imagem `.img` e o `Cursor` do teste passam pelo mesmo caminho.
+
+[lints]
+workspace = true

@@ -31,7 +31,7 @@
 //!    contínuo** e longo, com o ângulo ajustado pelos pixels dele, e cada pixel
 //!    fica com uma reta só.
 //! 5. As verticais decidem, e o giro sai de um ajuste que separa giro de
-//!    convergência (ver [`decidir`]). Sem apoio bastante ([`APOIO_MINIMO`]), o
+//!    convergência (ver `decidir`). Sem apoio bastante (`APOIO_MINIMO`), o
 //!    Auto não responde — não achar é melhor que entortar.
 //!
 //! ## O sentido do ângulo

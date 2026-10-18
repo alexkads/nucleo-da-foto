@@ -3,7 +3,13 @@ name = "ia-local"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "A IA local do VintageLightbox: modelos ONNX baixados pelo operador, backends (CPU, CoreML, DirectML, CUDA) e sessões reaproveitadas"
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["ai", "onnx", "inference", "local", "models"]
+categories = ["science", "multimedia::images"]
+description = "A IA local: modelos ONNX baixados pelo operador, backends (CPU, CoreML, DirectML, CUDA) e sessões reaproveitadas"
 
 # 🧠 A base comum de toda IA que roda no computador do balcão — sem saber para
 # que ela serve. O preenchimento (LaMa) é o primeiro uso; remover fundo,
@@ -39,10 +45,13 @@ ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, fea
 # primeira vez que a IA roda e carregado pelo caminho (`src/runtime.rs`).
 [target.'cfg(all(windows, target_env = "gnu"))'.dependencies]
 ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "load-dynamic", "api-27", "directml"] }
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
 ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-27"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

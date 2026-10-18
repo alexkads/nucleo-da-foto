@@ -46,12 +46,29 @@ edition = "2021"
 authors = ["Recordar Fotos Estúdio"]
 license = "MIT"
 repository = "https://github.com/alexkads/nucleo-da-foto"
+# O Rust mínimo (MSRV). Conferido com `cargo +<versão> check --workspace`; subir
+# é mudança que quebra quem compila com Rust mais velho — vai no CHANGELOG.
+rust-version = "1.92"
+# Consumido por git com tag, nunca pelo crates.io.
+publish = false
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 tempfile = "3.8"
+
+# Os lints de todo crate (`[lints] workspace = true` em cada um).
+[workspace.lints.rust]
+# Nenhum crate do núcleo precisa de `unsafe`; o que precisar, discute antes.
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "warn"
 
 # Os perfis valem só quando este workspace é compilado aqui (testes, wasm). Quem
 # consome usa os perfis do próprio workspace — inclusive os `opt-level` por

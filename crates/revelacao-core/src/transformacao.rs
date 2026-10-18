@@ -155,7 +155,7 @@ impl Corte {
         self.espelho_v
     }
 
-    /// O corte não muda nada? Ver [`e_identidade`], que é onde a folga mora.
+    /// O corte não muda nada? Ver `e_identidade`, que é onde a folga mora.
     pub fn e_inteiro(&self) -> bool {
         e_identidade(self)
     }
@@ -175,7 +175,7 @@ impl Corte {
     }
 
     /// O retângulo em pixels, **dentro do espaço já girado** — exatamente o que
-    /// [`recortar_reto`] copia.
+    /// `recortar_reto` copia.
     ///
     /// 🚨 **É a única conta.** Quem recorta e quem **desenha o preview** leem
     /// daqui: dois arredondamentos diferentes fariam o operador enquadrar uma
@@ -473,7 +473,7 @@ fn compor(depois: Afim, antes: Afim) -> Afim {
 ///
 /// É o que as duas vinhetas do shader recebem (`QuadroDeSaida` no WGSL), e o
 /// que a vinheta do darktable em CPU recebe
-/// ([`crate::darktable::vignette_no_quadro`]).
+/// (`crate::darktable::vignette_no_quadro`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Quadro {
     /// O tamanho do arquivo que sai, em pixels — [`Corte::dimensoes_de_saida`].
@@ -1009,7 +1009,7 @@ fn amostrar_bruto(dados: &[u8], largura: u32, altura: u32, u: f32, v: f32) -> [u
 /// com os cantos que ficam de fora **transparentes** (o palco aparece por trás,
 /// como no site).
 ///
-/// É a mesma rotação de [`endireitar_e_recortar`] — o sentido e o centro —, só
+/// É a mesma rotação de `endireitar_e_recortar` — o sentido e o centro —, só
 /// que sem recortar: a tela do Enquadrar desenha o retângulo por cima.
 pub fn inclinar_inteira(base: &DynamicImage, angulo: f32) -> DynamicImage {
     let origem = base.to_rgba8();

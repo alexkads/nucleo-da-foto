@@ -79,6 +79,32 @@ compilando.
 `scripts/construir-*.sh` geram os `.wasm` e o glue do wasm-bindgen direto na pasta do frontend que
 receber como argumento (`scripts/construir-fotolivro.sh ../photokads-plataforma/frontend`).
 
-## Licença
+## Qualidade
 
-MIT — ver `LICENSE`.
+`make verificar` é o portão de toda mudança e de todo lançamento:
+
+| Etapa | O que garante |
+|---|---|
+| `cargo fmt --check` | o formato da casa |
+| `cargo clippy -D warnings` | nativo e `wasm32`; lints do workspace: sem `unsafe`, sem `dbg!`, `todo!` e `unimplemented!` |
+| `cargo test --workspace` | unidade, integração e doc-tests |
+| `cargo doc -D warnings` | nenhum link quebrado nem item privado citado na documentação pública |
+| `cargo deny check` | licenças permitidas, nenhuma vulnerabilidade conhecida (RustSec), só o crates.io como fonte |
+
+Além dele: `make cobertura` (cobertura por crate, `cargo llvm-cov`), `make semver` (a API pública
+contra a última tag, `cargo semver-checks`) e `make msrv`.
+
+**Rust mínimo (MSRV): 1.92**, conferido compilando com o toolchain 1.92 — é o que o `hayro` (o
+desenho dos PDFs) exige. Subir o MSRV é mudança que quebra: vai no CHANGELOG.
+
+## Licenças
+
+O núcleo é **MIT** (`LICENSE`), com uma exceção que quem distribui precisa saber:
+
+🚨 **`vendor/rawler` é LGPL-2.1-only** (`vendor/rawler/LICENSE`). É o decodificador de RAW em Rust puro
+que o `raw-codec` usa (o único que abre o DNG com perdas e compila para wasm), vendorizado com as
+mudanças descritas em `vendor/rawler/MUDANCAS.md`. Quem distribui um binário que liga o `raw-codec` —
+os apps desktop e o `raw-web` dos sites — tem, sobre esse pedaço, as obrigações da LGPL-2.1: o código
+do rawler (com as mudanças) à disposição de quem recebe o binário e a possibilidade de religar o
+programa com uma versão modificada dele. O `deny.toml` registra a exceção; nenhuma outra dependência
+não permissiva entra sem passar por ali.

@@ -13,6 +13,9 @@
 //! - com a mesma revelação (só compõe — a máscara está no cache);
 //! - com um stroke a mais no fim (o arrasto: só o novo é rasterizado).
 
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
+
 use std::sync::Arc;
 use std::time::Instant;
 

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["wasm", "wgpu", "display", "browser"]
+categories = ["wasm", "graphics"]
 description = "A tela do cliente do balcão, em wgpu: a foto revelada sobre preto, e o cruzamento entre uma e a seguinte"
 
 [lib]
@@ -19,3 +25,6 @@ wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["HtmlCanvasElement", "console"] }
 console_error_panic_hook = "0.1"
 bytemuck = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

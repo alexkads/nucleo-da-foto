@@ -457,7 +457,7 @@ impl Traco {
         self
     }
 
-    /// Com a transparência da camada bloqueada (ver [`Traco::alfa_travado`]).
+    /// Com a transparência da camada bloqueada (ver `Traco::alfa_travado`).
     pub fn com_alfa_travado(mut self, travado: bool) -> Self {
         self.alfa_travado = travado;
         self

@@ -23,3 +23,8 @@ rosada; a linearização é aplicada em `crates/raw-codec`.
 
 Para atualizar: copiar a versão nova do crates.io, reaplicar os itens 1–3 e
 rodar `cargo test -p raw-codec`.
+
+## 2026-10-18 — o identificador da licença
+
+`license = "LGPL-2.1"` → `"LGPL-2.1-only"` no `Cargo.toml`: o primeiro é um identificador SPDX
+obsoleto, e o `cargo deny` não o lê. A licença é a mesma (`LICENSE`); só o nome mudou.

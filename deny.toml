@@ -1,0 +1,56 @@
+# cargo-deny: o que entra no núcleo pela árvore de dependências (`make deny`).
+#
+# Três perguntas, conferidas a cada `make verificar`:
+# - **Licenças**: só as permissivas, mais as exceções escritas e explicadas.
+# - **Vulnerabilidades**: o banco do RustSec (`advisories`).
+# - **Fontes**: só o crates.io — nada de git solto.
+
+[graph]
+all-features = true
+
+[advisories]
+# Avisos do RustSec viram erro; os sem manutenção, aviso.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+
+# 🚨 **O rawler é LGPL-2.1**, e é a única dependência não permissiva do núcleo.
+#    Vendorizado em `vendor/rawler` (com a licença dele em `vendor/rawler/LICENSE`)
+#    porque é o único decodificador de RAW em Rust puro que abre o DNG com perdas
+#    e compila para wasm. Quem distribui um binário que liga o `raw-codec` — o app
+#    desktop, os wasm dos sites — tem as obrigações da LGPL sobre esse pedaço:
+#    o código do rawler (incluindo as mudanças, `vendor/rawler/MUDANCAS.md`) à
+#    disposição e a possibilidade de religar o programa com uma versão modificada
+#    dele. Ver o README da raiz, "Licenças".
+[[licenses.exceptions]]
+crate = "rawler"
+allow = ["LGPL-2.1-only"]
+
+[bans]
+# Duas versões do mesmo crate são comuns na árvore do wgpu e do image; avisa,
+# não barra.
+multiple-versions = "warn"
+wildcards = "deny"
+# Os crates do próprio núcleo se ligam por caminho, sem versão.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

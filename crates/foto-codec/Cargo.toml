@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["image", "jpeg", "webp", "codec", "photo"]
+categories = ["multimedia::images", "encoding"]
 description = "O codificador de foto do estúdio — um só, para todo destino: desktop, editor no navegador e download do cliente"
 
 [dependencies]
@@ -17,3 +23,6 @@ description = "O codificador de foto do estúdio — um só, para todo destino: 
 # WebP não é com ele — o `image` só faz WebP lossless, que numa foto sai maior
 # que o JPEG; quem escreve é o navegador, na importação.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+[lints]
+workspace = true

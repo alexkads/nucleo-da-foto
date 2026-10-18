@@ -51,7 +51,7 @@ pub fn decodificar(bytes: &[u8]) -> Result<DynamicImage, ImageError> {
 ///
 /// O canal alfa é descartado: JPEG não o tem, e a revelação nunca o altera.
 ///
-/// Sai com [`DPI`] no cabeçalho — ver a nota lá sobre o que isso muda no
+/// Sai com `DPI` no cabeçalho — ver a nota lá sobre o que isso muda no
 /// laboratório.
 pub fn codificar(imagem: &DynamicImage, qualidade: u8) -> Result<Vec<u8>, ImageError> {
     let rgb = imagem.to_rgb8();

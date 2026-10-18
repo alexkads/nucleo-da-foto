@@ -8,6 +8,9 @@
 //! ```text
 //! cargo run --release -p revelacao-core --example salvar-tempo -- <foto.jpg>
 //! ```
+
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
 use std::{sync::Arc, time::Instant};
 
 use revelacao_core::{jpeg, transformacao, Ajustes, Corte, Motor};

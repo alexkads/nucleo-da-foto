@@ -11,6 +11,9 @@
 //! (o salto na borda do buraco ÷ o da verdade: > 1 é emenda visível) e o
 //! tempo. Grava `cena-variante.ppm` para olhar.
 
+// Uma ferramenta de linha de comando: imprimir é o que ela faz.
+#![allow(clippy::print_stdout)]
+
 use std::time::Instant;
 
 use revelacao_core::preenchimento::{sintetizar, Controle, Pedido, Qualidade};

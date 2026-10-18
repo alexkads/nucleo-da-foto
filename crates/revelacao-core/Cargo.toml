@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "O motor de revelação do VintageLightbox: os 46 ajustes em WGSL, o enquadramento e o JPEG — sem janela, sem banco, sem rede"
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["photo", "raw", "gpu", "wgpu", "color-grading"]
+categories = ["multimedia::images", "graphics", "rendering"]
+description = "O motor de revelação: os 46 ajustes em WGSL, o enquadramento e o JPEG — sem janela, sem banco, sem rede"
 
 [lib]
 name = "revelacao_core"
@@ -28,7 +34,7 @@ bytemuck = { version = "1.14", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # O codificador de foto, que já foi um módulo daqui — ver `src/jpeg.rs`.
 foto-codec = { path = "../foto-codec" }
-lru = "0.16.2"
+lru = "0.18.2"
 # O `map_async` avisa por callback; o canal transforma isso num `await` que
 # funciona igual na thread de fundo do desktop e no laço de eventos do navegador.
 futures-channel = "0.3"
@@ -47,3 +53,6 @@ pollster = "0.4"
 # Ceder a vez ao navegador entre um `poll` e outro: o WebGL2 só atualiza o
 # estado dos fences entre tarefas do laço de eventos.
 gloo-timers = { version = "0.3", features = ["futures"] }
+
+[lints]
+workspace = true
