@@ -1,6 +1,6 @@
 # Os comandos do nucleo-da-foto. `make` sem argumento lista.
 .DEFAULT_GOAL := ajuda
-.PHONY: ajuda verificar fmt clippy testar wasm doc deny cobertura semver msrv bancada bancada-testar
+.PHONY: ajuda verificar fmt clippy testar wasm doc deny cobertura semver msrv bancada bancada-testar faxina
 
 WEB := -p conversao-web -p fotolivro-web -p raw-web -p revelacao-web -p tela-do-cliente-web
 # O que vai para o navegador: os wrappers e os crates do núcleo que eles levam.
@@ -18,7 +18,10 @@ ULTIMA_TAG := $(shell git describe --tags --abbrev=0 2>/dev/null)
 ajuda: ## Lista os alvos
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-verificar: fmt clippy testar wasm doc deny ## Tudo o que tem de passar antes de lançar
+verificar: faxina-se-preciso fmt clippy testar wasm doc deny ## Tudo o que tem de passar antes de lançar
+
+faxina-se-preciso:
+	@./scripts/faxina-se-preciso.sh
 
 fmt: ## Formatação (rustfmt), sem mudar nada
 	cargo fmt --all -- --check
@@ -41,9 +44,13 @@ deny: ## Licenças, vulnerabilidades conhecidas e fontes das dependências (carg
 cobertura: ## Cobertura por arquivo (cargo-llvm-cov), com piso; HTML em target/cobertura
 	cargo llvm-cov --workspace $(FORA_DA_COBERTURA) --html --output-dir target/cobertura
 	cargo llvm-cov report $(FORA_DA_COBERTURA) --summary-only --fail-under-lines $(PISO_DA_COBERTURA)
+	@# A árvore instrumentada (~3 GiB) só serve a esta conta; o HTML fica em target/cobertura.
+	@rm -rf target/llvm-cov-target
 
 semver: ## A API pública de cada crate comparada com a última tag (cargo-semver-checks)
 	@for c in $(BIBLIOTECAS); do cargo semver-checks -p $$c --baseline-rev $(ULTIMA_TAG) || exit 1; done
+	@# Cada crate compilado duas vezes (~2 GiB): só serve a esta conferência.
+	@rm -rf target/semver-checks
 
 msrv: ## Compila com o Rust mínimo declarado (rust-version)
 	rustup toolchain install $(MSRV) --profile minimal
@@ -56,3 +63,6 @@ bancada: ## A janela que mede o núcleo contra a última tag, com a sua foto
 
 bancada-testar: ## Os testes da bancada: todo caso sai igual na tag e aqui; a janela sem tela
 	cd ferramentas/bancada && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+
+faxina: ## Apaga os fragmentos incrementais e as árvores da cobertura e do semver
+	@./scripts/faxina-se-preciso.sh --agora
