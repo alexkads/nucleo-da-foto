@@ -169,7 +169,7 @@ impl Vista {
         // compõe e reduz o pedaço dela; as linhas da vista não se cruzam.
         let colunas = (vx1 - vx0) as usize;
         let pixels = colunas as u64 * (vy1 - vy0) as u64 * (f * f) as u64;
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()) as u32;
+        let threads = crate::nucleos().unwrap_or(1) as u32;
         let por_faixa = if pixels < 1 << 20 || threads <= 1 {
             vy1 - vy0
         } else {
@@ -223,6 +223,9 @@ impl Vista {
         let f = self.fator;
         let (ox, oy) = (self.regiao.x, self.regiao.y);
         let (fim_x, fim_y) = (self.regiao.direita(), self.regiao.baixo());
+        // Preparada uma vez para a faixa inteira: no rascunho são uma
+        // composição por linha da vista (ver `composicao::Composicao`).
+        let exibidora = composicao::Exibidora::nova(base, doc, self.exibicao);
         if rascunho && f > 1 {
             let colunas = (vx1 - vx0) as usize;
             let mut saida = Vec::with_capacity(colunas * (b - a) as usize * 3);
@@ -230,12 +233,7 @@ impl Vista {
             let largura = ((vx1 - vx0) * f).min(fim_x - x0);
             for vy in a..b {
                 let y = (oy + vy * f + f / 2).min(fim_y - 1);
-                let linha = composicao::compor_recorte_exibindo(
-                    base,
-                    doc,
-                    &Retangulo::novo(x0, y, largura, 1),
-                    self.exibicao,
-                );
+                let linha = exibidora.recorte(&Retangulo::novo(x0, y, largura, 1));
                 for k in 0..colunas as u32 {
                     let x = (k * f + f / 2).min(linha.width() - 1);
                     saida.extend_from_slice(&linha.get_pixel(x, 0).0);
@@ -245,7 +243,7 @@ impl Vista {
         }
         let regiao = Retangulo::novo(ox + vx0 * f, oy + a * f, (vx1 - vx0) * f, (b - a) * f)
             .limitado(fim_x, fim_y);
-        let composta = composicao::compor_recorte_exibindo(base, doc, &regiao, self.exibicao);
+        let composta = exibidora.recorte(&regiao);
         let colunas = (vx1 - vx0) as usize;
         let mut saida = Vec::with_capacity(colunas * (b - a) as usize * 3);
         if f == 1 {

@@ -581,6 +581,29 @@ pub fn deslocada(camada: &CamadaDePixels, dx: i64, dy: i64) -> CamadaDePixels {
     // volta inteiro quando anda de novo para dentro.
     let mut saida = CamadaDePixels::nova(camada.largura(), camada.altura());
     let lado = LADO_DO_TILE as i64;
+    if dx % lado == 0 && dy % lado == 0 {
+        // 🔑 **Deslocamento de tiles inteiros (inclusive o zero, do primeiro
+        // evento do arrasto): os mesmos tiles com chave nova.** Nenhum byte
+        // muda dentro deles, então o `Arc` é reaproveitado em vez de copiar a
+        // camada inteira (96 MB numa camada de 24 MP).
+        let (tx, ty) = ((dx / lado) as i32, (dy / lado) as i32);
+        for (posicao, tile) in camada.todos() {
+            saida.definir((posicao.0 + tx, posicao.1 + ty), Some(tile.clone()));
+        }
+    } else {
+        copiar_deslocada(camada, &mut saida, dx, dy);
+    }
+    let posicoes: Vec<Posicao> = saida.todos().map(|(p, _)| *p).collect();
+    for p in posicoes {
+        saida.enxugar(p);
+    }
+    saida
+}
+
+/// O caminho geral de [`deslocada`]: linha a linha, cada trecho no tile de
+/// destino.
+fn copiar_deslocada(camada: &CamadaDePixels, saida: &mut CamadaDePixels, dx: i64, dy: i64) {
+    let lado = LADO_DO_TILE as i64;
     for (posicao, tile) in camada.todos() {
         let (tx, ty) = crate::tiles::origem_do_tile(*posicao);
         for ly in 0..lado {
@@ -598,11 +621,6 @@ pub fn deslocada(camada: &CamadaDePixels, dx: i64, dy: i64) -> CamadaDePixels {
             }
         }
     }
-    let posicoes: Vec<Posicao> = saida.todos().map(|(p, _)| *p).collect();
-    for p in posicoes {
-        saida.enxugar(p);
-    }
-    saida
 }
 
 /// O passo do desfazer entre duas versões de uma camada: os tiles que mudaram.
@@ -767,6 +785,38 @@ mod testes {
         let mescladas = compor(&base, &juntas);
         for (a, b) in separadas.as_raw().iter().zip(mescladas.as_raw()) {
             assert!((*a as i32 - *b as i32).abs() <= 1, "{a} × {b}");
+        }
+    }
+
+    /// 🔑 **Deslocar por tiles inteiros reaproveita os tiles e dá o mesmo que
+    /// copiar linha a linha** — inclusive o tile transparente, que some nos
+    /// dois caminhos.
+    #[test]
+    fn deslocar_por_tiles_inteiros_e_o_mesmo_que_copiar() {
+        let mut c = CamadaDePixels::nova(600, 400);
+        for (posicao, cor) in [((0, 0), 9u8), ((1, 1), 77), ((2, 0), 200)] {
+            let t = c.tile_mut(posicao);
+            for (k, p) in t.chunks_exact_mut(4).enumerate() {
+                p.copy_from_slice(&[cor, k as u8, (k >> 8) as u8, (k % 3) as u8 * 127]);
+            }
+        }
+        c.tile_mut((1, 0)); // transparente: não sobrevive a nenhum dos dois
+        let lado = LADO_DO_TILE as i64;
+        for (dx, dy) in [(0, 0), (lado, 0), (-2 * lado, lado), (3 * lado, -lado)] {
+            let rapida = deslocada(&c, dx, dy);
+            let mut copiada = CamadaDePixels::nova(600, 400);
+            copiar_deslocada(&c, &mut copiada, dx, dy);
+            let posicoes: Vec<Posicao> = copiada.todos().map(|(p, _)| *p).collect();
+            for p in posicoes {
+                copiada.enxugar(p);
+            }
+            let tiles = |c: &CamadaDePixels| {
+                c.todos()
+                    .map(|(p, t)| (*p, t.as_slice().to_vec()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(tiles(&rapida), tiles(&copiada), "({dx}, {dy})");
+            assert_eq!(rapida.quantos(), 3);
         }
     }
 

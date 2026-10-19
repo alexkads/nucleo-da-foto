@@ -75,3 +75,13 @@ pub use sessao::{
 };
 pub use tiles::{CamadaDePixels, LADO_DO_TILE};
 pub use transformar::{Caixa, Transformacao};
+
+/// Quantos núcleos o sistema diz ter — perguntado uma vez por processo.
+///
+/// 🔑 No Linux, `available_parallelism` lê os arquivos do cgroup a cada
+/// chamada; a vista e a difusão perguntavam a cada gesto. `None` quando o
+/// sistema não sabe — quem chama escolhe o padrão.
+pub(crate) fn nucleos() -> Option<usize> {
+    static NUCLEOS: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *NUCLEOS.get_or_init(|| std::thread::available_parallelism().ok().map(|n| n.get()))
+}

@@ -174,7 +174,7 @@ impl MapaDifuso {
         // Uma faixa de linhas de blocos por thread: na foto inteira com k = 1
         // são 24 milhões de leituras.
         let linhas: Vec<u32> = (by0..by1).collect();
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let threads = crate::nucleos().unwrap_or(1);
         let por = linhas.len().div_ceil(threads).max(1);
         let media = &mut self.media;
         let pedacos: Vec<&mut [u8]> = media[by0 as usize * lm..by1 as usize * lm]
@@ -258,7 +258,7 @@ impl MapaDifuso {
         let lm = self.largura as usize;
         // As três caixas em x, linha a linha (as linhas não se tocam).
         let mut grade: Vec<u32> = vec![0; w * h];
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let threads = crate::nucleos().unwrap_or(1);
         let por = h.div_ceil(threads).max(16);
         {
             let media = &self.media;

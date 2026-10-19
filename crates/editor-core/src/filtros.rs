@@ -584,9 +584,7 @@ fn ruido(rgba: &[u8], r: &Retangulo, quantidade: f32, gaussiano: bool, mono: boo
 }
 
 fn linhas_de_trabalho() -> usize {
-    std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .clamp(1, 16)
+    crate::nucleos().unwrap_or(4).clamp(1, 16)
 }
 
 /// As três caixas, nas linhas e depois nas colunas, com a borda repetida.

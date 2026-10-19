@@ -56,3 +56,9 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 
 [lints]
 workspace = true
+
+# `cargo bench -p revelacao-core`: a mediana dos caminhos quentes, para comparar
+# antes e depois de uma mudança (ver o arquivo).
+[[bench]]
+name = "desempenho"
+harness = false

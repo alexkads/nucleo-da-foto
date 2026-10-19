@@ -298,6 +298,13 @@ pub fn mesclar(baixo: [u8; 3], cima: [u8; 4], opacidade: f32, modo: Modo) -> [u8
     if cima[3] == 0 || opacidade <= 0.0 {
         return baixo;
     }
+    // 🔑 **Normal opaco é a cor de cima, exata** — o caso de quase todo pixel
+    // pintado. Com `a = 1` a conta abaixo dá `b + (c − b)·1 = c` sem erro de
+    // arredondamento (inteiros até 255 são exatos em `f32`); sair antes poupa
+    // três `round` por pixel e camada em toda composição.
+    if modo == Modo::Normal && cima[3] == 255 && opacidade >= 1.0 {
+        return [cima[0], cima[1], cima[2]];
+    }
     let a = cima[3] as f32 / 255.0 * opacidade.min(1.0);
     let alvo: [f32; 3] = match modo {
         // O Normal sem passar por `0..=1`: a conta da etapa 1, bit a bit.
@@ -360,6 +367,28 @@ pub fn mesclar_em_camada(baixo: [u8; 4], cima: [u8; 4], opacidade: f32, modo: Mo
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// 🚨 **O atalho do Normal opaco devolve o que a conta devolvia**, para
+    /// todo par de valores e para opacidade acima de 1.
+    #[test]
+    fn o_normal_opaco_e_a_conta_de_sempre() {
+        let conta = |b: u8, c: u8| -> u8 {
+            let a = 255.0f32 / 255.0 * 1.0;
+            let b = b as f32;
+            (b + (c as f32 - b) * a).round().clamp(0.0, 255.0) as u8
+        };
+        for b in 0..=255u8 {
+            for c in 0..=255u8 {
+                for opacidade in [1.0, 1.5] {
+                    assert_eq!(
+                        mesclar([b, b, b], [c, c, c, 255], opacidade, Modo::Normal),
+                        [conta(b, c); 3],
+                        "{b} sob {c}"
+                    );
+                }
+            }
+        }
+    }
 
     const B: [u8; 3] = [200, 100, 30];
     const C: [u8; 4] = [60, 180, 240, 255];

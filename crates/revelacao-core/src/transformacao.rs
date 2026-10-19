@@ -40,6 +40,8 @@
 //! mesmo `clamp` de `CropSettings::new`; quem tem um `CropSettings` na mão
 //! converte em `infrastructure::transformacao`, e o resultado é o mesmo byte.
 
+use std::borrow::Cow;
+
 use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 use nalgebra::{Matrix3, Vector3};
 
@@ -763,7 +765,26 @@ pub fn aplicar(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> DynamicI
     if e_identidade(corte) {
         return imagem.clone();
     }
+    aplicar_com_corte(imagem, corte, recortar)
+}
 
+/// O mesmo [`aplicar`], tomando a foto em vez de emprestá-la.
+///
+/// 🔑 **Sem corte nenhum, devolve a própria foto — sem copiar um pixel.** O
+/// [`aplicar`] emprestado tem de clonar nesse caso (8,6 ms a 2560², 96 MB a
+/// 24 MP), e quem já é dono do resultado da GPU e não vai mais usá-lo paga a
+/// cópia à toa — a cada quadro de um arrasto, e com o pico de memória dobrado na
+/// exportação do navegador. Com corte, o resultado é o mesmo de [`aplicar`].
+pub fn aplicar_dono(imagem: DynamicImage, corte: &Corte, recortar: bool) -> DynamicImage {
+    if e_identidade(corte) {
+        return imagem;
+    }
+    aplicar_com_corte(&imagem, corte, recortar)
+}
+
+/// O [`aplicar`] quando há o que fazer: perspectiva, espelho, giro, ângulo ou
+/// recorte.
+fn aplicar_com_corte(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> DynamicImage {
     if corte.tem_perspectiva() {
         return aplicar_projetiva(imagem, corte, recortar);
     }
@@ -779,7 +800,7 @@ pub fn aplicar(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> DynamicI
         if corte.angulo() != 0.0 {
             return inclinar_inteira(&base, corte.angulo());
         }
-        return base;
+        return base.into_owned();
     }
 
     if corte.angulo() == 0.0 {
@@ -815,20 +836,25 @@ fn e_identidade(corte: &Corte) -> bool {
 /// espelhar na horizontal dá a mesma coisa que espelhar na vertical e depois
 /// girar — trocar a ordem aqui produz a foto certa em metade dos casos e a
 /// invertida na outra metade, o que na conferência parece "às vezes funciona".
-fn espelhar_e_girar(imagem: &DynamicImage, corte: &Corte) -> DynamicImage {
-    let mut saida = imagem.clone();
+///
+/// 🔑 **Emprestada enquanto não há espelho nem giro.** Cada passo já devolve uma
+/// imagem nova; clonar antes (como era até 2026-10-19) era uma cópia da foto
+/// inteira a mais em todo corte — e o recorte reto, o caso mais comum depois da
+/// identidade, não espelha nem gira nada.
+fn espelhar_e_girar<'a>(imagem: &'a DynamicImage, corte: &Corte) -> Cow<'a, DynamicImage> {
+    let mut saida = Cow::Borrowed(imagem);
 
     if corte.espelho_h() {
-        saida = saida.fliph();
+        saida = Cow::Owned(saida.fliph());
     }
     if corte.espelho_v() {
-        saida = saida.flipv();
+        saida = Cow::Owned(saida.flipv());
     }
 
     match corte.giro_90().rem_euclid(4) {
-        1 => saida.rotate90(),
-        2 => saida.rotate180(),
-        3 => saida.rotate270(),
+        1 => Cow::Owned(saida.rotate90()),
+        2 => Cow::Owned(saida.rotate180()),
+        3 => Cow::Owned(saida.rotate270()),
         _ => saida,
     }
 }
@@ -854,7 +880,7 @@ fn recortar_reto(base: &DynamicImage, corte: &Corte) -> DynamicImage {
 /// vem este pixel" não há intermediária, e o que cai fora da foto é resolvido
 /// grudando na borda.
 fn endireitar_e_recortar(base: &DynamicImage, corte: &Corte) -> DynamicImage {
-    let origem = base.to_rgba8();
+    let origem = em_rgba(base);
     let (largura, altura) = origem.dimensions();
     let (largura_f, altura_f) = (largura as f32, altura as f32);
 
@@ -905,6 +931,17 @@ fn endireitar_e_recortar(base: &DynamicImage, corte: &Corte) -> DynamicImage {
     DynamicImage::ImageRgba8(destino)
 }
 
+/// Os pixels em RGBA8 — **emprestados** quando a foto já é RGBA8.
+///
+/// 🔑 É o caso da revelada, que vem da GPU assim. O `to_rgba8` sozinho custava
+/// um terço do tempo na cópia de trabalho, para devolver os mesmos bytes.
+fn em_rgba(imagem: &DynamicImage) -> Cow<'_, RgbaImage> {
+    match imagem {
+        DynamicImage::ImageRgba8(rgba) => Cow::Borrowed(rgba),
+        outra => Cow::Owned(outra.to_rgba8()),
+    }
+}
+
 /// O enquadramento com perspectiva: **uma** reamostragem, do pixel de saída
 /// para a origem, pela matriz de [`Corte::mapa`].
 ///
@@ -920,16 +957,8 @@ fn endireitar_e_recortar(base: &DynamicImage, corte: &Corte) -> DynamicImage {
 /// Meio pixel de folga na borda gruda na borda, como [`amostrar`]: senão a
 /// última coluna do recorte justo sairia com uma franja branca.
 fn aplicar_projetiva(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> DynamicImage {
-    // 🔑 Sem cópia da origem quando ela já é RGBA — que é o caso da revelada.
-    // O `to_rgba8` sozinho custava um terço do tempo na cópia de trabalho.
-    let convertida;
-    let origem: &RgbaImage = match imagem {
-        DynamicImage::ImageRgba8(rgba) => rgba,
-        outra => {
-            convertida = outra.to_rgba8();
-            &convertida
-        }
-    };
+    let origem = em_rgba(imagem);
+    let origem: &RgbaImage = &origem;
     let (largura, altura) = origem.dimensions();
     let (sw, sh) = if recortar {
         corte.dimensoes_de_saida(largura, altura)
@@ -1052,7 +1081,7 @@ fn amostrar_bruto(dados: &[u8], largura: u32, altura: u32, u: f32, v: f32) -> [u
 /// É a mesma rotação de `endireitar_e_recortar` — o sentido e o centro —, só
 /// que sem recortar: a tela do Enquadrar desenha o retângulo por cima.
 pub fn inclinar_inteira(base: &DynamicImage, angulo: f32) -> DynamicImage {
-    let origem = base.to_rgba8();
+    let origem = em_rgba(base);
     let (largura, altura) = origem.dimensions();
     let (cx, cy) = (largura as f32 / 2., altura as f32 / 2.);
     let (sin, cos) = (-angulo.to_radians()).sin_cos();
@@ -1280,6 +1309,46 @@ mod testes {
         ];
         for (nome, corte) in casos {
             assert!(!e_identidade(&corte), "`{nome}` passou por identidade");
+        }
+    }
+
+    /// 🔑 **Tomar a foto não muda o resultado**, em nenhum caminho: identidade,
+    /// recorte, giro, espelho, ângulo e perspectiva — com e sem recortar, de
+    /// RGBA (a revelada) e de RGB (um JPEG aberto).
+    #[test]
+    fn aplicar_dono_da_o_mesmo_que_aplicar() {
+        let mut rgba = RgbaImage::new(23, 17);
+        for (x, y, p) in rgba.enumerate_pixels_mut() {
+            *p = Rgba([(x * 11) as u8, (y * 13) as u8, ((x ^ y) * 5) as u8, 255]);
+        }
+        let rgba = DynamicImage::ImageRgba8(rgba);
+        let rgb = DynamicImage::ImageRgb8(rgba.to_rgb8());
+        let casos = [
+            Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, false, false),
+            Corte::novo(0.1, 0.2, 0.7, 0.6, 0, 0.0, false, false),
+            Corte::novo(0.0, 0.0, 1.0, 1.0, 1, 0.0, false, false),
+            Corte::novo(0.1, 0.0, 0.8, 1.0, 3, 0.0, true, true),
+            Corte::novo(0.2, 0.1, 0.6, 0.8, 2, 7.5, true, false),
+            Corte::novo(0.0, 0.0, 1.0, 1.0, 0, -4.0, false, true),
+            Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, false, false).com_perspectiva(Perspectiva {
+                vertical: 30.0,
+                ..Perspectiva::default()
+            }),
+        ];
+        for imagem in [&rgba, &rgb] {
+            for corte in &casos {
+                for recortar in [true, false] {
+                    let emprestada = aplicar(imagem, corte, recortar);
+                    let tomada = aplicar_dono(imagem.clone(), corte, recortar);
+                    assert_eq!(emprestada.dimensions(), tomada.dimensions());
+                    assert_eq!(
+                        emprestada.to_rgba8().into_raw(),
+                        tomada.to_rgba8().into_raw(),
+                        "{corte:?} recortar={recortar} {:?}",
+                        imagem.color()
+                    );
+                }
+            }
         }
     }
 
