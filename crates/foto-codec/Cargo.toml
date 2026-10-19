@@ -26,3 +26,9 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 [lints]
 workspace = true
+
+# `cargo bench -p foto-codec`: a mediana dos caminhos quentes, para comparar
+# antes e depois de uma mudança (ver o arquivo).
+[[bench]]
+name = "desempenho"
+harness = false

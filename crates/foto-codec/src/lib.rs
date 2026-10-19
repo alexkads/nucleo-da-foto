@@ -45,7 +45,8 @@ pub mod espaco_de_cor;
 pub mod orientacao;
 
 use image::codecs::jpeg::{JpegEncoder, PixelDensity};
-use image::{DynamicImage, ExtendedColorType, ImageError};
+use image::error::{ParameterError, ParameterErrorKind};
+use image::{DynamicImage, ImageBuffer, ImageError, Pixel, PixelWithColorType, Rgba};
 
 /// A densidade gravada no cabeçalho JFIF de tudo o que sai daqui.
 ///
@@ -93,11 +94,61 @@ pub fn decodificar(bytes: &[u8]) -> Result<DynamicImage, ImageError> {
 /// [`ImageError`] se o codificador recusar a imagem — na prática, um lado
 /// maior que os 65 535 px que o JPEG admite.
 pub fn codificar(imagem: &DynamicImage, qualidade: u8) -> Result<Vec<u8>, ImageError> {
-    let rgb = imagem.to_rgb8();
+    // 🔑 **Sem cópia quando os pixels já são RGB8 ou RGBA8** — o caso de toda
+    // foto revelada e de todo JPEG aberto. O codificador lê pixel a pixel e
+    // descarta o alfa ele mesmo, do mesmo jeito que o `to_rgb8` descartava: o
+    // arquivo sai byte a byte igual, sem a cópia da foto inteira (72 MB a 24 MP)
+    // só para jogar o quarto canal fora.
+    match imagem {
+        DynamicImage::ImageRgb8(rgb) => codificar_buffer(rgb, qualidade),
+        DynamicImage::ImageRgba8(rgba) => codificar_buffer(rgba, qualidade),
+        outra => codificar_buffer(&outra.to_rgb8(), qualidade),
+    }
+}
+
+/// O mesmo JPEG de [`codificar`], direto de pixels RGBA soltos — sem montar
+/// uma [`DynamicImage`] dona deles.
+///
+/// `rgba` tem `largura × altura × 4` bytes, linha a linha. Serve a quem recebe
+/// os pixels emprestados (o navegador, a GPU) e teria de copiá-los inteiros
+/// só para chamar [`codificar`].
+///
+/// # Erros
+///
+/// [`ImageError`] se `rgba` não tiver exatamente `largura × altura × 4` bytes,
+/// ou se o codificador recusar a imagem (um lado maior que 65 535 px).
+pub fn codificar_rgba(
+    rgba: &[u8],
+    largura: u32,
+    altura: u32,
+    qualidade: u8,
+) -> Result<Vec<u8>, ImageError> {
+    // `checked_mul`: 65 536² × 4 já não cabe em `u64`, e o wasm não pode
+    // entrar em pânico.
+    let esperado = u64::from(largura)
+        .checked_mul(u64::from(altura))
+        .and_then(|p| p.checked_mul(4));
+    let buffer = (esperado == Some(rgba.len() as u64))
+        .then(|| ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(largura, altura, rgba))
+        .flatten()
+        .ok_or_else(|| {
+            ImageError::Parameter(ParameterError::from_kind(
+                ParameterErrorKind::DimensionMismatch,
+            ))
+        })?;
+    codificar_buffer(&buffer, qualidade)
+}
+
+/// O codificador de sempre, com os 300 DPI, sobre qualquer buffer de 8 bits.
+fn codificar_buffer<P, C>(imagem: &ImageBuffer<P, C>, qualidade: u8) -> Result<Vec<u8>, ImageError>
+where
+    P: Pixel<Subpixel = u8> + PixelWithColorType,
+    C: std::ops::Deref<Target = [u8]>,
+{
     let mut bytes = Vec::new();
     let mut codificador = JpegEncoder::new_with_quality(&mut bytes, qualidade);
     codificador.set_pixel_density(PixelDensity::dpi(DPI));
-    codificador.encode(&rgb, rgb.width(), rgb.height(), ExtendedColorType::Rgb8)?;
+    codificador.encode_image(imagem)?;
     Ok(bytes)
 }
 
@@ -129,6 +180,71 @@ mod testes {
             (x, y),
             (300, 300),
             "sem isto a grafica abre a foto como 72 DPI"
+        );
+    }
+
+    /// O caminho de antes de 2026-10-19: copiar para RGB8 e codificar a cópia.
+    fn codificado_pela_copia(imagem: &DynamicImage, qualidade: u8) -> Vec<u8> {
+        let rgb = imagem.to_rgb8();
+        let mut bytes = Vec::new();
+        let mut codificador = JpegEncoder::new_with_quality(&mut bytes, qualidade);
+        codificador.set_pixel_density(PixelDensity::dpi(DPI));
+        codificador
+            .encode(
+                &rgb,
+                rgb.width(),
+                rgb.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .expect("codifica");
+        bytes
+    }
+
+    /// 🚨 **Sem a cópia, o arquivo tem de sair byte a byte igual** — inclusive
+    /// com alfa que não é 255, que o JPEG descarta (não compõe sobre branco).
+    #[test]
+    fn sem_a_copia_o_jpeg_sai_identico() {
+        let mut rgba = image::RgbaImage::new(19, 13);
+        for (x, y, p) in rgba.enumerate_pixels_mut() {
+            *p = Rgba([
+                (x * 13) as u8,
+                (y * 19) as u8,
+                ((x ^ y) * 7) as u8,
+                (x * y) as u8,
+            ]);
+        }
+        let rgba = DynamicImage::ImageRgba8(rgba);
+        let rgb = DynamicImage::ImageRgb8(rgba.to_rgb8());
+        let cinza = DynamicImage::ImageLuma8(rgba.to_luma8());
+        let largo = DynamicImage::ImageRgb16(rgba.to_rgb16());
+
+        for imagem in [&rgba, &rgb, &cinza, &largo] {
+            for qualidade in [1, 75, 100] {
+                assert_eq!(
+                    codificar(imagem, qualidade).expect("codifica"),
+                    codificado_pela_copia(imagem, qualidade),
+                    "{:?} q{qualidade}",
+                    imagem.color()
+                );
+            }
+        }
+        let crus = rgba.to_rgba8().into_raw();
+        assert_eq!(
+            codificar_rgba(&crus, 19, 13, 90).expect("codifica"),
+            codificado_pela_copia(&rgba, 90)
+        );
+    }
+
+    #[test]
+    fn pixels_soltos_com_o_tamanho_errado_sao_erro() {
+        let crus = vec![0u8; 4 * 4 * 4];
+        assert!(codificar_rgba(&crus, 4, 4, 90).is_ok());
+        assert!(codificar_rgba(&crus[1..], 4, 4, 90).is_err(), "curto");
+        assert!(codificar_rgba(&[0u8; 65], 4, 4, 90).is_err(), "longo");
+        assert!(codificar_rgba(&[], 0, 0, 90).is_err(), "sem pixel nenhum");
+        assert!(
+            codificar_rgba(&[], u32::MAX, u32::MAX, 90).is_err(),
+            "não cabe"
         );
     }
 

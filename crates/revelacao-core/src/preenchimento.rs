@@ -235,29 +235,10 @@ impl Nivel {
         controle: &Controle,
     ) -> Result<(), Falha> {
         let mut conhecido: Vec<bool> = self.buraco.iter().map(|b| !b).collect();
+        let mut casca = Casca::nova(self.w, self.h, &conhecido);
         loop {
             controle.parar()?;
-            let mut borda = Vec::new();
-            for y in 0..self.h {
-                for x in 0..self.w {
-                    if conhecido[self.i(x, y)] {
-                        continue;
-                    }
-                    let encosta = (-1..=1).any(|dy| {
-                        (-1..=1).any(|dx| {
-                            let (vx, vy) = (x + dx, y + dy);
-                            vx >= 0
-                                && vy >= 0
-                                && vx < self.w
-                                && vy < self.h
-                                && conhecido[self.i(vx, vy)]
-                        })
-                    });
-                    if encosta {
-                        borda.push((x, y));
-                    }
-                }
-            }
+            let borda = casca.borda();
             if borda.is_empty() {
                 // Sem vizinho conhecido nenhum (não acontece com fontes).
                 self.preencher_por_difusao();
@@ -266,7 +247,7 @@ impl Nivel {
                 return Ok(());
             }
             let mut novos = Vec::with_capacity(borda.len());
-            for &(x, y) in &borda {
+            for &(x, y) in borda {
                 let mut melhor = (u64::MAX, fontes[0]);
                 for &f in fontes {
                     let mut d = 0u64;
@@ -310,42 +291,34 @@ impl Nivel {
                 self.cor[i] = c;
                 conhecido[i] = true;
             }
+            casca.avancar(&conhecido);
         }
     }
 
     /// Casca de cebola: de fora para dentro, a média dos vizinhos conhecidos.
     fn preencher_por_difusao(&mut self) {
         let mut conhecido: Vec<bool> = self.buraco.iter().map(|b| !b).collect();
+        let mut casca = Casca::nova(self.w, self.h, &conhecido);
         loop {
             let mut novos = Vec::new();
-            for y in 0..self.h {
-                for x in 0..self.w {
-                    let i = self.i(x, y);
-                    if conhecido[i] {
-                        continue;
-                    }
-                    let mut soma = [0u32; 3];
-                    let mut n = 0u32;
-                    for dy in -1..=1 {
-                        for dx in -1..=1 {
-                            let (vx, vy) = (x + dx, y + dy);
-                            if (dx, dy) != (0, 0)
-                                && vx >= 0
-                                && vy >= 0
-                                && vx < self.w
-                                && vy < self.h
-                            {
-                                let j = self.i(vx, vy);
-                                if conhecido[j] {
-                                    somar(&mut soma, self.cor[j]);
-                                    n += 1;
-                                }
+            for &(x, y) in casca.borda() {
+                let i = self.i(x, y);
+                let mut soma = [0u32; 3];
+                let mut n = 0u32;
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let (vx, vy) = (x + dx, y + dy);
+                        if (dx, dy) != (0, 0) && vx >= 0 && vy >= 0 && vx < self.w && vy < self.h {
+                            let j = self.i(vx, vy);
+                            if conhecido[j] {
+                                somar(&mut soma, self.cor[j]);
+                                n += 1;
                             }
                         }
                     }
-                    if n > 0 {
-                        novos.push((i, [0, 1, 2].map(|c| ((soma[c] + n / 2) / n) as u8)));
-                    }
+                }
+                if n > 0 {
+                    novos.push((i, [0, 1, 2].map(|c| ((soma[c] + n / 2) / n) as u8)));
                 }
             }
             if novos.is_empty() {
@@ -355,7 +328,92 @@ impl Nivel {
                 self.cor[i] = c;
                 conhecido[i] = true;
             }
+            casca.avancar(&conhecido);
         }
+    }
+}
+
+/// A casca de cebola de um nível: a cada volta, os pixels ainda desconhecidos
+/// que encostam (8-vizinhança) num conhecido, **em ordem de linha**.
+///
+/// 🔑 **Só a primeira volta varre o nível inteiro.** Depois que uma borda vira
+/// conhecida, a próxima são os vizinhos desconhecidos dela — e só eles: um
+/// desconhecido que encostasse num conhecido mais antigo já estaria na borda
+/// anterior. Varrer tudo de novo a cada anel custava largura × altura × anéis
+/// (centenas de milhões de testes num buraco grande) para achar os mesmos
+/// pixels.
+///
+/// 🚨 **A ordem é a da varredura de antes, de propósito.** A síntese sorteia
+/// candidatos pixel a pixel da borda; outra ordem daria outros sorteios — e um
+/// remendo diferente para o mesmo pedido.
+struct Casca {
+    w: i32,
+    h: i32,
+    borda: Vec<(i32, i32)>,
+    /// Quem já entrou na próxima borda, para não entrar duas vezes.
+    marcado: Vec<bool>,
+}
+
+impl Casca {
+    fn nova(w: i32, h: i32, conhecido: &[bool]) -> Self {
+        let mut borda = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                if conhecido[(y * w + x) as usize] {
+                    continue;
+                }
+                let encosta = (-1..=1).any(|dy| {
+                    (-1..=1).any(|dx| {
+                        let (vx, vy) = (x + dx, y + dy);
+                        vx >= 0 && vy >= 0 && vx < w && vy < h && conhecido[(vy * w + vx) as usize]
+                    })
+                });
+                if encosta {
+                    borda.push((x, y));
+                }
+            }
+        }
+        Casca {
+            w,
+            h,
+            borda,
+            marcado: vec![false; (w * h) as usize],
+        }
+    }
+
+    /// Os pixels desta volta, em ordem de linha.
+    fn borda(&self) -> &[(i32, i32)] {
+        &self.borda
+    }
+
+    /// A próxima volta — depois que **toda** a borda atual virou conhecida.
+    fn avancar(&mut self, conhecido: &[bool]) {
+        let (w, h) = (self.w, self.h);
+        let mut proxima = Vec::with_capacity(self.borda.len() + 8);
+        for &(x, y) in &self.borda {
+            debug_assert!(
+                conhecido[(y * w + x) as usize],
+                "a borda inteira é preenchida"
+            );
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let (vx, vy) = (x + dx, y + dy);
+                    if vx < 0 || vy < 0 || vx >= w || vy >= h {
+                        continue;
+                    }
+                    let i = (vy * w + vx) as usize;
+                    if !conhecido[i] && !self.marcado[i] {
+                        self.marcado[i] = true;
+                        proxima.push((vx, vy));
+                    }
+                }
+            }
+        }
+        for &(x, y) in &proxima {
+            self.marcado[(y * w + x) as usize] = false;
+        }
+        proxima.sort_unstable_by_key(|&(x, y)| (y, x));
+        self.borda = proxima;
     }
 }
 
@@ -460,8 +518,19 @@ fn patchmatch(
     let ok = |s: (i32, i32)| {
         s.0 >= 0 && s.1 >= 0 && s.0 < n.w && s.1 < n.h && valido[(s.1 * n.w + s.0) as usize]
     };
-    let indice: std::collections::HashMap<(i32, i32), usize> =
-        alvos.iter().enumerate().map(|(k, p)| (*p, k)).collect();
+    // 🔑 Índice denso, não `HashMap`: é consultado duas vezes por alvo em cada
+    // iteração, e o SipHash de uma tupla custava mais que a conta que segue.
+    const NENHUM: u32 = u32::MAX;
+    let mut indice = vec![NENHUM; (n.w * n.h) as usize];
+    for (k, p) in alvos.iter().enumerate() {
+        indice[(p.1 * n.w + p.0) as usize] = k as u32;
+    }
+    let indice_de = |p: (i32, i32)| {
+        (p.0 >= 0 && p.1 >= 0 && p.0 < n.w && p.1 < n.h)
+            .then(|| indice[(p.1 * n.w + p.0) as usize])
+            .filter(|&k| k != NENHUM)
+            .map(|k| k as usize)
+    };
     let mut custo: Vec<u64> = alvos
         .iter()
         .zip(nnf.iter())
@@ -479,7 +548,7 @@ fn patchmatch(
             let p = alvos[k];
             // Propagação: o vizinho já visitado sugere o vizinho do patch dele.
             for viz in [(p.0 - passo, p.1), (p.0, p.1 - passo)] {
-                if let Some(&j) = indice.get(&viz) {
+                if let Some(j) = indice_de(viz) {
                     let s = nnf[j];
                     let candidato = (s.0 + (p.0 - viz.0), s.1 + (p.1 - viz.1));
                     if ok(candidato) {
@@ -607,32 +676,18 @@ fn sintese_coerente(
     };
     let mut conhecido: Vec<bool> = n.buraco.iter().map(|b| !b).collect();
     let mut origem: Vec<Option<(i32, i32)>> = vec![None; (n.w * n.h) as usize];
+    let mut casca = Casca::nova(n.w, n.h, &conhecido);
+    // Reaproveitado de pixel em pixel: era um `Vec` novo por pixel da borda.
+    let mut candidatos: Vec<(i32, i32)> = Vec::with_capacity(SORTEADOS + 30);
     loop {
-        let mut borda = Vec::new();
-        for y in 0..n.h {
-            for x in 0..n.w {
-                let i = n.i(x, y);
-                if conhecido[i] {
-                    continue;
-                }
-                let encosta = (-1..=1).any(|dy: i32| {
-                    (-1..=1).any(|dx: i32| {
-                        let (vx, vy) = (x + dx, y + dy);
-                        vx >= 0 && vy >= 0 && vx < n.w && vy < n.h && conhecido[n.i(vx, vy)]
-                    })
-                });
-                if encosta {
-                    borda.push((x, y));
-                }
-            }
-        }
+        let borda = casca.borda();
         if borda.is_empty() {
             return Ok(origem);
         }
         controle.parar()?;
         let mut novos = Vec::with_capacity(borda.len());
-        for &(x, y) in &borda {
-            let mut candidatos: Vec<(i32, i32)> = Vec::with_capacity(SORTEADOS + 30);
+        for &(x, y) in borda {
+            candidatos.clear();
             // Continuar a fonte dos vizinhos já preenchidos (raio 2).
             for dy in -2..=2i32 {
                 for dx in -2..=2i32 {
@@ -689,6 +744,7 @@ fn sintese_coerente(
             origem[i] = Some(c);
             conhecido[i] = true;
         }
+        casca.avancar(&conhecido);
         controle.avisar(
             Etapa::Textura,
             fracao_antes + (1.0 - fracao_antes) * feitos as f32 / total as f32,
@@ -777,15 +833,17 @@ pub fn preencher(rgba: &[u8], largura: u32, altura: u32, p: &Preenchimento) -> O
             altura,
         )?,
     };
+    // 🔑 Os trechos do traço são os mesmos para todo pixel: montados uma vez,
+    // não um `Vec` novo por pixel da região (~300 mil por preenchimento).
+    let trechos: Vec<([f32; 2], [f32; 2])> = if caminho.len() == 1 {
+        vec![(caminho[0], caminho[0])]
+    } else {
+        caminho.windows(2).map(|q| (q[0], q[1])).collect()
+    };
     let no_buraco = |x: f32, y: f32| {
         if let Some(poly) = &poligono {
             return crate::locais::distancia_ao_laco(poly, [x, y]) > -meia_borda;
         }
-        let trechos: Vec<([f32; 2], [f32; 2])> = if caminho.len() == 1 {
-            vec![(caminho[0], caminho[0])]
-        } else {
-            caminho.windows(2).map(|q| (q[0], q[1])).collect()
-        };
         trechos.iter().any(|(a, b)| {
             let ab = [b[0] - a[0], b[1] - a[1]];
             let ap = [x - a[0], y - a[1]];

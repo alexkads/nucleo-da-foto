@@ -210,15 +210,27 @@ pub fn declarado_no_arquivo(bytes: &[u8]) -> EspacoDeCor {
     EspacoDeCor::declarado(icc.as_deref(), exif.as_deref())
 }
 
+/// A volta do linear ao sRGB de 8 bits, em [`PASSOS`] degraus.
+///
+/// 🔑 **Feita uma vez por processo**: não depende do espaço de origem, e são
+/// 65 536 `powf` — refazê-la a cada foto convertida custava mais que converter
+/// uma miniatura inteira.
+fn tabela_de_volta() -> &'static [u8] {
+    static VOLTA: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    VOLTA.get_or_init(|| {
+        (0..PASSOS)
+            .map(|i| {
+                let v = linear_para_srgb(i as f32 / (PASSOS - 1) as f32);
+                (v * 255.0).round().clamp(0.0, 255.0) as u8
+            })
+            .collect()
+    })
+}
+
 /// A conversão de um pixel (os três primeiros bytes) para sRGB.
 fn conversor(de: EspacoDeCor) -> impl Fn(&mut [u8]) {
     let linear: Vec<f32> = (0..=255u8).map(|v| de.linear(v)).collect();
-    let volta: Vec<u8> = (0..PASSOS)
-        .map(|i| {
-            let v = linear_para_srgb(i as f32 / (PASSOS - 1) as f32);
-            (v * 255.0).round().clamp(0.0, 255.0) as u8
-        })
-        .collect();
+    let volta = tabela_de_volta();
     let m = de.para_srgb();
     move |p: &mut [u8]| {
         let c = [

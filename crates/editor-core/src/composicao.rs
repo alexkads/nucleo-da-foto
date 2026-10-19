@@ -14,7 +14,9 @@
 use image::RgbImage;
 
 use crate::ajuste::{Ajuste, Preparado};
-use crate::documento::{Camada, Documento, LeitorDasMascaras, MascaraNoTile, Papel};
+use crate::documento::{
+    Camada, Documento, LeitorDaMascara, LeitorDasMascaras, Mascara, MascaraNoTile, Papel,
+};
 use crate::mesclagem::{mesclar, Modo};
 use crate::retangulo::Retangulo;
 use crate::tiles::{indice, retangulo_do_tile, CamadaDePixels, LADO_DO_TILE};
@@ -159,110 +161,176 @@ fn compor_deslocado(
     origem: (u32, u32),
     sem: Option<(usize, usize)>,
 ) {
-    let (largura, altura) = (base.width(), base.height());
-    let ret = ret.limitado(largura, altura);
+    let ret = ret.limitado(base.width(), base.height());
     if ret.vazio() {
         return;
     }
-    let destino_em_bytes = largura_do_destino as usize * 3;
-    let papeis = doc.papeis();
-    let camadas: Vec<(&Camada, Papel)> = doc
-        .camadas
-        .iter()
-        .zip(papeis)
-        .enumerate()
-        .filter(|(i, (_, p))| *p != Papel::Fora && sem.is_none_or(|(a, b)| *i < a || *i > b))
-        .map(|(_, par)| par)
-        .collect();
-    // A conta de cada ajuste, montada uma vez (as tabelas de 256).
-    let preparados: Vec<Option<Preparado>> = camadas
-        .iter()
-        .map(|(c, _)| c.ajuste.as_ref().map(Ajuste::preparar))
-        .collect();
-    // As máscaras de cada uma, prontas (o mapa da difusão, a densidade, a
-    // cobertura da vetorial).
-    let leitores: Vec<Option<LeitorDasMascaras>> = camadas
-        .iter()
-        .map(|(c, _)| c.leitor_das_mascaras())
-        .collect();
-    let referencia = CamadaDePixels::nova(largura, altura);
-    let fonte = base.as_raw();
-    let largura_em_bytes = largura as usize * 3;
-    for posicao in referencia.tiles_do_retangulo(&ret) {
-        let pedaco = retangulo_do_tile(posicao, largura, altura).limitado(largura, altura);
-        let pedaco = interseccao(&pedaco, &ret);
-        // A máscara de cada camada neste tile: sem tile pintado nela, o tile
-        // inteiro vale o fundo — e entra na opacidade de uma vez.
-        let mut tiles: Vec<TileNaComposicao> = Vec::with_capacity(camadas.len());
-        let mut base_presente = false;
-        for (((c, papel), preparado), leitor) in camadas.iter().zip(&preparados).zip(&leitores) {
-            let t = tile_na_composicao(c, leitor.as_ref(), preparado.as_ref(), posicao, *papel);
-            match papel {
-                // Sem a base neste tile, as recortadas nele também somem.
-                Papel::Recortada if !base_presente => continue,
-                Papel::Base | Papel::Solta => base_presente = t.is_some(),
-                _ => {}
-            }
-            tiles.extend(t);
+    Composicao::nova(base, doc, sem).compor_em(&ret, destino, largura_do_destino, origem);
+}
+
+/// A composição de um documento **preparada uma vez** para ser feita em
+/// vários pedaços: as camadas que entram com o papel de cada uma, a conta de
+/// cada ajuste e o leitor de cada máscara.
+///
+/// 🔑 **A preparação é cara e não depende do pedaço.** `papeis` varre o alfa
+/// das camadas, cada ajuste monta tabelas de 256 (com `powf` nos Níveis) e
+/// cada máscara pega o mapa da difusão e a cobertura da vetorial. O rascunho
+/// do controle deslizante compõe a vista linha a linha — de mil a duas mil
+/// vezes por tique, e a preparação era refeita em cada uma. Daqui sai a mesma
+/// foto byte a byte: só a conta repetida deixou de ser feita.
+pub(crate) struct Composicao<'a> {
+    base: &'a RgbImage,
+    camadas: Vec<(&'a Camada, Papel)>,
+    preparados: Vec<Option<Preparado>>,
+    leitores: Vec<Option<LeitorDasMascaras<'a>>>,
+}
+
+impl<'a> Composicao<'a> {
+    /// Prepara `doc` sobre `base`. `sem` (índices do documento, inclusive)
+    /// fica de fora — ver [`compor_deslocado`].
+    pub(crate) fn nova(
+        base: &'a RgbImage,
+        doc: &'a Documento,
+        sem: Option<(usize, usize)>,
+    ) -> Self {
+        let papeis = doc.papeis();
+        let camadas: Vec<(&Camada, Papel)> = doc
+            .camadas
+            .iter()
+            .zip(papeis)
+            .enumerate()
+            .filter(|(i, (_, p))| *p != Papel::Fora && sem.is_none_or(|(a, b)| *i < a || *i > b))
+            .map(|(_, par)| par)
+            .collect();
+        // A conta de cada ajuste, montada uma vez (as tabelas de 256).
+        let preparados: Vec<Option<Preparado>> = camadas
+            .iter()
+            .map(|(c, _)| c.ajuste.as_ref().map(Ajuste::preparar))
+            .collect();
+        // As máscaras de cada uma, prontas (o mapa da difusão, a densidade, a
+        // cobertura da vetorial).
+        let leitores: Vec<Option<LeitorDasMascaras>> = camadas
+            .iter()
+            .map(|(c, _)| c.leitor_das_mascaras())
+            .collect();
+        Composicao {
+            base,
+            camadas,
+            preparados,
+            leitores,
         }
-        // A base que ficou sem recortada neste tile volta à conta de sempre.
-        for k in 0..tiles.len() {
-            if tiles[k].papel == Papel::Base
-                && tiles.get(k + 1).is_none_or(|t| t.papel != Papel::Recortada)
+    }
+
+    /// Só o recorte `ret`, numa imagem do tamanho dele — o [`compor_recorte`].
+    pub(crate) fn recorte(&self, ret: &Retangulo) -> RgbImage {
+        let ret = ret.limitado(self.base.width(), self.base.height());
+        let mut saida = RgbImage::new(ret.largura, ret.altura);
+        if !ret.vazio() {
+            self.compor_em(&ret, &mut saida, ret.largura, (ret.x, ret.y));
+        }
+        saida
+    }
+
+    /// Compõe `ret` (já limitado à foto e não vazio) em `destino` — ver
+    /// [`compor_deslocado`].
+    fn compor_em(
+        &self,
+        ret: &Retangulo,
+        destino: &mut [u8],
+        largura_do_destino: u32,
+        origem: (u32, u32),
+    ) {
+        let Composicao {
+            base,
+            camadas,
+            preparados,
+            leitores,
+        } = self;
+        let ret = *ret;
+        let (largura, altura) = (base.width(), base.height());
+        let destino_em_bytes = largura_do_destino as usize * 3;
+        let referencia = CamadaDePixels::nova(largura, altura);
+        let fonte = base.as_raw();
+        let largura_em_bytes = largura as usize * 3;
+        for posicao in referencia.tiles_do_retangulo(&ret) {
+            let pedaco = retangulo_do_tile(posicao, largura, altura).limitado(largura, altura);
+            let pedaco = interseccao(&pedaco, &ret);
+            // A máscara de cada camada neste tile: sem tile pintado nela, o tile
+            // inteiro vale o fundo — e entra na opacidade de uma vez.
+            let mut tiles: Vec<TileNaComposicao> = Vec::with_capacity(camadas.len());
+            let mut base_presente = false;
+            for (((c, papel), preparado), leitor) in
+                camadas.iter().zip(preparados.iter()).zip(leitores.iter())
             {
-                tiles[k].papel = Papel::Solta;
+                let t = tile_na_composicao(c, leitor.as_ref(), preparado.as_ref(), posicao, *papel);
+                match papel {
+                    // Sem a base neste tile, as recortadas nele também somem.
+                    Papel::Recortada if !base_presente => continue,
+                    Papel::Base | Papel::Solta => base_presente = t.is_some(),
+                    _ => {}
+                }
+                tiles.extend(t);
             }
-        }
-        for y in pedaco.y..pedaco.baixo() {
-            let inicio = y as usize * largura_em_bytes + pedaco.x as usize * 3;
-            let fim = inicio + pedaco.largura as usize * 3;
-            let d_inicio =
-                (y - origem.1) as usize * destino_em_bytes + (pedaco.x - origem.0) as usize * 3;
-            if tiles.is_empty() {
-                destino[d_inicio..d_inicio + (fim - inicio)].copy_from_slice(&fonte[inicio..fim]);
-                continue;
+            // A base que ficou sem recortada neste tile volta à conta de sempre.
+            for k in 0..tiles.len() {
+                if tiles[k].papel == Papel::Base
+                    && tiles.get(k + 1).is_none_or(|t| t.papel != Papel::Recortada)
+                {
+                    tiles[k].papel = Papel::Solta;
+                }
             }
-            let ty = y % LADO_DO_TILE;
-            for x in pedaco.x..pedaco.direita() {
-                let i = y as usize * largura_em_bytes + x as usize * 3;
-                let mut pixel = [fonte[i], fonte[i + 1], fonte[i + 2]];
-                let j = indice(x % LADO_DO_TILE, ty);
-                let mut k = 0;
-                while k < tiles.len() {
-                    let t = &tiles[k];
-                    k += 1;
-                    let opacidade = t.opacidade_em(j);
-                    if t.papel == Papel::Base {
-                        let inicio_do_conjunto = k;
-                        while tiles.get(k).is_some_and(|r| r.papel == Papel::Recortada) {
-                            k += 1;
-                        }
-                        let Some(b) = t.cima(j, pixel) else { continue };
-                        if opacidade <= 0.0 || b[3] == 0 {
-                            continue;
-                        }
-                        let mut g = [b[0], b[1], b[2]];
-                        for r in &tiles[inicio_do_conjunto..k] {
-                            let o = r.opacidade_em(j);
-                            if o <= 0.0 {
+            for y in pedaco.y..pedaco.baixo() {
+                let inicio = y as usize * largura_em_bytes + pedaco.x as usize * 3;
+                let fim = inicio + pedaco.largura as usize * 3;
+                let d_inicio =
+                    (y - origem.1) as usize * destino_em_bytes + (pedaco.x - origem.0) as usize * 3;
+                if tiles.is_empty() {
+                    destino[d_inicio..d_inicio + (fim - inicio)]
+                        .copy_from_slice(&fonte[inicio..fim]);
+                    continue;
+                }
+                let ty = y % LADO_DO_TILE;
+                for x in pedaco.x..pedaco.direita() {
+                    let i = y as usize * largura_em_bytes + x as usize * 3;
+                    let mut pixel = [fonte[i], fonte[i + 1], fonte[i + 2]];
+                    let j = indice(x % LADO_DO_TILE, ty);
+                    let mut k = 0;
+                    while k < tiles.len() {
+                        let t = &tiles[k];
+                        k += 1;
+                        let opacidade = t.opacidade_em(j);
+                        if t.papel == Papel::Base {
+                            let inicio_do_conjunto = k;
+                            while tiles.get(k).is_some_and(|r| r.papel == Papel::Recortada) {
+                                k += 1;
+                            }
+                            let Some(b) = t.cima(j, pixel) else { continue };
+                            if opacidade <= 0.0 || b[3] == 0 {
                                 continue;
                             }
-                            if let Some(cima) = r.cima(j, g) {
-                                g = mesclar(g, cima, o, r.modo);
+                            let mut g = [b[0], b[1], b[2]];
+                            for r in &tiles[inicio_do_conjunto..k] {
+                                let o = r.opacidade_em(j);
+                                if o <= 0.0 {
+                                    continue;
+                                }
+                                if let Some(cima) = r.cima(j, g) {
+                                    g = mesclar(g, cima, o, r.modo);
+                                }
                             }
+                            pixel = mesclar(pixel, [g[0], g[1], g[2], b[3]], opacidade, t.modo);
+                            continue;
                         }
-                        pixel = mesclar(pixel, [g[0], g[1], g[2], b[3]], opacidade, t.modo);
-                        continue;
+                        if opacidade <= 0.0 {
+                            continue;
+                        }
+                        if let Some(cima) = t.cima(j, pixel) {
+                            pixel = mesclar(pixel, cima, opacidade, t.modo);
+                        }
                     }
-                    if opacidade <= 0.0 {
-                        continue;
-                    }
-                    if let Some(cima) = t.cima(j, pixel) {
-                        pixel = mesclar(pixel, cima, opacidade, t.modo);
-                    }
+                    let d = d_inicio + (x - pedaco.x) as usize * 3;
+                    destino[d..d + 3].copy_from_slice(&pixel);
                 }
-                let d = d_inicio + (x - pedaco.x) as usize * 3;
-                destino[d..d + 3].copy_from_slice(&pixel);
             }
         }
     }
@@ -302,57 +370,101 @@ pub fn compor_recorte_exibindo(
     ret: &Retangulo,
     exibicao: Exibicao,
 ) -> RgbImage {
-    let mascara = match exibicao {
-        Exibicao::Foto => None,
-        Exibicao::SoAMascara(i) | Exibicao::Rubi(i) => {
-            doc.camadas.get(i).and_then(|c| c.mascara.as_ref())
-        }
-        Exibicao::SoACamada(i) => {
-            let Some(c) = doc.camadas.get(i) else {
-                return compor_recorte(base, doc, ret);
-            };
-            return so_a_camada(&c.pixels, &ret.limitado(base.width(), base.height()));
-        }
-        Exibicao::SemOConjunto(i) => {
-            if i >= doc.camadas.len() {
-                return compor_recorte(base, doc, ret);
-            }
-            let ret = ret.limitado(base.width(), base.height());
-            let mut saida = RgbImage::new(ret.largura, ret.altura);
-            let fim = doc.fim_do_conjunto(i);
-            compor_deslocado(
-                base,
-                doc,
-                &ret,
-                &mut saida,
-                ret.largura,
-                (ret.x, ret.y),
-                Some((i, fim)),
-            );
-            return saida;
-        }
-    };
-    let Some(mascara) = mascara else {
-        return compor_recorte(base, doc, ret);
-    };
-    let ret = ret.limitado(base.width(), base.height());
-    let valores = valores_da_mascara(mascara, &ret);
-    if let Exibicao::SoAMascara(_) = exibicao {
-        return RgbImage::from_fn(ret.largura, ret.altura, |x, y| {
-            let v = valores[(y * ret.largura + x) as usize];
-            image::Rgb([v, v, v])
-        });
-    }
-    let mut foto = compor_recorte(base, doc, &ret);
-    for (p, v) in foto.pixels_mut().zip(valores) {
-        let a = OPACIDADE_DO_RUBI * (255 - v) as f32 / 255.0;
-        if a > 0.0 {
-            for (canal, rubi) in p.0.iter_mut().zip(RUBI) {
-                *canal = (*canal as f32 + (rubi - *canal as f32) * a).round() as u8;
-            }
+    Exibidora::nova(base, doc, exibicao).recorte(ret)
+}
+
+/// [`compor_recorte_exibindo`] **preparado uma vez** para vários recortes do
+/// mesmo documento — a vista pede um por linha no rascunho do controle
+/// deslizante. Ver [`Composicao`].
+pub(crate) struct Exibidora<'a> {
+    base: &'a RgbImage,
+    modo: Exibir<'a>,
+}
+
+/// O que a [`Exibidora`] faz em cada recorte.
+enum Exibir<'a> {
+    /// A foto composta (sem o conjunto, em [`Exibicao::SemOConjunto`]).
+    Composta(Composicao<'a>),
+    /// Os pixels de uma camada sozinha, sobre cinza.
+    SoACamada(&'a CamadaDePixels),
+    /// A máscara sozinha, em cinza.
+    SoAMascara(Mascarada<'a>),
+    /// A foto com o rubi por cima onde a máscara esconde.
+    Rubi(Composicao<'a>, Mascarada<'a>),
+}
+
+/// Uma máscara pronta para ser lida: o leitor e o tamanho dos pixels dela.
+struct Mascarada<'a> {
+    leitor: LeitorDaMascara<'a>,
+    largura: u32,
+    altura: u32,
+}
+
+impl<'a> Mascarada<'a> {
+    fn nova(mascara: &'a Mascara) -> Self {
+        Mascarada {
+            leitor: mascara.leitor(),
+            largura: mascara.pixels.largura(),
+            altura: mascara.pixels.altura(),
         }
     }
-    foto
+}
+
+impl<'a> Exibidora<'a> {
+    /// Prepara a [`Exibicao`] de `doc` sobre `base`.
+    pub(crate) fn nova(base: &'a RgbImage, doc: &'a Documento, exibicao: Exibicao) -> Self {
+        let foto = || Exibir::Composta(Composicao::nova(base, doc, None));
+        let modo = match exibicao {
+            Exibicao::Foto => foto(),
+            Exibicao::SoAMascara(i) | Exibicao::Rubi(i) => {
+                match doc.camadas.get(i).and_then(|c| c.mascara.as_ref()) {
+                    None => foto(),
+                    Some(m) if matches!(exibicao, Exibicao::SoAMascara(_)) => {
+                        Exibir::SoAMascara(Mascarada::nova(m))
+                    }
+                    Some(m) => Exibir::Rubi(Composicao::nova(base, doc, None), Mascarada::nova(m)),
+                }
+            }
+            Exibicao::SoACamada(i) => match doc.camadas.get(i) {
+                Some(c) => Exibir::SoACamada(&c.pixels),
+                None => foto(),
+            },
+            Exibicao::SemOConjunto(i) if i < doc.camadas.len() => Exibir::Composta(
+                Composicao::nova(base, doc, Some((i, doc.fim_do_conjunto(i)))),
+            ),
+            Exibicao::SemOConjunto(_) => foto(),
+        };
+        Exibidora { base, modo }
+    }
+
+    /// O recorte `ret`, numa imagem do tamanho dele.
+    pub(crate) fn recorte(&self, ret: &Retangulo) -> RgbImage {
+        let ret = ret.limitado(self.base.width(), self.base.height());
+        match &self.modo {
+            Exibir::Composta(c) => c.recorte(&ret),
+            Exibir::SoACamada(pixels) => so_a_camada(pixels, &ret),
+            Exibir::SoAMascara(m) => {
+                let valores = valores_da_mascara(m, &ret);
+                RgbImage::from_fn(ret.largura, ret.altura, |x, y| {
+                    let v = valores[(y * ret.largura + x) as usize];
+                    image::Rgb([v, v, v])
+                })
+            }
+            Exibir::Rubi(c, m) => {
+                let valores = valores_da_mascara(m, &ret);
+                let mut foto = c.recorte(&ret);
+                for (p, v) in foto.pixels_mut().zip(valores) {
+                    let a = OPACIDADE_DO_RUBI * (255 - v) as f32 / 255.0;
+                    if a > 0.0 {
+                        for (canal, rubi) in p.0.iter_mut().zip(RUBI) {
+                            *canal = (*canal as f32 + (rubi - *canal as f32) * a).round() as u8;
+                        }
+                    }
+                }
+                foto
+            }
+        }
+    }
 }
 
 /// Os pixels de uma camada sozinha em `ret`, sobre cinza 50% — tile a tile.
@@ -383,14 +495,14 @@ fn so_a_camada(pixels: &CamadaDePixels, ret: &Retangulo) -> RgbImage {
 
 /// O valor da máscara (com a densidade e a difusão) em cada pixel de `ret`,
 /// linha a linha.
-fn valores_da_mascara(mascara: &crate::documento::Mascara, ret: &Retangulo) -> Vec<u8> {
-    let leitor = mascara.leitor();
+fn valores_da_mascara(mascara: &Mascarada, ret: &Retangulo) -> Vec<u8> {
+    let leitor = &mascara.leitor;
     let mut valores = vec![0u8; (ret.largura * ret.altura) as usize];
-    let referencia = CamadaDePixels::nova(mascara.pixels.largura(), mascara.pixels.altura());
+    let referencia = CamadaDePixels::nova(mascara.largura, mascara.altura);
     for posicao in referencia.tiles_do_retangulo(ret) {
         let no_tile = leitor.no_tile(posicao);
         let pedaco = interseccao(
-            &retangulo_do_tile(posicao, mascara.pixels.largura(), mascara.pixels.altura()),
+            &retangulo_do_tile(posicao, mascara.largura, mascara.altura),
             ret,
         );
         for y in pedaco.y..pedaco.baixo() {

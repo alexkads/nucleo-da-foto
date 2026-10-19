@@ -141,6 +141,14 @@ pub(crate) fn enquadramento(corte: &[f32], largura: u32, altura: u32) -> Result<
 /// 🚨 A conta do tamanho é com `checked_mul`: no `wasm32` o `usize` tem 32
 /// bits, e 40 000 × 30 000 × 4 já não cabe.
 fn imagem_rgba(largura: u32, altura: u32, rgba: &[u8]) -> Result<image::DynamicImage, String> {
+    conferir_tamanho(largura, altura, rgba)?;
+    let buffer = image::RgbaImage::from_raw(largura, altura, rgba.to_vec())
+        .ok_or_else(|| "os pixels não formam uma imagem".to_string())?;
+    Ok(image::DynamicImage::ImageRgba8(buffer))
+}
+
+/// Os bytes têm exatamente `largura × altura × 4`?
+fn conferir_tamanho(largura: u32, altura: u32, rgba: &[u8]) -> Result<(), String> {
     let esperado = (largura as usize)
         .checked_mul(altura as usize)
         .and_then(|p| p.checked_mul(4))
@@ -151,15 +159,18 @@ fn imagem_rgba(largura: u32, altura: u32, rgba: &[u8]) -> Result<image::DynamicI
             rgba.len()
         ));
     }
-    let buffer = image::RgbaImage::from_raw(largura, altura, rgba.to_vec())
-        .ok_or_else(|| "os pixels não formam uma imagem".to_string())?;
-    Ok(image::DynamicImage::ImageRgba8(buffer))
+    Ok(())
 }
 
-/// O JPEG do codificador de sempre (`revelacao_core::jpeg`), com a qualidade
-/// presa em 1–100.
-fn jpeg(imagem: &image::DynamicImage, qualidade: u8) -> Result<Vec<u8>, String> {
-    revelacao_core::jpeg::codificar(imagem, qualidade.clamp(1, 100))
+/// O JPEG do codificador de sempre (`foto_codec`), com a qualidade presa em
+/// 1–100, **direto dos pixels emprestados**.
+///
+/// 🔑 Sem montar uma imagem dona deles: eram 96 MB copiados a 24 MP, no
+/// celular, só para o codificador ler e jogar fora. O arquivo é o mesmo byte a
+/// byte (`foto_codec::codificar_rgba`).
+fn jpeg(largura: u32, altura: u32, rgba: &[u8], qualidade: u8) -> Result<Vec<u8>, String> {
+    conferir_tamanho(largura, altura, rgba)?;
+    foto_codec::codificar_rgba(rgba, largura, altura, qualidade.clamp(1, 100))
         .map_err(|e| format!("o JPEG não codificou: {e}"))
 }
 
@@ -171,7 +182,7 @@ pub(crate) fn comprimir_jpeg(
     rgba: &[u8],
     qualidade: u8,
 ) -> Result<Vec<u8>, String> {
-    jpeg(&imagem_rgba(largura, altura, rgba)?, qualidade)
+    jpeg(largura, altura, rgba, qualidade)
 }
 
 /// Os formatos que este wasm sabe **abrir**, em JSON.
@@ -195,13 +206,24 @@ pub(crate) fn decodificar_imagem(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let imagem = foto_codec::orientacao::decodificar_de_pe(bytes).map_err(|e| {
         format!("este arquivo não abriu ({e}). Formatos aceitos: JPEG, PNG, TIFF, WebP, BMP e GIF")
     })?;
-    let rgba = imagem.to_rgba8();
-    let (largura, altura) = rgba.dimensions();
+    let (largura, altura) = (imagem.width(), imagem.height());
 
-    let mut saida = Vec::with_capacity(8 + rgba.len());
+    // 🔑 **O RGBA é montado uma vez, já no lugar.** Antes vinha `to_rgba8()`
+    // (a foto inteira) e depois a cópia dela para depois do cabeçalho: dois
+    // buffers de 96 MB a 24 MP, no celular. O JPEG abre em RGB, que é expandido
+    // aqui direto, com o alfa em 255 — o mesmo do `to_rgba8`.
+    let pixels = largura as usize * altura as usize;
+    let mut saida = Vec::with_capacity(8 + pixels * 4);
     saida.extend_from_slice(&largura.to_le_bytes());
     saida.extend_from_slice(&altura.to_le_bytes());
-    saida.extend_from_slice(rgba.as_raw());
+    match imagem {
+        image::DynamicImage::ImageRgb8(rgb) => {
+            for p in rgb.as_raw().as_chunks::<3>().0 {
+                saida.extend_from_slice(&[p[0], p[1], p[2], 255]);
+            }
+        }
+        outra => saida.extend_from_slice(outra.into_rgba8().as_raw()),
+    }
     Ok(saida)
 }
 
@@ -226,11 +248,10 @@ pub(crate) fn codificar_imagem(
     formato: &str,
     qualidade: u8,
 ) -> Result<Vec<u8>, String> {
-    let imagem = imagem_rgba(largura, altura, rgba)?;
-
     if formato == "jpeg" {
-        return jpeg(&imagem, qualidade);
+        return jpeg(largura, altura, rgba, qualidade);
     }
+    let imagem = imagem_rgba(largura, altura, rgba)?;
 
     let saida_formato = match formato {
         "png" => image::ImageFormat::Png,

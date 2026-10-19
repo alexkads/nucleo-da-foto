@@ -19,6 +19,13 @@ description = "Abre o RAW da câmera e o DNG do Lightroom — no desktop e no na
 # lugares. Vendorizado: ver `vendor/rawler/MUDANCAS.md`.
 rawler = { path = "../../vendor/rawler" }
 image = { version = "0.25", default-features = false }
+memchr = "2.7"
 
 [lints]
 workspace = true
+
+# `cargo bench -p raw-codec`: a mediana dos caminhos quentes, para comparar
+# antes e depois de uma mudança (ver o arquivo).
+[[bench]]
+name = "desempenho"
+harness = false

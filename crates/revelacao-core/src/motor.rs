@@ -1267,10 +1267,17 @@ impl Motor {
         // A GPU devolve cada linha alinhada em 256 bytes; a imagem não tem esse
         // enchimento. Copiar o buffer inteiro daria uma foto com listras
         // deslocadas — e quanto mais estreita, mais torta.
-        let mut saida = Vec::with_capacity((recursos.bytes_por_linha * altura) as usize);
-        for y in 0..altura {
-            let inicio = (y * recursos.bytes_por_linha_alinhado) as usize;
-            saida.extend_from_slice(&dados[inicio..inicio + recursos.bytes_por_linha as usize]);
+        let total = (recursos.bytes_por_linha * altura) as usize;
+        let mut saida = Vec::with_capacity(total);
+        if recursos.bytes_por_linha == recursos.bytes_por_linha_alinhado {
+            // Largura múltipla de 64 px: não há enchimento, e o buffer já é a
+            // imagem — uma cópia só, em vez de uma por linha.
+            saida.extend_from_slice(&dados[..total]);
+        } else {
+            for y in 0..altura {
+                let inicio = (y * recursos.bytes_por_linha_alinhado) as usize;
+                saida.extend_from_slice(&dados[inicio..inicio + recursos.bytes_por_linha as usize]);
+            }
         }
         drop(dados);
         recursos.buffer_saida.unmap();
@@ -1831,6 +1838,32 @@ mod testes {
             entrada.as_slice(),
             "algum campo de `Ajustes::default` não é neutro"
         );
+    }
+
+    /// 🔑 **A leitura de volta acerta a linha com e sem enchimento.** Com 64 px
+    /// de largura a linha já tem 256 bytes e a cópia é uma só; com 65 cada
+    /// linha vem alinhada e é copiada à parte. Cada linha tem o seu nível: uma
+    /// linha trocada ou deslocada aparece como diferença.
+    #[test]
+    fn a_leitura_de_volta_acerta_as_linhas_com_e_sem_enchimento() {
+        let mut motor = motor_pronto();
+        for largura in [64u32, 65] {
+            let altura = 5u32;
+            let entrada: Arc<Vec<u8>> = Arc::new(
+                (0..altura)
+                    .flat_map(|y| {
+                        let v = (40 + y * 30) as u8;
+                        std::iter::repeat_n([v, v, v, 255], largura as usize).flatten()
+                    })
+                    .collect(),
+            );
+            let saida = motor
+                .revelar(&entrada, largura, altura, &Ajustes::default())
+                .expect("o motor não devolveu imagem")
+                .into_rgba8();
+            assert_eq!(saida.dimensions(), (largura, altura));
+            assert_eq!(saida.as_raw(), entrada.as_slice(), "largura {largura}");
+        }
     }
 
     /// A exposição atravessou: `+1` dobra o valor, como `pow(2, exposure)` manda.

@@ -583,8 +583,8 @@ async fn revelar_e_codificar(
         .ok_or_else(|| erro("a GPU não devolveu a imagem revelada"))?;
     drop(pixels);
 
-    let enquadrada = revelacao_core::transformacao::aplicar(&revelada, &corte, true);
-    drop(revelada);
+    // Tomada, não emprestada: sem corte, a revelada segue sem cópia nenhuma.
+    let enquadrada = revelacao_core::transformacao::aplicar_dono(revelada, &corte, true);
 
     revelacao_core::jpeg::codificar(&enquadrada, qualidade.clamp(1, 100))
         .map_err(|e| erro(format!("o JPEG não codificou: {e}")))

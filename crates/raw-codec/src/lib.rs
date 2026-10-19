@@ -71,13 +71,14 @@ pub fn decodificar(bytes: &[u8]) -> Result<RgbImage, String> {
         .map_err(|e| format!("não foi possível revelar o RAW: {e}"))?
         .to_dynamic_image()
         .ok_or("o RAW revelado não virou imagem")?;
-    let mut revelada = match revelada {
-        // Sensor monocromático: o motor trabalha em RGB.
-        DynamicImage::ImageLuma16(_) => DynamicImage::ImageRgb8(revelada.to_rgb8()),
-        outra => outra,
-    };
+    // 🔑 **Desce a 8 bits antes de girar, e uma vez só.** A revelação sai em
+    // 16 bits (e o sensor monocromático em cinza): girar em 16 bits movia o
+    // dobro de bytes, e o `to_rgb8` do fim ainda copiava a foto inteira. A
+    // conversão é pixel a pixel e o giro só troca pixels de lugar — a ordem
+    // não muda nenhum byte do resultado.
+    let mut revelada = DynamicImage::ImageRgb8(revelada.into_rgb8());
     revelada.apply_orientation(giro(orientacao));
-    Ok(revelada.to_rgb8())
+    Ok(revelada.into_rgb8())
 }
 
 /// A etiqueta de orientação do rawler na do `image` — os dois seguem o EXIF.
@@ -120,12 +121,11 @@ pub fn orientacao_exif(bytes: &[u8]) -> Option<u16> {
 fn pacote_xmp(bytes: &[u8]) -> Option<&[u8]> {
     const ABRE: &[u8] = b"<x:xmpmeta";
     const FECHA: &[u8] = b"</x:xmpmeta>";
-    let inicio = bytes.windows(ABRE.len()).position(|w| w == ABRE)?;
-    let fim = bytes[inicio..]
-        .windows(FECHA.len())
-        .position(|w| w == FECHA)?
-        + inicio
-        + FECHA.len();
+    // `memmem`, e não `windows().position()`: num CR3 sem XMP a busca anda o
+    // arquivo inteiro (30–60 MB), e comparar janela a janela custava dezenas
+    // de milissegundos ao abrir cada foto.
+    let inicio = memchr::memmem::find(bytes, ABRE)?;
+    let fim = memchr::memmem::find(&bytes[inicio..], FECHA)? + inicio + FECHA.len();
     Some(&bytes[inicio..fim])
 }
 
