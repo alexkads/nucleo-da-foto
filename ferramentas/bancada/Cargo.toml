@@ -1,0 +1,47 @@
+# A bancada: uma janela para conferir, com uma foto sua, que o núcleo novo é
+# mais rápido que a última tag — e que a foto que sai é a mesma, byte a byte.
+#
+# 🔑 **Fora do workspace do núcleo, de propósito.** Os apps consomem o núcleo
+#    por git com tag; uma janela (GPUI e as dependências dela) não pode entrar
+#    no grafo deles nem no `make verificar`. Por isso ela tem o próprio
+#    `[workspace]` e o próprio `Cargo.lock`.
+#
+#     cd ferramentas/bancada && cargo run --release
+#     cargo run --release -- --sem-janela foto.jpg   # a mesma tabela, no terminal
+
+[package]
+name = "bancada"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Janela que mede o núcleo atual contra a última tag, com a sua foto."
+
+[workspace]
+
+[dependencies]
+gpui-kit = "0.8"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "tiff"] }
+
+# O núcleo desta pasta — o "depois".
+foto-codec = { path = "../../crates/foto-codec" }
+raw-codec = { path = "../../crates/raw-codec" }
+revelacao-core = { path = "../../crates/revelacao-core" }
+editor-core = { path = "../../crates/editor-core" }
+
+# A última tag — o "antes". Troque a tag aqui para comparar com outra versão.
+foto-codec-antes = { package = "foto-codec", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.1" }
+raw-codec-antes = { package = "raw-codec", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.1" }
+revelacao-core-antes = { package = "revelacao-core", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.1" }
+editor-core-antes = { package = "editor-core", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.1" }
+
+[dev-dependencies]
+gpui-kit = { version = "0.8", features = ["test-support"] }
+
+# Medir em `debug` não diz nada: o motor sai otimizado mesmo sem `--release`.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+[profile.release]
+opt-level = 3
