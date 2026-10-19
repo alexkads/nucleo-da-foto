@@ -1,5 +1,46 @@
 # Changelog
 
+## Próxima (0.1.2) — ainda sem tag
+
+Sem mudança na foto que sai: cada caminho novo tem o teste que o compara byte a byte com o antigo.
+`make semver`: nenhum crate pede versão nova (só itens `pub` novos).
+
+### Desempenho
+Medido com `cargo bench -p <crate>` (novo, sem dependência), melhor de duas rodadas, mesma máquina
+(4 núcleos), antes → depois:
+
+| Caminho | Antes | Depois |
+|---|---:|---:|
+| Vista de 1600 px de uma foto de 12 MP, rascunho do slider (Níveis) | 62 ms | 15 ms |
+| A mesma vista, refazer | 202 ms | 76 ms |
+| Compor 12 MP inteira (salvar, varinha mágica) | 667 ms | 174 ms |
+| Mover: deslocar uma camada de 12 MP por tiles inteiros (o 1º evento do arrasto) | 16 ms | 0,01 ms |
+| Exportar no navegador sem corte (2560², o resultado da GPU tomado) | 36 ms | 2,4 ms |
+| Enquadrar 2560²: recorte reto / giro de 90° / endireitar 3° | 7 / 123 / 265 ms | 5 / 94 / 211 ms |
+| JPEG de 12 MP direto dos pixels do JavaScript | 433 ms | 335 ms |
+| Procurar o XMP num RAW de 40 MB sem XMP | 28 ms | 2,1 ms |
+| Adobe RGB → sRGB numa miniatura de 256² | 1,6 ms | 1,0 ms |
+| Content-Aware, buraco de 80² | 122 ms | 113 ms |
+
+- `editor-core`: a composição é preparada (papéis, tabelas dos ajustes, leitores das máscaras) uma
+  vez por faixa da vista — o rascunho preparava uma vez por linha. O Normal opaco sai sem conta.
+  Deslocar por tiles inteiros reaproveita os tiles. Os núcleos são perguntados uma vez.
+- `revelacao-core`: espelho, giro e endireitar não copiam mais a origem antes de começar; a leitura
+  da GPU é uma cópia só quando a linha não tem enchimento; o Content-Aware não varre o nível inteiro
+  a cada anel da casca de cebola e não aloca por pixel.
+- `foto-codec`: `codificar` não copia para RGB8 o que já é RGB8 ou RGBA8 (72 MB a 24 MP); a tabela de
+  volta ao sRGB é feita uma vez por processo.
+- `revelacao-web`: o JPEG sai dos pixels emprestados do JavaScript, a exportação não clona a
+  revelada e `decodificar_imagem` monta o RGBA uma vez — menos pico de memória no celular.
+- `raw-codec`: desce a 8 bits antes de girar (metade dos bytes, e sem a cópia do fim); XMP por
+  `memchr::memmem`.
+
+### Novo
+- `revelacao_core::transformacao::aplicar_dono`: o `aplicar` que toma a foto — sem corte, devolve
+  a mesma, sem cópia. Para quem já é dono do resultado da GPU (o desktop, a cada quadro).
+- `foto_codec::codificar_rgba`: o mesmo JPEG de `codificar`, de pixels RGBA emprestados.
+- `cargo bench -p foto-codec | raw-codec | revelacao-core | editor-core`.
+
 ## v0.1.1 — 18/out/2026
 
 Sem mudança de API (`make semver`: nenhum crate pede versão nova) e sem mudança na foto que sai de
