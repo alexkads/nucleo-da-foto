@@ -34,8 +34,9 @@ members = [
 ]
 # O rawler vendorizado (o RAW em Rust puro, com o DNG com perdas) é dependência
 # por caminho do `raw-codec`, não membro: os testes dele pedem dev-dependências
-# que não vieram junto.
-exclude = ["vendor/rawler"]
+# que não vieram junto. A bancada (`make bancada`) tem o próprio workspace: a
+# janela dela (GPUI) não pode entrar no grafo de quem consome o núcleo.
+exclude = ["vendor/rawler", "ferramentas/bancada"]
 
 [workspace.package]
 # 🔑 Uma versão para o workspace inteiro, e é ela que vira a tag (`v0.1.0`).

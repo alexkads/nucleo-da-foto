@@ -40,6 +40,12 @@ Medido com `cargo bench -p <crate>` (novo, sem dependência), melhor de duas rod
   a mesma, sem cópia. Para quem já é dono do resultado da GPU (o desktop, a cada quadro).
 - `foto_codec::codificar_rgba`: o mesmo JPEG de `codificar`, de pixels RGBA emprestados.
 - `cargo bench -p foto-codec | raw-codec | revelacao-core | editor-core`.
+- **A bancada** (`ferramentas/bancada`, `make bancada`): uma janela (GPUI Kit) que abre uma foto
+  sua (JPEG, PNG, WebP, TIFF ou RAW), roda cada caminho na última tag e no código da pasta,
+  alternados, e mostra antes, depois, ganho e se a foto saiu igual byte a byte. Também no
+  terminal: `cargo run --release -- --sem-janela foto.cr3`. Ela tem o próprio workspace, então o
+  GPUI não entra no grafo de quem consome o núcleo; `make bancada-testar` roda os testes dela,
+  inclusive o da janela sem tela.
 
 ## v0.1.1 — 18/out/2026
 

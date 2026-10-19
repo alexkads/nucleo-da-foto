@@ -1,6 +1,6 @@
 # Os comandos do nucleo-da-foto. `make` sem argumento lista.
 .DEFAULT_GOAL := ajuda
-.PHONY: ajuda verificar fmt clippy testar wasm doc deny cobertura semver msrv
+.PHONY: ajuda verificar fmt clippy testar wasm doc deny cobertura semver msrv bancada bancada-testar
 
 WEB := -p conversao-web -p fotolivro-web -p raw-web -p revelacao-web -p tela-do-cliente-web
 # O que vai para o navegador: os wrappers e os crates do núcleo que eles levam.
@@ -48,3 +48,11 @@ semver: ## A API pública de cada crate comparada com a última tag (cargo-semve
 msrv: ## Compila com o Rust mínimo declarado (rust-version)
 	rustup toolchain install $(MSRV) --profile minimal
 	cargo +$(MSRV) check --workspace --all-targets
+
+# A bancada (ferramentas/bancada) tem o próprio workspace: o GPUI da janela não
+# entra no grafo dos apps nem no `verificar`.
+bancada: ## A janela que mede o núcleo contra a última tag, com a sua foto
+	cd ferramentas/bancada && cargo run --release
+
+bancada-testar: ## Os testes da bancada: todo caso sai igual na tag e aqui; a janela sem tela
+	cd ferramentas/bancada && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
