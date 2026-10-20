@@ -32,7 +32,12 @@ fn medir(nome: &str, vezes: usize, mut f: impl FnMut()) {
 /// Uma foto de 12 MP com conteúdo que o JPEG não comprime de graça.
 fn foto(largura: u32, altura: u32) -> RgbaImage {
     RgbaImage::from_fn(largura, altura, |x, y| {
-        image::Rgba([(x * 7 + y) as u8, ((y * 3) ^ x) as u8, ((x + y) / 5) as u8, 255])
+        image::Rgba([
+            (x * 7 + y) as u8,
+            ((y * 3) ^ x) as u8,
+            ((x + y) / 5) as u8,
+            255,
+        ])
     })
 }
 

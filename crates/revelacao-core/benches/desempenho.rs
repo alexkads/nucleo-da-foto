@@ -35,7 +35,12 @@ fn medir(nome: &str, vezes: usize, mut f: impl FnMut()) {
 fn main() {
     // A revelada de um arrasto de slider: 2560², RGBA, como vem da GPU.
     let revelada = DynamicImage::ImageRgba8(RgbaImage::from_fn(2560, 2560, |x, y| {
-        image::Rgba([(x * 7 + y) as u8, ((y * 3) ^ x) as u8, ((x + y) / 5) as u8, 255])
+        image::Rgba([
+            (x * 7 + y) as u8,
+            ((y * 3) ^ x) as u8,
+            ((x + y) / 5) as u8,
+            255,
+        ])
     }));
     let sem_corte = Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, false, false);
     let reto = Corte::novo(0.1, 0.1, 0.8, 0.8, 0, 0.0, false, false);
@@ -43,11 +48,19 @@ fn main() {
     let inclinado = Corte::novo(0.1, 0.1, 0.8, 0.8, 0, 3.0, false, false);
 
     medir("enquadrar 2560²: sem corte, tomando a foto", 20, || {
-        black_box(transformacao::aplicar_dono(revelada.clone(), &sem_corte, true));
+        black_box(transformacao::aplicar_dono(
+            revelada.clone(),
+            &sem_corte,
+            true,
+        ));
     });
-    medir("  (o clone que a linha acima paga para ter o que tomar)", 20, || {
-        black_box(revelada.clone());
-    });
+    medir(
+        "  (o clone que a linha acima paga para ter o que tomar)",
+        20,
+        || {
+            black_box(revelada.clone());
+        },
+    );
     medir("enquadrar 2560²: sem corte, emprestada", 20, || {
         black_box(transformacao::aplicar(&revelada, &sem_corte, true));
     });
@@ -73,6 +86,13 @@ fn main() {
         .collect();
     let no_buraco = |x: f32, y: f32| (160.0..240.0).contains(&x) && (110.0..190.0).contains(&y);
     medir("preencher: buraco de 80² em 400×300", 5, || {
-        black_box(preencher_buraco(&estampa, w, h, (160, 110, 240, 190), &no_buraco, 7));
+        black_box(preencher_buraco(
+            &estampa,
+            w,
+            h,
+            (160, 110, 240, 190),
+            &no_buraco,
+            7,
+        ));
     });
 }
