@@ -38,7 +38,7 @@ fn main() {
     // Níveis por cima — o arrasto do slider dos Níveis.
     let (w, h) = (4000u32, 3000u32);
     let base = RgbImage::from_fn(w, h, |x, y| {
-        image::Rgb([(x * 7 + y) as u8, (y * 3 ^ x) as u8, 90])
+        image::Rgb([(x * 7 + y) as u8, ((y * 3) ^ x) as u8, 90])
     });
     let mut doc = Documento::novo(BaseRef::da_imagem(&base));
     let mut pintada = Camada::nova("Pintada", w, h);

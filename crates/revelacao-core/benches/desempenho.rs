@@ -35,7 +35,7 @@ fn medir(nome: &str, vezes: usize, mut f: impl FnMut()) {
 fn main() {
     // A revelada de um arrasto de slider: 2560², RGBA, como vem da GPU.
     let revelada = DynamicImage::ImageRgba8(RgbaImage::from_fn(2560, 2560, |x, y| {
-        image::Rgba([(x * 7 + y) as u8, (y * 3 ^ x) as u8, ((x + y) / 5) as u8, 255])
+        image::Rgba([(x * 7 + y) as u8, ((y * 3) ^ x) as u8, ((x + y) / 5) as u8, 255])
     }));
     let sem_corte = Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, false, false);
     let reto = Corte::novo(0.1, 0.1, 0.8, 0.8, 0, 0.0, false, false);
