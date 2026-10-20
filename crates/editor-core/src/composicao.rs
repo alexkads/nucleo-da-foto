@@ -532,7 +532,7 @@ impl<'a> Exibidora<'a> {
                 .collect(),
             Exibir::Rubi(c, m) => {
                 let mut foto = c.amostras(y, xs);
-                for (p, &x) in foto.chunks_exact_mut(3).zip(xs) {
+                for (p, &x) in foto.as_chunks_mut::<3>().0.iter_mut().zip(xs) {
                     let v = valor_da_mascara(m, x, y);
                     let a = OPACIDADE_DO_RUBI * (255 - v) as f32 / 255.0;
                     if a > 0.0 {

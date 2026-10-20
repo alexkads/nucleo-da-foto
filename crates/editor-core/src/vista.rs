@@ -458,14 +458,23 @@ mod testes {
         a.pixels = CamadaDePixels::da_imagem(&RgbImage::from_fn(w, h, |x, y| {
             image::Rgb([(y % 256) as u8, 200, (x % 256) as u8])
         }));
-        for (k, p) in a.pixels.tile_mut((1, 1)).chunks_exact_mut(4).enumerate() {
+        for (k, p) in a
+            .pixels
+            .tile_mut((1, 1))
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
             p[3] = (k % 256) as u8; // alfa parcial num tile
         }
         let mut mascara = Mascara::nova(255, w, h);
         for (k, p) in mascara
             .pixels
             .tile_mut((0, 0))
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .enumerate()
         {
             p.copy_from_slice(&[(k / 256 % 256) as u8, 0, 0, 255]);

@@ -796,7 +796,7 @@ mod testes {
         let mut c = CamadaDePixels::nova(600, 400);
         for (posicao, cor) in [((0, 0), 9u8), ((1, 1), 77), ((2, 0), 200)] {
             let t = c.tile_mut(posicao);
-            for (k, p) in t.chunks_exact_mut(4).enumerate() {
+            for (k, p) in t.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 p.copy_from_slice(&[cor, k as u8, (k >> 8) as u8, (k % 3) as u8 * 127]);
             }
         }
