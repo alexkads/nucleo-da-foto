@@ -467,6 +467,10 @@ fn densidade_e_difusao_da_mascara_vetorial_sem_mexer_no_caminho() {
         .caminho;
     // Densidade 50%: fora do quadrado, meia camada.
     s.mover_propriedades_da_mascara_vetorial(0, Some(0.5), None);
+    // No meio do arrasto a vista está em rascunho (a foto inteira mudou).
+    let mut rascunho = crate::vista::Vista::nova(s.base(), s.documento(), 300);
+    rascunho.rascunhar(s.base(), s.documento(), &Retangulo::inteiro(600, 400));
+    assert_eq!(s.vista().imagem().as_raw(), rascunho.imagem().as_raw());
     s.mover_propriedades_da_mascara_vetorial(0, Some(0.5), None);
     s.confirmar_mascara_vetorial();
     assert_eq!(

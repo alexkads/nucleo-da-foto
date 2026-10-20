@@ -433,6 +433,46 @@ impl Sessao {
         }
     }
 
+    /// A vista **em rascunho** onde `sujo` mudou — o caminho de todo arrasto
+    /// (slider, Mover, ⌘T, prévia de filtro): um pixel da foto por pixel da
+    /// tela, e não a média da caixa. O que ficou em rascunho é lembrado e
+    /// refeito exato em [`Self::firmar_a_vista`], quando o gesto acaba.
+    ///
+    /// 🔑 **É o Lightroom: no arrasto, só o que a tela mostra; ao soltar, o
+    /// exato.** O documento, a composição e o histórico não mudam — só a
+    /// tela durante o gesto.
+    fn rascunhar_a_vista(&mut self, sujo: &Retangulo) {
+        if self.mostrando_antes {
+            self.mostrar_antes(false);
+        }
+        self.versao += 1;
+        if sujo.vazio() {
+            return;
+        }
+        self.vista.rascunhar(&self.base, &self.doc, sujo);
+        if let Some(lupa) = self.lupa.as_mut() {
+            lupa.rascunhar(&self.base, &self.doc, sujo);
+        }
+        if let Some((_, desde)) = self.lupa_pedida.as_mut() {
+            *desde = desde.uniao(sujo);
+        }
+        self.rascunho = self.rascunho.uniao(sujo);
+    }
+
+    /// O gesto acabou: o que estava em rascunho volta à vista exata.
+    fn firmar_a_vista(&mut self) {
+        self.firmar_a_vista_com(&Retangulo::default());
+    }
+
+    /// [`Self::firmar_a_vista`] junto com `sujo` (o que o fim do gesto mudou),
+    /// numa conta exata só.
+    fn firmar_a_vista_com(&mut self, sujo: &Retangulo) {
+        let rascunho = std::mem::take(&mut self.rascunho).uniao(sujo);
+        if !rascunho.vazio() {
+            self.refazer_a_vista(&rascunho);
+        }
+    }
+
     // ---------------------------------------------------------------- lupa
 
     /// A lupa que está valendo (a vista do pedaço visível, com a foto
@@ -645,6 +685,8 @@ impl Sessao {
         self.aplicar_liquidificacao();
         self.cancelar_filtro();
         self.cancelar_separacao();
+        // Nenhum gesto fecha com a tela em rascunho.
+        self.firmar_a_vista();
     }
 
     /// Escolhe a camada — os pixels dela, e não a máscara.
@@ -821,20 +863,9 @@ impl Sessao {
             return;
         }
         self.doc.camadas[indice].ajuste = Some(ajuste);
-        if self.mostrando_antes {
-            self.mostrar_antes(false);
-        }
-        let area = self.doc.camadas[indice].area();
         // Em rascunho durante o arrasto: o ajuste muda a foto inteira.
-        self.versao += 1;
-        self.vista.rascunhar(&self.base, &self.doc, &area);
-        if let Some(lupa) = self.lupa.as_mut() {
-            lupa.rascunhar(&self.base, &self.doc, &area);
-        }
-        if let Some((_, desde)) = self.lupa_pedida.as_mut() {
-            *desde = desde.uniao(&area);
-        }
-        self.rascunho = self.rascunho.uniao(&area);
+        let area = self.doc.camadas[indice].area();
+        self.rascunhar_a_vista(&area);
     }
 
     /// O arrasto do slider do ajuste acabou.
@@ -842,8 +873,7 @@ impl Sessao {
         let Some((camada, antes)) = self.ajuste_antes.take() else {
             return;
         };
-        let rascunho = std::mem::take(&mut self.rascunho);
-        self.refazer_a_vista(&rascunho);
+        self.firmar_a_vista();
         let Some(depois) = self.doc.camadas.get(camada).and_then(|c| c.ajuste) else {
             return;
         };
@@ -1141,15 +1171,7 @@ impl Sessao {
         let area = area_antes.uniao(&self.doc.camadas[indice].area());
         // Em rascunho durante o arrasto (a difusão desfoca a máscara inteira
         // a cada valor); exata ao soltar.
-        self.versao += 1;
-        self.vista.rascunhar(&self.base, &self.doc, &area);
-        if let Some(lupa) = self.lupa.as_mut() {
-            lupa.rascunhar(&self.base, &self.doc, &area);
-        }
-        if let Some((_, desde)) = self.lupa_pedida.as_mut() {
-            *desde = desde.uniao(&area);
-        }
-        self.rascunho = self.rascunho.uniao(&area);
+        self.rascunhar_a_vista(&area);
     }
 
     /// O arrasto da densidade ou da difusão acabou.
@@ -1157,8 +1179,7 @@ impl Sessao {
         let Some((camada, antes)) = self.mascara_antes.take() else {
             return;
         };
-        let rascunho = std::mem::take(&mut self.rascunho);
-        self.refazer_a_vista(&rascunho);
+        self.firmar_a_vista();
         let Some(depois) = self.doc.camadas.get(camada).and_then(|c| c.mascara.clone()) else {
             return;
         };
@@ -1772,7 +1793,8 @@ impl Sessao {
             sujo = sujo.uniao(&self.trocar_alvo(camada, na_mascara, nova));
         }
         sujo = sujo.uniao(&self.doc.camadas[camada].area());
-        self.refazer_a_vista(&sujo);
+        // Em rascunho durante o arrasto; exata no `terminar_de_mover`.
+        self.rascunhar_a_vista(&sujo);
     }
 
     /// Troca os pixels de um alvo da camada e devolve onde a foto pode ter
@@ -1798,6 +1820,7 @@ impl Sessao {
         let Some(movendo) = self.movendo.take() else {
             return false;
         };
+        self.firmar_a_vista();
         let camada = movendo.camada;
         let passos: Vec<Comando> = movendo
             .alvos
@@ -2024,7 +2047,9 @@ impl Sessao {
         if let (Some(par), Some(na)) = (par, par_na_mascara) {
             sujo = sujo.uniao(&self.trocar_alvo(camada, na, par));
         }
-        self.refazer_a_vista(&sujo);
+        // Em rascunho durante o arrasto (⌘T, Deformar, Mover com seleção);
+        // exata ao aplicar ou cancelar.
+        self.rascunhar_a_vista(&sujo);
     }
 
     /// Os dois alvos do flutuante voltam a ser o que eram (cancelar, malha
@@ -2077,9 +2102,10 @@ impl Sessao {
         {
             // Deformar sem mudar nada: nem passo, nem a seleção some.
             let sujo = self.devolver_o_original(&f);
-            self.refazer_a_vista(&sujo);
+            self.firmar_a_vista_com(&sujo);
             return false;
         }
+        self.firmar_a_vista();
         let selecao_antes = self.selecao.clone();
         if f.selecao.is_some() {
             self.selecao = if f.t.so_desloca() && !deformou {
@@ -2157,7 +2183,7 @@ impl Sessao {
             return;
         };
         let sujo = self.devolver_o_original(&f);
-        self.refazer_a_vista(&sujo);
+        self.firmar_a_vista_com(&sujo);
     }
 
     // ------------------------------------------------------------- remendo
@@ -2464,8 +2490,10 @@ impl Sessao {
         let (camada, na_mascara) = (*camada, *na_mascara);
         *self.doc.camadas[camada].alvo_mut(na_mascara) = pixels;
         self.versao += 1;
+        // Em rascunho enquanto o diálogo está aberto (cada valor do slider é
+        // uma prévia); exata no OK ou no Cancelar.
         let tudo = Retangulo::inteiro(self.doc.largura(), self.doc.altura());
-        self.refazer_a_vista(&tudo);
+        self.rascunhar_a_vista(&tudo);
     }
 
     /// OK: o que a prévia mostra vira **um** passo com o nome do filtro; sem
@@ -2474,6 +2502,7 @@ impl Sessao {
         let Some((camada, na_mascara, original)) = self.filtro.take() else {
             return false;
         };
+        self.firmar_a_vista();
         match operacoes::diferenca(&original, self.doc.camadas[camada].alvo(na_mascara)) {
             Some(mudanca) => {
                 self.hist.registrar(Comando::Varios {
@@ -2500,7 +2529,7 @@ impl Sessao {
         *self.doc.camadas[camada].alvo_mut(na_mascara) = original;
         self.versao += 1;
         let tudo = Retangulo::inteiro(self.doc.largura(), self.doc.altura());
-        self.refazer_a_vista(&tudo);
+        self.firmar_a_vista_com(&tudo);
     }
 
     // ------------------------------------------------------------ deformar
@@ -2569,7 +2598,7 @@ impl Sessao {
             let f = self.flutuante.take().expect("flutuante aberto");
             let sujo = self.devolver_o_original(&f);
             self.flutuante = Some(f);
-            self.refazer_a_vista(&sujo);
+            self.rascunhar_a_vista(&sujo);
             return;
         }
         let desenhado = deformar::desenhar(&f.conteudo, &m, largura, altura);
@@ -3658,7 +3687,8 @@ impl Sessao {
         }
         camada.opacidade = valor;
         let area = camada.area();
-        self.refazer_a_vista(&area);
+        // Em rascunho durante o arrasto; exata no `confirmar_opacidade`.
+        self.rascunhar_a_vista(&area);
     }
 
     /// O arrasto do slider acabou.
@@ -3666,6 +3696,7 @@ impl Sessao {
         let Some((camada, antes)) = self.opacidade_antes.take() else {
             return;
         };
+        self.firmar_a_vista();
         let Some(depois) = self.doc.camadas.get(camada).map(|c| c.opacidade) else {
             return;
         };

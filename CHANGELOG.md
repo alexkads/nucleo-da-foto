@@ -34,6 +34,22 @@ Medido com `cargo bench -p <crate>` (novo, sem dependência), melhor de duas rod
   revelada e `decodificar_imagem` monta o RGBA uma vez — menos pico de memória no celular.
 - `raw-codec`: desce a 8 bits antes de girar (metade dos bytes, e sem a cópia do fim); XMP por
   `memchr::memmem`.
+- `editor-core`, **o arrasto no tamanho da tela** (como o Lightroom): Mover, ⌘T, Deformar, Mover
+  com seleção, prévia de filtro, opacidade e densidade/difusão da máscara vetorial passam a mostrar
+  a vista em **rascunho** durante o gesto (um pixel da foto por pixel da tela), como o slider de
+  ajuste já fazia, e a vista exata ao soltar, aplicar, cancelar ou fechar o gesto. O rascunho
+  compõe só as colunas que usa (custo W·H/f², era W·H/f). Na bancada, por evento, foto de 12 MP
+  e vista de 1600 px: opacidade 94 → 12 ms, slider dos Níveis 57 → 10 ms, Mover 167 → 40 ms,
+  prévia de filtro 147 → 53 ms, ⌘T 339 → 199 ms.
+
+### Comportamento (só na tela)
+- Durante esses arrastos a vista é o rascunho; ao fim do gesto, a exata. O documento, a
+  composição (`compor`), o histórico e a vista depois do gesto são os mesmos byte a byte
+  (`testes_do_arrasto`, `o_rascunho_por_amostras_e_o_de_compor_a_linha`).
+
+### Correção
+- Os `cargo bench` da 0.1.2 passam no `cargo fmt --check` e no `clippy -D warnings`
+  (`--all-targets`), que reprovavam no `main`.
 
 ### Novo
 - `revelacao_core::transformacao::aplicar_dono`: o `aplicar` que toma a foto — sem corte, devolve

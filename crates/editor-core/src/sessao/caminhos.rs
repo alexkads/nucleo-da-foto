@@ -912,7 +912,8 @@ impl Sessao {
         let camada = &mut self.doc.camadas[i];
         camada.mascara_vetorial = Some(nova);
         let sujo = crate::composicao::interseccao(&sujo, &camada.area());
-        self.refazer_a_vista(&sujo);
+        // Em rascunho durante o arrasto; exata no `confirmar_mascara_vetorial`.
+        self.rascunhar_a_vista(&sujo);
     }
 
     /// O arrasto das Propriedades da máscara vetorial terminou: um passo.
@@ -920,6 +921,7 @@ impl Sessao {
         let Some((i, antes)) = self.vetorial_antes.take() else {
             return;
         };
+        self.firmar_a_vista();
         let depois = self
             .doc
             .camadas

@@ -132,6 +132,30 @@ const TODOS: &[Caso] = &[
         rodar: mover_um_pouco,
     },
     Caso {
+        grupo: "Arrastar",
+        nome: "Mover a camada, por evento do ponteiro",
+        so_raw: false,
+        rodar: arrastar_mover,
+    },
+    Caso {
+        grupo: "Arrastar",
+        nome: "⌘T deslocando, por evento do ponteiro",
+        so_raw: false,
+        rodar: arrastar_transformar,
+    },
+    Caso {
+        grupo: "Arrastar",
+        nome: "Prévia de filtro, por valor do slider",
+        so_raw: false,
+        rodar: arrastar_filtro,
+    },
+    Caso {
+        grupo: "Arrastar",
+        nome: "Opacidade da camada, por valor do slider",
+        so_raw: false,
+        rodar: arrastar_opacidade,
+    },
+    Caso {
         grupo: "Retoque",
         nome: "Content-Aware: buraco de 80 px no meio da foto",
         so_raw: false,
@@ -489,6 +513,138 @@ fn content_aware(foto: &Foto) -> Medida {
         depois_ms: d,
         mesma_saida: sa == sd,
     }
+}
+
+/// A vista do app: o lado maior que a janela mostra.
+const LADO_DA_VISTA: u32 = 1600;
+
+/// Uma sessão do editor nas duas versões: a foto como base e uma camada
+/// pintada por cima de tudo, a 60% — o que ela faz aparece na foto inteira.
+macro_rules! sessao {
+    ($ec:ident, $foto:expr) => {{
+        let base = std::sync::Arc::new(DynamicImage::ImageRgba8($foto.rgba.clone()).into_rgb8());
+        let (w, h) = base.dimensions();
+        let doc = $ec::Documento::novo($ec::BaseRef::da_imagem(&base));
+        let mut s = $ec::sessao::Sessao::nova(base, doc, $ec::Historico::novo(), LADO_DA_VISTA);
+        s.nova_camada();
+        s.selecionar(
+            &$ec::selecao::Forma::Retangulo($ec::Retangulo::inteiro(w, h)),
+            $ec::selecao::Operacao::Nova,
+        );
+        s.pincel.cor = [200, 40, 90];
+        s.preencher_selecao();
+        s.desmarcar();
+        s.mover_opacidade(0.6);
+        s.confirmar_opacidade();
+        s
+    }};
+}
+
+/// Um gesto de arrasto nas duas versões: `comecar` abre o gesto, `evento`
+/// é um passo do arrasto (o `k`-ésimo), `fim` fecha. Dentro deles, `ec` é o
+/// crate do editor da versão daquele lado. O tempo é o de **um
+/// evento**; a foto composta e a vista depois do fim têm de ser as mesmas —
+/// no meio do arrasto a vista é rascunho de propósito, e não entra na conta.
+macro_rules! arrasto {
+    ($foto:expr, $vezes:expr, |$s:ident| $comecar:expr, |$s2:ident, $k:ident| $evento:expr, |$s3:ident| $fim:expr) => {{
+        let mut antes = sessao!(editor_core_antes, $foto);
+        let mut depois = sessao!(editor_core, $foto);
+        {
+            let $s = &mut antes;
+            $comecar;
+        }
+        {
+            let $s = &mut depois;
+            $comecar;
+        }
+        let (mut ka, mut kd) = (0usize, 0usize);
+        let (a, d, (), ()) = comparar(
+            $vezes,
+            || (),
+            |_| {
+                #[allow(unused_imports)] // só os eventos que nomeiam um tipo usam
+                use editor_core_antes as ec;
+                ka += 1;
+                let ($s2, $k) = (&mut antes, ka);
+                $evento;
+            },
+            || (),
+            |_| {
+                #[allow(unused_imports)] // só os eventos que nomeiam um tipo usam
+                use editor_core as ec;
+                kd += 1;
+                let ($s2, $k) = (&mut depois, kd);
+                $evento;
+            },
+        );
+        {
+            let $s3 = &mut antes;
+            $fim;
+        }
+        {
+            let $s3 = &mut depois;
+            $fim;
+        }
+        Medida {
+            antes_ms: a,
+            depois_ms: d,
+            mesma_saida: antes.vista().imagem().as_raw() == depois.vista().imagem().as_raw()
+                && antes.compor().as_raw() == depois.compor().as_raw(),
+        }
+    }};
+}
+
+fn arrastar_mover(foto: &Foto) -> Medida {
+    arrasto!(
+        foto,
+        vezes(foto, 7),
+        |s| s.comecar_a_mover(),
+        |s, k| s.mover_por(5 * k as i64, 3 * k as i64),
+        |s| s.terminar_de_mover()
+    )
+}
+
+fn arrastar_transformar(foto: &Foto) -> Medida {
+    arrasto!(
+        foto,
+        vezes(foto, 5),
+        |s| s.comecar_a_transformar(),
+        |s, k| s.definir_transformacao(ec::transformar::Transformacao::deslocamento(
+            4.0 * k as f32,
+            2.0 * k as f32
+        )),
+        |s| s.aplicar_transformacao()
+    )
+}
+
+fn arrastar_filtro(foto: &Foto) -> Medida {
+    // A prévia que o filtro calculou fora da thread da tela: a camada com
+    // outra cor a cada valor do slider. Montá-la entra no relógio dos dois
+    // lados, com a mesma conta — pesa igual nos dois.
+    let (w, h) = foto.rgba.dimensions();
+    let previa = |k: usize| {
+        RgbImage::from_fn(w, h, move |x, y| {
+            image::Rgb([(x as usize + k * 9) as u8, (y as usize + k * 5) as u8, 60])
+        })
+    };
+    arrasto!(
+        foto,
+        vezes(foto, 5),
+        |s| s.comecar_filtro(),
+        |s, k| s.mostrar_filtro(ec::tiles::CamadaDePixels::da_imagem(&previa(k))),
+        |s| s.aplicar_filtro("Prévia")
+    )
+}
+
+fn arrastar_opacidade(foto: &Foto) -> Medida {
+    arrasto!(
+        foto,
+        vezes(foto, 7),
+        // Não há o que abrir: o slider começa no primeiro valor.
+        |s| s.soltar(),
+        |s, k| s.mover_opacidade(0.2 + (k % 7) as f32 / 10.0),
+        |s| s.confirmar_opacidade()
+    )
 }
 
 #[cfg(test)]

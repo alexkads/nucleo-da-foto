@@ -240,12 +240,7 @@ impl<'a> Composicao<'a> {
         largura_do_destino: u32,
         origem: (u32, u32),
     ) {
-        let Composicao {
-            base,
-            camadas,
-            preparados,
-            leitores,
-        } = self;
+        let base = self.base;
         let ret = *ret;
         let (largura, altura) = (base.width(), base.height());
         let destino_em_bytes = largura_do_destino as usize * 3;
@@ -255,30 +250,7 @@ impl<'a> Composicao<'a> {
         for posicao in referencia.tiles_do_retangulo(&ret) {
             let pedaco = retangulo_do_tile(posicao, largura, altura).limitado(largura, altura);
             let pedaco = interseccao(&pedaco, &ret);
-            // A máscara de cada camada neste tile: sem tile pintado nela, o tile
-            // inteiro vale o fundo — e entra na opacidade de uma vez.
-            let mut tiles: Vec<TileNaComposicao> = Vec::with_capacity(camadas.len());
-            let mut base_presente = false;
-            for (((c, papel), preparado), leitor) in
-                camadas.iter().zip(preparados.iter()).zip(leitores.iter())
-            {
-                let t = tile_na_composicao(c, leitor.as_ref(), preparado.as_ref(), posicao, *papel);
-                match papel {
-                    // Sem a base neste tile, as recortadas nele também somem.
-                    Papel::Recortada if !base_presente => continue,
-                    Papel::Base | Papel::Solta => base_presente = t.is_some(),
-                    _ => {}
-                }
-                tiles.extend(t);
-            }
-            // A base que ficou sem recortada neste tile volta à conta de sempre.
-            for k in 0..tiles.len() {
-                if tiles[k].papel == Papel::Base
-                    && tiles.get(k + 1).is_none_or(|t| t.papel != Papel::Recortada)
-                {
-                    tiles[k].papel = Papel::Solta;
-                }
-            }
+            let tiles = self.tiles_em(posicao);
             for y in pedaco.y..pedaco.baixo() {
                 let inicio = y as usize * largura_em_bytes + pedaco.x as usize * 3;
                 let fim = inicio + pedaco.largura as usize * 3;
@@ -292,48 +264,123 @@ impl<'a> Composicao<'a> {
                 let ty = y % LADO_DO_TILE;
                 for x in pedaco.x..pedaco.direita() {
                     let i = y as usize * largura_em_bytes + x as usize * 3;
-                    let mut pixel = [fonte[i], fonte[i + 1], fonte[i + 2]];
-                    let j = indice(x % LADO_DO_TILE, ty);
-                    let mut k = 0;
-                    while k < tiles.len() {
-                        let t = &tiles[k];
-                        k += 1;
-                        let opacidade = t.opacidade_em(j);
-                        if t.papel == Papel::Base {
-                            let inicio_do_conjunto = k;
-                            while tiles.get(k).is_some_and(|r| r.papel == Papel::Recortada) {
-                                k += 1;
-                            }
-                            let Some(b) = t.cima(j, pixel) else { continue };
-                            if opacidade <= 0.0 || b[3] == 0 {
-                                continue;
-                            }
-                            let mut g = [b[0], b[1], b[2]];
-                            for r in &tiles[inicio_do_conjunto..k] {
-                                let o = r.opacidade_em(j);
-                                if o <= 0.0 {
-                                    continue;
-                                }
-                                if let Some(cima) = r.cima(j, g) {
-                                    g = mesclar(g, cima, o, r.modo);
-                                }
-                            }
-                            pixel = mesclar(pixel, [g[0], g[1], g[2], b[3]], opacidade, t.modo);
-                            continue;
-                        }
-                        if opacidade <= 0.0 {
-                            continue;
-                        }
-                        if let Some(cima) = t.cima(j, pixel) {
-                            pixel = mesclar(pixel, cima, opacidade, t.modo);
-                        }
-                    }
+                    let baixo = [fonte[i], fonte[i + 1], fonte[i + 2]];
+                    let pixel = pixel_composto(&tiles, baixo, indice(x % LADO_DO_TILE, ty));
                     let d = d_inicio + (x - pedaco.x) as usize * 3;
                     destino[d..d + 3].copy_from_slice(&pixel);
                 }
             }
         }
     }
+
+    /// Só os pixels `(x, y)` de cada `x` em `xs` (em ordem crescente, dentro
+    /// da foto), em RGB, um atrás do outro — o rascunho da vista.
+    ///
+    /// 🔑 **O rascunho usa um pixel da foto por pixel da vista**; compor a
+    /// linha inteira para jogar fora f − 1 de cada f pixels custava f vezes o
+    /// necessário. A conta de cada pixel é a de [`Self::recorte`], pela mesma
+    /// [`pixel_composto`]: a amostra sai byte a byte igual.
+    pub(crate) fn amostras(&self, y: u32, xs: &[u32]) -> Vec<u8> {
+        let fonte = self.base.as_raw();
+        let largura_em_bytes = self.base.width() as usize * 3;
+        let ty = y % LADO_DO_TILE;
+        let mut saida = Vec::with_capacity(xs.len() * 3);
+        let mut k = 0;
+        while k < xs.len() {
+            // Os `x` do mesmo tile compartilham a preparação do tile.
+            let posicao = crate::tiles::tile_de(xs[k], y);
+            let tiles = self.tiles_em(posicao);
+            while k < xs.len() && crate::tiles::tile_de(xs[k], y) == posicao {
+                let x = xs[k];
+                let i = y as usize * largura_em_bytes + x as usize * 3;
+                let baixo = [fonte[i], fonte[i + 1], fonte[i + 2]];
+                let pixel = if tiles.is_empty() {
+                    baixo
+                } else {
+                    pixel_composto(&tiles, baixo, indice(x % LADO_DO_TILE, ty))
+                };
+                saida.extend_from_slice(&pixel);
+                k += 1;
+            }
+        }
+        saida
+    }
+
+    /// As camadas que mudam algo no tile `posicao`, prontas para a conta de
+    /// cada pixel ([`pixel_composto`]). Vazio: o tile é a base.
+    fn tiles_em(&self, posicao: crate::tiles::Posicao) -> Vec<TileNaComposicao<'_>> {
+        // A máscara de cada camada neste tile: sem tile pintado nela, o tile
+        // inteiro vale o fundo — e entra na opacidade de uma vez.
+        let mut tiles: Vec<TileNaComposicao> = Vec::with_capacity(self.camadas.len());
+        let mut base_presente = false;
+        for (((c, papel), preparado), leitor) in self
+            .camadas
+            .iter()
+            .zip(self.preparados.iter())
+            .zip(self.leitores.iter())
+        {
+            let t = tile_na_composicao(c, leitor.as_ref(), preparado.as_ref(), posicao, *papel);
+            match papel {
+                // Sem a base neste tile, as recortadas nele também somem.
+                Papel::Recortada if !base_presente => continue,
+                Papel::Base | Papel::Solta => base_presente = t.is_some(),
+                _ => {}
+            }
+            tiles.extend(t);
+        }
+        // A base que ficou sem recortada neste tile volta à conta de sempre.
+        for k in 0..tiles.len() {
+            if tiles[k].papel == Papel::Base
+                && tiles.get(k + 1).is_none_or(|t| t.papel != Papel::Recortada)
+            {
+                tiles[k].papel = Papel::Solta;
+            }
+        }
+        tiles
+    }
+}
+
+/// Um pixel da foto composto: `baixo` (o da base) com cada tile de camada por
+/// cima, no pixel `j` do tile — a conta do topo do módulo, e a das máscaras de
+/// corte (ver [`compor_deslocado`]).
+#[inline]
+fn pixel_composto(tiles: &[TileNaComposicao], baixo: [u8; 3], j: usize) -> [u8; 3] {
+    let mut pixel = baixo;
+    let mut k = 0;
+    while k < tiles.len() {
+        let t = &tiles[k];
+        k += 1;
+        let opacidade = t.opacidade_em(j);
+        if t.papel == Papel::Base {
+            let inicio_do_conjunto = k;
+            while tiles.get(k).is_some_and(|r| r.papel == Papel::Recortada) {
+                k += 1;
+            }
+            let Some(b) = t.cima(j, pixel) else { continue };
+            if opacidade <= 0.0 || b[3] == 0 {
+                continue;
+            }
+            let mut g = [b[0], b[1], b[2]];
+            for r in &tiles[inicio_do_conjunto..k] {
+                let o = r.opacidade_em(j);
+                if o <= 0.0 {
+                    continue;
+                }
+                if let Some(cima) = r.cima(j, g) {
+                    g = mesclar(g, cima, o, r.modo);
+                }
+            }
+            pixel = mesclar(pixel, [g[0], g[1], g[2], b[3]], opacidade, t.modo);
+            continue;
+        }
+        if opacidade <= 0.0 {
+            continue;
+        }
+        if let Some(cima) = t.cima(j, pixel) {
+            pixel = mesclar(pixel, cima, opacidade, t.modo);
+        }
+    }
+    pixel
 }
 
 /// O que o palco mostra: a foto, ou a máscara de uma camada — sozinha, em
@@ -465,6 +512,48 @@ impl<'a> Exibidora<'a> {
             }
         }
     }
+
+    /// Só os pixels `(x, y)` de cada `x` em `xs` (em ordem crescente, dentro
+    /// da foto), em RGB — o rascunho da vista, sem compor a linha inteira. Cada
+    /// pixel sai igual ao do mesmo lugar em [`Self::recorte`].
+    pub(crate) fn amostras(&self, y: u32, xs: &[u32]) -> Vec<u8> {
+        debug_assert!(xs.windows(2).all(|par| par[0] <= par[1]));
+        debug_assert!(xs.iter().all(|&x| x < self.base.width()) && y < self.base.height());
+        let cinza = |v: u8| [v, v, v];
+        match &self.modo {
+            Exibir::Composta(c) => c.amostras(y, xs),
+            Exibir::SoACamada(pixels) => xs
+                .iter()
+                .flat_map(|&x| sobre([128; 3], pixels.pixel(x, y), 1.0))
+                .collect(),
+            Exibir::SoAMascara(m) => xs
+                .iter()
+                .flat_map(|&x| cinza(valor_da_mascara(m, x, y)))
+                .collect(),
+            Exibir::Rubi(c, m) => {
+                let mut foto = c.amostras(y, xs);
+                for (p, &x) in foto.chunks_exact_mut(3).zip(xs) {
+                    let v = valor_da_mascara(m, x, y);
+                    let a = OPACIDADE_DO_RUBI * (255 - v) as f32 / 255.0;
+                    if a > 0.0 {
+                        for (canal, rubi) in p.iter_mut().zip(RUBI) {
+                            *canal = (*canal as f32 + (rubi - *canal as f32) * a).round() as u8;
+                        }
+                    }
+                }
+                foto
+            }
+        }
+    }
+}
+
+/// O valor da máscara (com a densidade e a difusão) no pixel `(x, y)` — o
+/// mesmo de [`valores_da_mascara`] ali.
+fn valor_da_mascara(mascara: &Mascarada, x: u32, y: u32) -> u8 {
+    mascara
+        .leitor
+        .no_tile(crate::tiles::tile_de(x, y))
+        .valor(indice(x % LADO_DO_TILE, y % LADO_DO_TILE))
 }
 
 /// Os pixels de uma camada sozinha em `ret`, sobre cinza 50% — tile a tile.
