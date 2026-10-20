@@ -231,13 +231,15 @@ impl Vista {
             let mut saida = Vec::with_capacity(colunas * (b - a) as usize * 3);
             let x0 = ox + vx0 * f;
             let largura = ((vx1 - vx0) * f).min(fim_x - x0);
+            // 🔑 Só as colunas que a vista usa — o pixel do meio de cada caixa
+            // (o último preso à borda). Compor a linha inteira e jogar fora
+            // f − 1 de cada f custava f vezes mais, para os mesmos pixels.
+            let xs: Vec<u32> = (0..colunas as u32)
+                .map(|k| x0 + (k * f + f / 2).min(largura - 1))
+                .collect();
             for vy in a..b {
                 let y = (oy + vy * f + f / 2).min(fim_y - 1);
-                let linha = exibidora.recorte(&Retangulo::novo(x0, y, largura, 1));
-                for k in 0..colunas as u32 {
-                    let x = (k * f + f / 2).min(linha.width() - 1);
-                    saida.extend_from_slice(&linha.get_pixel(x, 0).0);
-                }
+                saida.extend_from_slice(&exibidora.amostras(y, &xs));
             }
             return saida;
         }
@@ -435,6 +437,122 @@ mod testes {
         let meia = Vista::da_regiao(&base, &doc, &pedaco, 2);
         assert_eq!(meia.regiao(), Retangulo::novo(300, 154, 401, 301));
         assert_eq!(meia.imagem().width(), 201);
+    }
+
+    /// Um documento que passa por todo caminho da composição: camada com
+    /// alfa parcial, máscara pintada e difusa, modo de mescla, opacidade, uma
+    /// recortada nela e uma camada de ajuste por cima.
+    fn documento_completo() -> (RgbImage, Documento) {
+        use crate::documento::{Camada, Mascara};
+        use crate::tiles::CamadaDePixels;
+        let (w, h) = (700, 520);
+        let base = RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([
+                (x * 3 % 256) as u8,
+                (y * 5 % 256) as u8,
+                ((x ^ y) % 256) as u8,
+            ])
+        });
+        let mut doc = Documento::novo(BaseRef::da_imagem(&base));
+        let mut a = Camada::nova("A", w, h);
+        a.pixels = CamadaDePixels::da_imagem(&RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(y % 256) as u8, 200, (x % 256) as u8])
+        }));
+        for (k, p) in a.pixels.tile_mut((1, 1)).chunks_exact_mut(4).enumerate() {
+            p[3] = (k % 256) as u8; // alfa parcial num tile
+        }
+        let mut mascara = Mascara::nova(255, w, h);
+        for (k, p) in mascara
+            .pixels
+            .tile_mut((0, 0))
+            .chunks_exact_mut(4)
+            .enumerate()
+        {
+            p.copy_from_slice(&[(k / 256 % 256) as u8, 0, 0, 255]);
+        }
+        mascara.difusao = 6.0;
+        a.mascara = Some(mascara);
+        a.opacidade = 0.8;
+        a.modo = crate::mesclagem::Modo::Multiplicacao;
+        doc.camadas.push(a);
+        let mut b = Camada::nova("B", w, h);
+        b.pixels = CamadaDePixels::da_imagem(&RgbImage::from_pixel(w, h, image::Rgb([0, 90, 255])));
+        b.recortada = true;
+        b.opacidade = 0.5;
+        doc.camadas.push(b);
+        doc.camadas.push(Camada::de_ajuste(
+            "Níveis",
+            crate::Ajuste::Niveis {
+                preto: 12.0,
+                gama: 1.4,
+                branco: 235.0,
+            },
+            w,
+            h,
+        ));
+        (base, doc)
+    }
+
+    /// O rascunho de antes de 2026-10-20: compor a linha inteira da foto e
+    /// pegar o pixel do meio de cada caixa.
+    fn rascunho_compondo_a_linha(
+        base: &RgbImage,
+        doc: &Documento,
+        vista: &Vista,
+        exibicao: Exibicao,
+    ) -> Vec<u8> {
+        let (f, r) = (vista.fator(), vista.regiao());
+        let colunas = vista.imagem().width();
+        let largura = (colunas * f).min(r.direita() - r.x);
+        let mut saida = Vec::new();
+        for vy in 0..vista.imagem().height() {
+            let y = (r.y + vy * f + f / 2).min(r.baixo() - 1);
+            let linha = composicao::compor_recorte_exibindo(
+                base,
+                doc,
+                &Retangulo::novo(r.x, y, largura, 1),
+                exibicao,
+            );
+            for k in 0..colunas {
+                let x = (k * f + f / 2).min(linha.width() - 1);
+                saida.extend_from_slice(&linha.get_pixel(x, 0).0);
+            }
+        }
+        saida
+    }
+
+    /// 🔑 **O rascunho por amostras é o mesmo rascunho, byte a byte** — em
+    /// todo modo de exibição, em fatores que caem e não caem na borda dos
+    /// tiles, na vista inteira e numa lupa deslocada.
+    #[test]
+    fn o_rascunho_por_amostras_e_o_de_compor_a_linha() {
+        let (base, doc) = documento_completo();
+        let exibicoes = [
+            Exibicao::Foto,
+            Exibicao::SoAMascara(1),
+            Exibicao::Rubi(1),
+            Exibicao::SoACamada(1),
+            Exibicao::SemOConjunto(1),
+            Exibicao::SemOConjunto(99),
+        ];
+        let regioes = [
+            Retangulo::inteiro(base.width(), base.height()),
+            Retangulo::novo(131, 77, 401, 333),
+        ];
+        for exibicao in exibicoes {
+            for regiao in regioes {
+                for fator in [2, 3, 5, 7] {
+                    let mut vista =
+                        Vista::da_regiao_exibindo(&base, &doc, &regiao, fator, exibicao);
+                    vista.rascunhar(&base, &doc, &regiao);
+                    let esperado = rascunho_compondo_a_linha(&base, &doc, &vista, exibicao);
+                    assert!(
+                        vista.imagem().as_raw() == &esperado,
+                        "{exibicao:?} {regiao:?} fator {fator}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
