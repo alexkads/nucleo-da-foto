@@ -1,6 +1,6 @@
 # Changelog
 
-## Próxima (0.1.2) — ainda sem tag
+## v0.1.2 — 19/out/2026
 
 Sem mudança na foto que sai: cada caminho novo tem o teste que o compara byte a byte com o antigo.
 `make semver`: nenhum crate pede versão nova (só itens `pub` novos).
@@ -48,6 +48,8 @@ Medido com `cargo bench -p <crate>` (novo, sem dependência), melhor de duas rod
   (`testes_do_arrasto`, `o_rascunho_por_amostras_e_o_de_compor_a_linha`).
 
 ### Correção
+- `editor-core`: `as_chunks_mut` no lugar de `chunks_exact_mut` (o rubi da máscara e três testes),
+  que o clippy do Rust 1.99 reprovava no `make verificar` do `main`.
 - Os `cargo bench` da 0.1.2 passam no `cargo fmt --check` e no `clippy -D warnings`
   (`--all-targets`), que reprovavam no `main`.
 
