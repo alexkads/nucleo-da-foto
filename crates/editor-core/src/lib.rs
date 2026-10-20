@@ -48,6 +48,8 @@ mod testes_da_mascara;
 #[cfg(test)]
 mod testes_das_ferramentas_de_selecao;
 #[cfg(test)]
+mod testes_do_arrasto;
+#[cfg(test)]
 mod testes_do_carimbo;
 #[cfg(test)]
 mod testes_do_retoque;

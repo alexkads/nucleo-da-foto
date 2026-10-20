@@ -37,7 +37,9 @@ fn main() {
     // Uma foto de 12 MP com uma camada de pixels cheia e opaca e uma de
     // Níveis por cima — o arrasto do slider dos Níveis.
     let (w, h) = (4000u32, 3000u32);
-    let base = RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 7 + y) as u8, (y * 3 ^ x) as u8, 90]));
+    let base = RgbImage::from_fn(w, h, |x, y| {
+        image::Rgb([(x * 7 + y) as u8, (y * 3 ^ x) as u8, 90])
+    });
     let mut doc = Documento::novo(BaseRef::da_imagem(&base));
     let mut pintada = Camada::nova("Pintada", w, h);
     pintada.pixels = CamadaDePixels::da_imagem(&RgbImage::from_fn(w, h, |x, y| {
@@ -57,9 +59,13 @@ fn main() {
     let tudo = Retangulo::inteiro(w, h);
 
     let mut vista = Vista::nova(&base, &doc, 1600);
-    medir("vista 1600 px de 12 MP: rascunho (arrasto de slider)", 10, || {
-        vista.rascunhar(&base, &doc, &tudo);
-    });
+    medir(
+        "vista 1600 px de 12 MP: rascunho (arrasto de slider)",
+        10,
+        || {
+            vista.rascunhar(&base, &doc, &tudo);
+        },
+    );
     medir("vista 1600 px de 12 MP: refazer", 3, || {
         vista.refazer(&base, &doc, &tudo);
     });
