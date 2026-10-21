@@ -30,10 +30,10 @@ revelacao-core = { path = "../../crates/revelacao-core" }
 editor-core = { path = "../../crates/editor-core" }
 
 # A última tag — o "antes". Troque a tag aqui para comparar com outra versão.
-foto-codec-antes = { package = "foto-codec", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.1" }
-raw-codec-antes = { package = "raw-codec", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.1" }
-revelacao-core-antes = { package = "revelacao-core", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.1" }
-editor-core-antes = { package = "editor-core", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.1" }
+foto-codec-antes = { package = "foto-codec", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.2" }
+raw-codec-antes = { package = "raw-codec", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.2" }
+revelacao-core-antes = { package = "revelacao-core", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.2" }
+editor-core-antes = { package = "editor-core", git = "https://github.com/alexkads/nucleo-da-foto", tag = "v0.1.2" }
 
 [dev-dependencies]
 gpui-kit = { version = "0.8", features = ["test-support"] }
