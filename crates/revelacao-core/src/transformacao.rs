@@ -42,7 +42,10 @@
 
 use std::borrow::Cow;
 
-use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
+use image::{DynamicImage, GenericImageView, RgbaImage};
+// Os testes daqui usam `Rgba` pelo `use super::*`.
+#[cfg(test)]
+use image::Rgba;
 use nalgebra::{Matrix3, Vector3};
 
 use crate::perspectiva::{Orientacao, Perspectiva};
@@ -788,6 +791,11 @@ fn aplicar_com_corte(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> Dy
     if corte.tem_perspectiva() {
         return aplicar_projetiva(imagem, corte, recortar);
     }
+    if corte.angulo() == 0.0 {
+        if let Some(feita) = girar_e_recortar(imagem, corte, recortar) {
+            return feita;
+        }
+    }
 
     let base = espelhar_e_girar(imagem, corte);
 
@@ -859,6 +867,104 @@ fn espelhar_e_girar<'a>(imagem: &'a DynamicImage, corte: &Corte) -> Cow<'a, Dyna
     }
 }
 
+/// Espelhos, giro de 90° e recorte reto **numa passada só**: cada pixel de
+/// saída copiado direto do lugar dele na origem.
+///
+/// 🔑 É o mesmo resultado de [`espelhar_e_girar`] seguido de [`recortar_reto`]
+/// (ou da foto inteira girada, no Enquadrar), byte a byte — é uma permutação
+/// de pixels —, sem a imagem girada inteira no meio, sem `get_pixel` e com as
+/// linhas divididas entre os núcleos. Na bancada, girar 90° e recortar uma
+/// foto de 12 MP levava 118 ms.
+///
+/// Os índices seguem a ordem de hoje: `fliph`, `flipv`, depois o giro, com as
+/// contas do `image` (`rotate90`: o pixel `(X, Y)` da saída vem de
+/// `(Y, H − 1 − X)`; `rotate180`: de `(W − 1 − X, H − 1 − Y)`; `rotate270`: de
+/// `(W − 1 − Y, X)`). `None` para formatos que não são RGBA8 nem RGB8 — esses
+/// seguem o caminho de sempre.
+fn girar_e_recortar(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> Option<DynamicImage> {
+    let (dados, bpp) = match imagem {
+        DynamicImage::ImageRgba8(rgba) => (rgba.as_raw().as_slice(), 4usize),
+        DynamicImage::ImageRgb8(rgb) => (rgb.as_raw().as_slice(), 3),
+        _ => return None,
+    };
+    let (w, h) = imagem.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let giro = corte.giro_90().rem_euclid(4);
+    let (gw, gh) = if giro % 2 == 1 { (h, w) } else { (w, h) };
+    // O mesmo limite do `crop_imm`.
+    let (cx, cy, cw, ch) = if recortar {
+        let (x, y, cw, ch) = corte.retangulo(gw, gh);
+        let (x, y) = (x.min(gw), y.min(gh));
+        (x, y, cw.min(gw - x), ch.min(gh - y))
+    } else {
+        (0, 0, gw, gh)
+    };
+    let (eh, ev) = (corte.espelho_h(), corte.espelho_v());
+    let de_onde = |gx: u32, gy: u32| -> usize {
+        let (x, y) = match giro {
+            1 => (gy, h - 1 - gx),
+            2 => (w - 1 - gx, h - 1 - gy),
+            3 => (w - 1 - gy, gx),
+            _ => (gx, gy),
+        };
+        let x = if eh { w - 1 - x } else { x };
+        let y = if ev { h - 1 - y } else { y };
+        (y as usize * w as usize + x as usize) * bpp
+    };
+    let mut destino = vec![0u8; cw as usize * ch as usize * bpp];
+    por_linhas(&mut destino, cw as usize * bpp, |j, linha| {
+        for (i, saida) in linha.chunks_exact_mut(bpp).enumerate() {
+            let o = de_onde(cx + i as u32, cy + j);
+            saida.copy_from_slice(&dados[o..o + bpp]);
+        }
+    });
+    Some(match bpp {
+        4 => DynamicImage::ImageRgba8(RgbaImage::from_raw(cw, ch, destino)?),
+        _ => DynamicImage::ImageRgb8(image::RgbImage::from_raw(cw, ch, destino)?),
+    })
+}
+
+/// Preenche `destino` linha a linha (`preencher(j, linha)`), com as linhas
+/// divididas entre os núcleos fora do navegador. No `wasm32` não há threads, e
+/// vai uma por vez — como em [`aplicar_projetiva`].
+fn por_linhas(
+    destino: &mut [u8],
+    bytes_por_linha: usize,
+    preencher: impl Fn(u32, &mut [u8]) + Sync,
+) {
+    if bytes_por_linha == 0 {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let linhas = destino.len() / bytes_por_linha;
+        let nucleos = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(16);
+        // Pouco trabalho não paga as threads.
+        if nucleos > 1 && destino.len() >= 1 << 18 {
+            let por_bloco = linhas.div_ceil(nucleos).max(1);
+            std::thread::scope(|escopo| {
+                for (k, bloco) in destino.chunks_mut(por_bloco * bytes_por_linha).enumerate() {
+                    let preencher = &preencher;
+                    escopo.spawn(move || {
+                        for (dj, linha) in bloco.chunks_exact_mut(bytes_por_linha).enumerate() {
+                            preencher((k * por_bloco + dj) as u32, linha);
+                        }
+                    });
+                }
+            });
+            return;
+        }
+    }
+    for (j, linha) in destino.chunks_exact_mut(bytes_por_linha).enumerate() {
+        preencher(j as u32, linha);
+    }
+}
+
 /// O recorte quando não há ângulo: cópia de bytes, sem reamostragem.
 ///
 /// 🔑 Vale o caminho separado porque **reamostrar sem precisar borra**: uma
@@ -908,10 +1014,13 @@ fn endireitar_e_recortar(base: &DynamicImage, corte: &Corte) -> DynamicImage {
     let aspecto = largura_f / altura_f;
     let (sin, cos) = (-corte.angulo().to_radians()).sin_cos();
 
-    let mut destino = RgbaImage::new(saida_w, saida_h);
-
-    for j in 0..saida_h {
-        for i in 0..saida_w {
+    // 🔑 Direto nos bytes (`amostrar_bruto`, a mesma conta de `amostrar`) e
+    // com as linhas divididas entre os núcleos: a mesma foto, sem `get_pixel`
+    // nem `put_pixel` por pixel numa thread só (442 ms em 12 MP).
+    let dados = origem.as_raw();
+    let mut destino = vec![0u8; saida_w as usize * saida_h as usize * 4];
+    por_linhas(&mut destino, saida_w as usize * 4, |j, linha| {
+        for (i, saida) in linha.chunks_exact_mut(4).enumerate() {
             let fx = corte.x() + ((i as f32 + 0.5) / saida_w as f32) * corte.largura();
             let fy = corte.y() + ((j as f32 + 0.5) / saida_h as f32) * corte.altura();
 
@@ -924,11 +1033,13 @@ fn endireitar_e_recortar(base: &DynamicImage, corte: &Corte) -> DynamicImage {
             let u = (0.5 + rx / aspecto) * largura_f - 0.5;
             let v = (0.5 + ry) * altura_f - 0.5;
 
-            destino.put_pixel(i, j, amostrar(&origem, u, v));
+            saida.copy_from_slice(&amostrar_bruto(dados, largura, altura, u, v));
         }
-    }
+    });
 
-    DynamicImage::ImageRgba8(destino)
+    DynamicImage::ImageRgba8(
+        RgbaImage::from_raw(saida_w, saida_h, destino).expect("o buffer tem o tamanho da saída"),
+    )
 }
 
 /// Os pixels em RGBA8 — **emprestados** quando a foto já é RGBA8.
@@ -1085,9 +1196,11 @@ pub fn inclinar_inteira(base: &DynamicImage, angulo: f32) -> DynamicImage {
     let (largura, altura) = origem.dimensions();
     let (cx, cy) = (largura as f32 / 2., altura as f32 / 2.);
     let (sin, cos) = (-angulo.to_radians()).sin_cos();
-    let mut destino = RgbaImage::new(largura, altura);
-    for j in 0..altura {
-        for i in 0..largura {
+    // Direto nos bytes e em faixas, como `endireitar_e_recortar`.
+    let dados = origem.as_raw();
+    let mut destino = vec![0u8; largura as usize * altura as usize * 4];
+    por_linhas(&mut destino, largura as usize * 4, |j, linha| {
+        for (i, saida) in linha.chunks_exact_mut(4).enumerate() {
             let px = i as f32 + 0.5 - cx;
             let py = j as f32 + 0.5 - cy;
             let u = cx + px * cos - py * sin - 0.5;
@@ -1095,10 +1208,12 @@ pub fn inclinar_inteira(base: &DynamicImage, angulo: f32) -> DynamicImage {
             if u < -0.5 || v < -0.5 || u > largura as f32 - 0.5 || v > altura as f32 - 0.5 {
                 continue;
             }
-            destino.put_pixel(i, j, amostrar(&origem, u, v));
+            saida.copy_from_slice(&amostrar_bruto(dados, largura, altura, u, v));
         }
-    }
-    DynamicImage::ImageRgba8(destino)
+    });
+    DynamicImage::ImageRgba8(
+        RgbaImage::from_raw(largura, altura, destino).expect("o buffer tem o tamanho da saída"),
+    )
 }
 
 /// Amostragem bilinear, grudando na borda quando cai fora.
@@ -1107,7 +1222,8 @@ pub fn inclinar_inteira(base: &DynamicImage, angulo: f32) -> DynamicImage {
 /// fora da foto vira uma faixa da cor da borda, que é o que o legado mostra (a
 /// malha dele amostra com `clamp`). Transparente ali apareceria como buraco preto
 /// na exportação.
-fn amostrar(origem: &RgbaImage, u: f32, v: f32) -> Rgba<u8> {
+#[cfg(test)]
+fn amostrar(origem: &RgbaImage, u: f32, v: f32) -> image::Rgba<u8> {
     let (largura, altura) = origem.dimensions();
     let max_x = largura as i64 - 1;
     let max_y = altura as i64 - 1;
@@ -1138,7 +1254,7 @@ fn amostrar(origem: &RgbaImage, u: f32, v: f32) -> Rgba<u8> {
         canais[k] = (cima + (baixo - cima) * fy).round().clamp(0.0, 255.0) as u8;
     }
 
-    Rgba(canais)
+    image::Rgba(canais)
 }
 
 #[cfg(test)]
@@ -1364,6 +1480,140 @@ mod testes {
     }
 
     use super::*;
+
+    /// O caminho de antes de 2026-10-21: girar a imagem inteira e recortar;
+    /// endireitar e inclinar com `get_pixel`/`put_pixel`, numa thread.
+    fn de_antes(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> DynamicImage {
+        let base = espelhar_e_girar(imagem, corte);
+        if !recortar {
+            if corte.angulo() != 0.0 {
+                return inclinar_antigo(&base, corte.angulo());
+            }
+            return base.into_owned();
+        }
+        if corte.angulo() == 0.0 {
+            return recortar_reto(&base, corte);
+        }
+        endireitar_antigo(&base, corte)
+    }
+
+    fn endireitar_antigo(base: &DynamicImage, corte: &Corte) -> DynamicImage {
+        let origem = em_rgba(base);
+        let (largura, altura) = origem.dimensions();
+        let (largura_f, altura_f) = (largura as f32, altura as f32);
+
+        // `base` já está girada, e `dimensoes_de_saida` volta a girar — por isso a
+        // chamada usa as dimensões **de origem** (as giradas, desgiradas de novo é
+        // o mesmo par quando o giro é o mesmo). Aqui basta a conta direta, que é a
+        // que aquele método faz no ramo com ângulo.
+        let (saida_w, saida_h) = corte.dimensoes_de_saida(
+            if corte.giro_90().rem_euclid(4) % 2 == 1 {
+                altura
+            } else {
+                largura
+            },
+            if corte.giro_90().rem_euclid(4) % 2 == 1 {
+                largura
+            } else {
+                altura
+            },
+        );
+
+        // O aspecto entra na conta porque a rotação é geométrica, e o espaço
+        // normalizado (0..1 nos dois eixos) não é. Sem esta correção, endireitar uma
+        // foto deitada gira demais na vertical e de menos na horizontal — o horizonte
+        // sai torto para o outro lado.
+        let aspecto = largura_f / altura_f;
+        let (sin, cos) = (-corte.angulo().to_radians()).sin_cos();
+
+        let mut destino = RgbaImage::new(saida_w, saida_h);
+
+        for j in 0..saida_h {
+            for i in 0..saida_w {
+                let fx = corte.x() + ((i as f32 + 0.5) / saida_w as f32) * corte.largura();
+                let fy = corte.y() + ((j as f32 + 0.5) / saida_h as f32) * corte.altura();
+
+                let px = (fx - 0.5) * aspecto;
+                let py = fy - 0.5;
+
+                let rx = px * cos - py * sin;
+                let ry = px * sin + py * cos;
+
+                let u = (0.5 + rx / aspecto) * largura_f - 0.5;
+                let v = (0.5 + ry) * altura_f - 0.5;
+
+                destino.put_pixel(i, j, amostrar(&origem, u, v));
+            }
+        }
+
+        DynamicImage::ImageRgba8(destino)
+    }
+
+    fn inclinar_antigo(base: &DynamicImage, angulo: f32) -> DynamicImage {
+        let origem = em_rgba(base);
+        let (largura, altura) = origem.dimensions();
+        let (cx, cy) = (largura as f32 / 2., altura as f32 / 2.);
+        let (sin, cos) = (-angulo.to_radians()).sin_cos();
+        let mut destino = RgbaImage::new(largura, altura);
+        for j in 0..altura {
+            for i in 0..largura {
+                let px = i as f32 + 0.5 - cx;
+                let py = j as f32 + 0.5 - cy;
+                let u = cx + px * cos - py * sin - 0.5;
+                let v = cy + px * sin + py * cos - 0.5;
+                if u < -0.5 || v < -0.5 || u > largura as f32 - 0.5 || v > altura as f32 - 0.5 {
+                    continue;
+                }
+                destino.put_pixel(i, j, amostrar(&origem, u, v));
+            }
+        }
+        DynamicImage::ImageRgba8(destino)
+    }
+
+    /// 🔑 **Giro, espelho, recorte, endireitar e inclinar por índice e em
+    /// faixas dão a mesma foto, byte a byte, que o caminho de antes** — nos 8
+    /// giros × espelhos, com e sem recorte, com e sem ângulo, em RGBA (a
+    /// revelada) e em RGB (um JPEG aberto), num tamanho ímpar e grande o
+    /// bastante para as faixas entrarem.
+    #[test]
+    fn por_indice_e_em_faixas_e_a_foto_de_antes() {
+        let rgba = DynamicImage::ImageRgba8(RgbaImage::from_fn(611, 437, |x, y| {
+            Rgba([
+                (x * 7) as u8,
+                (y * 5) as u8,
+                ((x ^ y) * 3) as u8,
+                (x + y) as u8,
+            ])
+        }));
+        let rgb = DynamicImage::ImageRgb8(rgba.to_rgb8());
+        for imagem in [&rgba, &rgb] {
+            for giro in 0..4 {
+                for (eh, ev) in [(false, false), (true, false), (false, true), (true, true)] {
+                    for angulo in [0.0, 3.0, -0.5] {
+                        for (x, y, w, h) in [(0.0, 0.0, 1.0, 1.0), (0.13, 0.07, 0.71, 0.66)] {
+                            let corte = Corte::novo(x, y, w, h, giro, angulo, eh, ev);
+                            for recortar in [true, false] {
+                                let novo = aplicar(imagem, &corte, recortar);
+                                let antes = if e_identidade(&corte) {
+                                    imagem.clone()
+                                } else {
+                                    de_antes(imagem, &corte, recortar)
+                                };
+                                assert_eq!(novo.color(), antes.color());
+                                assert_eq!(novo.dimensions(), antes.dimensions());
+                                assert!(
+                                    novo.as_bytes() == antes.as_bytes(),
+                                    "giro {giro} espelhos {eh}/{ev} ângulo {angulo} \
+                                     ({x}, {y}, {w}, {h}) recortar {recortar} {:?}",
+                                    imagem.color()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     fn sem_corte() -> Corte {
         Corte::novo(0.0, 0.0, 1.0, 1.0, 0, 0.0, false, false)

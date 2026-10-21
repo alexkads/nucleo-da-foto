@@ -1,5 +1,28 @@
 # Changelog
 
+## Próxima (0.1.3) — ainda sem tag
+
+Sem mudança na foto que sai nem na API (`make semver`: nada pede versão nova). Cada caminho novo tem
+o teste que o compara byte a byte com o de antes.
+
+### Desempenho
+Na bancada (`make bancada`, contra a v0.1.2), foto de 12 MP, 4 núcleos:
+
+| Caminho | v0.1.2 | Agora |
+|---|---:|---:|
+| Enquadrar: girar 90° e recortar | 156 ms | 26 ms |
+| Enquadrar: endireitar 3° e recortar | 521 ms | 159 ms |
+| Tela do Enquadrar: endireitar 3° (foto inteira) | 750 ms | 230 ms |
+| Compor a foto inteira (salvar, varinha mágica) | 312 ms | 149 ms |
+
+- `revelacao-core`: sem ângulo, espelhos + giro de 90° + recorte reto viram uma passada só, por
+  índice, sem a imagem girada inteira no meio (RGBA8 e RGB8). Endireitar e a tela do Enquadrar
+  amostram direto nos bytes, com as linhas divididas entre os núcleos (no wasm32, uma por vez).
+- `editor-core`: compor uma região grande (a foto inteira) em faixas de linhas, uma por núcleo.
+
+### Novo
+- A bancada compara com a **v0.1.2** e ganhou o caso "Endireitar 3° na tela do Enquadrar".
+
 ## v0.1.2 — 19/out/2026
 
 Sem mudança na foto que sai: cada caminho novo tem o teste que o compara byte a byte com o antigo.

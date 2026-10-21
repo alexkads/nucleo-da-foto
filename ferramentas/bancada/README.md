@@ -22,7 +22,7 @@ Na janela:
 
 | Coluna | O que é |
 |---|---|
-| Antes | Mediana do caminho na **última tag** (`v0.1.1`). |
+| Antes | Mediana do caminho na **última tag** (`v0.1.2`). |
 | Depois | Mediana do caminho **nesta pasta**. |
 | Ganho | Antes ÷ depois. Verde a partir de 1,1×, vermelho até 0,9×. |
 | Mesma foto | ✓ quando as duas saídas são iguais byte a byte. ✗ é quebra de comportamento. |

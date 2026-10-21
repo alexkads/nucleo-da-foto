@@ -165,7 +165,43 @@ fn compor_deslocado(
     if ret.vazio() {
         return;
     }
-    Composicao::nova(base, doc, sem).compor_em(&ret, destino, largura_do_destino, origem);
+    // 🔑 **Em faixas de linhas, uma por núcleo**, quando o retângulo é grande
+    // (salvar, a varinha mágica, `Sessao::compor`): a foto inteira de 12 MP
+    // custava 240 ms numa thread. Cada faixa prepara a sua `Composicao` (como
+    // a vista faz) e escreve só as linhas dela; a conta de cada pixel é a
+    // mesma — a foto sai igual byte a byte.
+    let nucleos = crate::nucleos().unwrap_or(1) as u32;
+    let pixels = ret.largura as u64 * ret.altura as u64;
+    if nucleos <= 1 || pixels < 1 << 20 {
+        Composicao::nova(base, doc, sem).compor_em(&ret, destino, largura_do_destino, origem);
+        return;
+    }
+    let por_faixa = ret
+        .altura
+        .div_ceil(nucleos)
+        .next_multiple_of(crate::tiles::LADO_DO_TILE);
+    let linha = largura_do_destino as usize * 3;
+    let primeira = (ret.y - origem.1) as usize * linha;
+    std::thread::scope(|escopo| {
+        for (k, pedaco) in destino[primeira..]
+            .chunks_mut(por_faixa as usize * linha)
+            .enumerate()
+        {
+            let y = ret.y + k as u32 * por_faixa;
+            if y >= ret.baixo() {
+                break;
+            }
+            let faixa = Retangulo::novo(ret.x, y, ret.largura, por_faixa.min(ret.baixo() - y));
+            escopo.spawn(move || {
+                Composicao::nova(base, doc, sem).compor_em(
+                    &faixa,
+                    pedaco,
+                    largura_do_destino,
+                    (origem.0, y),
+                );
+            });
+        }
+    });
 }
 
 /// A composição de um documento **preparada uma vez** para ser feita em
@@ -620,6 +656,50 @@ pub fn interseccao(a: &Retangulo, b: &Retangulo) -> Retangulo {
 mod testes {
     use super::*;
     use crate::documento::BaseRef;
+
+    /// 🔑 **Em faixas paralelas, a mesma foto byte a byte** — a foto inteira e
+    /// um recorte que não começa na borda de um tile, sem e com um conjunto
+    /// de fora (o "original" da pele).
+    #[test]
+    fn compor_em_faixas_e_compor_numa_passada_so() {
+        let (base, doc) = crate::testes_comuns::documento_completo_de(1400, 1000);
+        let (w, h) = base.dimensions();
+        let numa_passada = |ret: &Retangulo, sem| {
+            let mut saida = RgbImage::new(ret.largura, ret.altura);
+            Composicao::nova(&base, &doc, sem).compor_em(
+                ret,
+                &mut saida,
+                ret.largura,
+                (ret.x, ret.y),
+            );
+            saida.into_raw()
+        };
+        let inteira = Retangulo::inteiro(w, h);
+        assert!(
+            inteira.largura * inteira.altura >= 1 << 20,
+            "tem de passar do limite das faixas"
+        );
+        assert_eq!(compor(&base, &doc).into_raw(), numa_passada(&inteira, None));
+        // Dentro da foto, sem começar nem terminar na borda de um tile.
+        let recorte = Retangulo::novo(37, 101, 1250, 850);
+        assert!(recorte.largura * recorte.altura >= 1 << 20);
+        assert_eq!(
+            compor_recorte(&base, &doc, &recorte).into_raw(),
+            numa_passada(&recorte, None)
+        );
+        let sem = Some((1, doc.fim_do_conjunto(1)));
+        let mut saida = RgbImage::new(recorte.largura, recorte.altura);
+        compor_deslocado(
+            &base,
+            &doc,
+            &recorte,
+            &mut saida,
+            recorte.largura,
+            (recorte.x, recorte.y),
+            sem,
+        );
+        assert_eq!(saida.into_raw(), numa_passada(&recorte, sem));
+    }
 
     fn base() -> RgbImage {
         RgbImage::from_fn(300, 280, |x, y| {

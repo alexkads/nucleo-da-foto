@@ -102,6 +102,12 @@ const TODOS: &[Caso] = &[
         rodar: enquadrar_inclinado,
     },
     Caso {
+        grupo: "Enquadrar",
+        nome: "Endireitar 3° na tela do Enquadrar (foto inteira)",
+        so_raw: false,
+        rodar: enquadrar_na_tela,
+    },
+    Caso {
         grupo: "Editor",
         nome: "Arrastar o slider dos Níveis (vista de 1600 px)",
         so_raw: false,
@@ -265,17 +271,14 @@ fn jpeg(foto: &Foto) -> Medida {
 }
 
 /// O `comprimir_jpeg` do `revelacao-web`: os pixels chegam emprestados do
-/// JavaScript. Antes eram copiados numa imagem dona; agora vão direto.
+/// JavaScript e vão direto ao codificador (`codificar_rgba`, desde a 0.1.2).
 fn jpeg_do_navegador(foto: &Foto) -> Medida {
     let (w, h) = foto.rgba.dimensions();
     let crus: &[u8] = foto.rgba.as_raw();
     let (a, d, sa, sd) = comparar(
         vezes(foto, 3),
         || (),
-        |_| {
-            let dona = RgbaImage::from_raw(w, h, crus.to_vec())?;
-            foto_codec_antes::codificar(&DynamicImage::ImageRgba8(dona), 90).ok()
-        },
+        |_| foto_codec_antes::codificar_rgba(crus, w, h, 90).ok(),
         || (),
         |_| foto_codec::codificar_rgba(crus, w, h, 90).ok(),
     );
@@ -296,9 +299,9 @@ fn pixels(imagem: &DynamicImage) -> (u32, u32, Vec<u8>) {
     )
 }
 
-/// O caminho do resultado da GPU: quem chama já é dono da revelada. Antes ela
-/// era emprestada e clonada; agora é tomada. O clone que dá a cada lado a sua
-/// revelada fica fora do relógio.
+/// O caminho do resultado da GPU: quem chama já é dono da revelada e a toma
+/// (`aplicar_dono`, desde a 0.1.2). O clone que dá a cada lado a sua revelada
+/// fica fora do relógio.
 fn enquadrar_sem_corte(foto: &Foto) -> Medida {
     use revelacao_core::transformacao as depois;
     use revelacao_core_antes::transformacao as antes;
@@ -308,7 +311,7 @@ fn enquadrar_sem_corte(foto: &Foto) -> Medida {
     let (a, d, sa, sd) = comparar(
         vezes(foto, 9),
         || revelada.clone(),
-        |r| antes::aplicar(&r, &corte_antes, true),
+        |r| antes::aplicar_dono(r, &corte_antes, true),
         || revelada.clone(),
         |r| depois::aplicar_dono(r, &corte_depois, true),
     );
@@ -320,7 +323,17 @@ fn enquadrar_sem_corte(foto: &Foto) -> Medida {
 }
 
 /// Um enquadramento com corte, na tag e aqui: `(x, y, w, h, giro, ângulo)`.
-fn enquadrar(foto: &Foto, (x, y, w, h, giro, angulo): (f32, f32, f32, f32, i32, f32)) -> Medida {
+fn enquadrar(foto: &Foto, corte: (f32, f32, f32, f32, i32, f32)) -> Medida {
+    enquadrar_com(foto, corte, true)
+}
+
+/// [`enquadrar`]; `recortar` falso é a tela do Enquadrar (a foto inteira,
+/// girada e endireitada, com o retângulo desenhado por cima).
+fn enquadrar_com(
+    foto: &Foto,
+    (x, y, w, h, giro, angulo): (f32, f32, f32, f32, i32, f32),
+    recortar: bool,
+) -> Medida {
     use revelacao_core::transformacao as depois;
     use revelacao_core_antes::transformacao as antes;
     let revelada = DynamicImage::ImageRgba8(foto.rgba.clone());
@@ -329,15 +342,19 @@ fn enquadrar(foto: &Foto, (x, y, w, h, giro, angulo): (f32, f32, f32, f32, i32, 
     let (a, d, sa, sd) = comparar(
         vezes(foto, 5),
         || (),
-        |_| antes::aplicar(&revelada, &corte_antes, true),
+        |_| antes::aplicar(&revelada, &corte_antes, recortar),
         || (),
-        |_| depois::aplicar(&revelada, &corte_depois, true),
+        |_| depois::aplicar(&revelada, &corte_depois, recortar),
     );
     Medida {
         antes_ms: a,
         depois_ms: d,
         mesma_saida: pixels(&sa) == pixels(&sd),
     }
+}
+
+fn enquadrar_na_tela(foto: &Foto) -> Medida {
+    enquadrar_com(foto, (0.1, 0.1, 0.8, 0.8, 0, 3.0), false)
 }
 
 fn enquadrar_reto(foto: &Foto) -> Medida {
