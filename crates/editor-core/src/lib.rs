@@ -40,6 +40,8 @@ pub mod vetor;
 pub mod vista;
 
 #[cfg(test)]
+mod testes_comuns;
+#[cfg(test)]
 mod testes_da_caneta;
 #[cfg(test)]
 mod testes_da_etapa_16;
