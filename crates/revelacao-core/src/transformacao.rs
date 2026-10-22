@@ -926,32 +926,33 @@ fn girar_e_recortar(imagem: &DynamicImage, corte: &Corte, recortar: bool) -> Opt
     })
 }
 
-/// Preenche `destino` linha a linha (`preencher(j, linha)`), com as linhas
-/// divididas entre os núcleos fora do navegador. No `wasm32` não há threads, e
-/// vai uma por vez — como em [`aplicar_projetiva`].
-fn por_linhas(
-    destino: &mut [u8],
-    bytes_por_linha: usize,
-    preencher: impl Fn(u32, &mut [u8]) + Sync,
+/// Preenche `destino` linha a linha (`preencher(j, linha)`, `por_linha`
+/// valores cada), com as linhas divididas entre os núcleos fora do navegador.
+/// No `wasm32` não há threads, e vai uma por vez — como em
+/// [`aplicar_projetiva`].
+pub(crate) fn por_linhas<T: Send>(
+    destino: &mut [T],
+    por_linha: usize,
+    preencher: impl Fn(u32, &mut [T]) + Sync,
 ) {
-    if bytes_por_linha == 0 {
+    if por_linha == 0 {
         return;
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let linhas = destino.len() / bytes_por_linha;
+        let linhas = destino.len() / por_linha;
         let nucleos = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
             .min(16);
         // Pouco trabalho não paga as threads.
-        if nucleos > 1 && destino.len() >= 1 << 18 {
+        if nucleos > 1 && std::mem::size_of_val(destino) >= 1 << 18 {
             let por_bloco = linhas.div_ceil(nucleos).max(1);
             std::thread::scope(|escopo| {
-                for (k, bloco) in destino.chunks_mut(por_bloco * bytes_por_linha).enumerate() {
+                for (k, bloco) in destino.chunks_mut(por_bloco * por_linha).enumerate() {
                     let preencher = &preencher;
                     escopo.spawn(move || {
-                        for (dj, linha) in bloco.chunks_exact_mut(bytes_por_linha).enumerate() {
+                        for (dj, linha) in bloco.chunks_exact_mut(por_linha).enumerate() {
                             preencher((k * por_bloco + dj) as u32, linha);
                         }
                     });
@@ -960,7 +961,7 @@ fn por_linhas(
             return;
         }
     }
-    for (j, linha) in destino.chunks_exact_mut(bytes_por_linha).enumerate() {
+    for (j, linha) in destino.chunks_exact_mut(por_linha).enumerate() {
         preencher(j as u32, linha);
     }
 }
