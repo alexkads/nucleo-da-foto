@@ -10,6 +10,7 @@
 use std::hint::black_box;
 
 use image::{DynamicImage, RgbaImage};
+use revelacao_core::guia;
 use revelacao_core::preenchimento::preencher_buraco;
 use revelacao_core::transformacao::{self, Corte};
 
@@ -73,6 +74,32 @@ fn main() {
     medir("enquadrar 2560²: endireitar 3° e recortar", 5, || {
         black_box(transformacao::aplicar(&revelada, &inclinado, true));
     });
+
+    // A guia da Claridade, Textura e Remover névoa: na cópia de trabalho e na
+    // exportação de um arquivo de 12 MP.
+    let trabalho = revelada.to_rgba8();
+    medir(
+        "guia (Claridade/Textura/Névoa) da cópia de 2560²",
+        5,
+        || {
+            black_box(guia::calcular(trabalho.as_raw(), 2560, 2560));
+        },
+    );
+    let arquivo = RgbaImage::from_fn(4000, 3000, |x, y| {
+        image::Rgba([
+            (x * 7 + y) as u8,
+            ((y * 3) ^ x) as u8,
+            ((x + y) / 5) as u8,
+            255,
+        ])
+    });
+    medir(
+        "guia (Claridade/Textura/Névoa) de um arquivo de 12 MP",
+        3,
+        || {
+            black_box(guia::calcular(arquivo.as_raw(), 4000, 3000));
+        },
+    );
 
     // Content-Aware: um buraco de 80² numa estampa de 400×300.
     let (w, h) = (400u32, 300u32);

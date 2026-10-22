@@ -14,14 +14,34 @@ Na bancada (`make bancada`, contra a v0.1.2), foto de 12 MP, 4 núcleos:
 | Enquadrar: endireitar 3° e recortar | 521 ms | 159 ms |
 | Tela do Enquadrar: endireitar 3° (foto inteira) | 750 ms | 230 ms |
 | Compor a foto inteira (salvar, varinha mágica) | 312 ms | 149 ms |
+| Guia da Claridade, Textura e Remover névoa (1º uso numa foto) | 127 ms | 46 ms |
+| Começar o ⌘T ou o Mover com seleção (o conteúdo de uma elipse) | 545 ms | 51 ms |
+| ⌘T deslocando, por evento do ponteiro | 217 ms | 22 ms |
+| Mover com seleção, por evento do ponteiro | 227 ms | 22 ms |
+| Mover só o contorno da seleção, por evento | 163 ms | 4 ms |
 
 - `revelacao-core`: sem ângulo, espelhos + giro de 90° + recorte reto viram uma passada só, por
   índice, sem a imagem girada inteira no meio (RGBA8 e RGB8). Endireitar e a tela do Enquadrar
   amostram direto nos bytes, com as linhas divididas entre os núcleos (no wasm32, uma por vez).
 - `editor-core`: compor uma região grande (a foto inteira) em faixas de linhas, uma por núcleo.
+- `editor-core`, **⌘T e Mover com seleção**: o começo do gesto acha o tile da camada e o da
+  seleção uma vez por tile (era uma busca por pixel), em faixas. O desenho de cada evento acha o
+  tile pela coluna e lê `v / 255` de uma tabela; com deslocamento inteiro (o Mover com seleção, o
+  colar) cada ponto cai no centro de um pixel e o desenho copia trechos de linha, sem a conta
+  bilinear. Pôr o desenhado por cima do fundo vai um tile por núcleo.
+- `editor-core`: andar a seleção (o contorno, e o fim do Mover com seleção) copia trechos de linha
+  de tile para tile, em vez de ler o valor de cada pixel.
+- `revelacao-core`: a guia da Claridade, da Textura e do Remover névoa reduz a foto em faixas de
+  linhas (no wasm32, uma por vez), e as passadas verticais da caixa e do mínimo andam linha a
+  linha, e não coluna a coluna — a mesma soma, na mesma ordem. Numa thread só (o site), 89 → 48 ms
+  numa foto de 2560 × 1707.
 
 ### Novo
-- A bancada compara com a **v0.1.2** e ganhou o caso "Endireitar 3° na tela do Enquadrar".
+- A bancada compara com a **v0.1.2** e ganhou os casos "Endireitar 3° na tela do Enquadrar", a
+  guia, o começo do Mover com seleção, o Mover com seleção e o contorno por evento; o arrasto
+  passa a conferir também a seleção, tile a tile.
+- `cargo bench -p editor-core` e `-p revelacao-core`: o ⌘T (começar, desenhar com e sem
+  deslocamento inteiro, pôr por cima), a seleção (andar, transformar) e a guia.
 
 ## v0.1.2 — 19/out/2026
 
