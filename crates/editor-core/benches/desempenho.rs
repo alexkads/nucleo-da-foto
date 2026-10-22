@@ -9,7 +9,7 @@ use std::hint::black_box;
 
 use editor_core::composicao;
 use editor_core::operacoes;
-use editor_core::selecao::{Forma, Selecao};
+use editor_core::selecao::{Forma, Molde, Selecao};
 use editor_core::tiles::CamadaDePixels;
 use editor_core::transformar::{self, Conteudo, Transformacao};
 use editor_core::vista::Vista;
@@ -134,6 +134,34 @@ fn main() {
         5,
         || {
             black_box(elipse.deslocada(13, 7));
+        },
+    );
+
+    // Transformar seleção: o molde tirado no começo, amostrado a cada evento.
+    medir(
+        "transformar a seleção: começar (elipse de 7,6 MP)",
+        3,
+        || {
+            black_box(Molde::de(&elipse));
+        },
+    );
+    let molde = Molde::de(&elipse);
+    let caixa: transformar::Caixa = molde.caixa().into();
+    let c = girando.inversa(&caixa, 0.0, 0.0);
+    let (ex, ey) = (
+        girando.inversa(&caixa, 1.0, 0.0),
+        girando.inversa(&caixa, 0.0, 1.0),
+    );
+    medir(
+        "transformar a seleção (elipse de 7,6 MP), escala e giro",
+        3,
+        || {
+            black_box(molde.transformado(
+                &tudo,
+                c,
+                (ex.0 - c.0, ex.1 - c.1),
+                (ey.0 - c.0, ey.1 - c.1),
+            ));
         },
     );
 }

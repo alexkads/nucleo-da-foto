@@ -1029,23 +1029,48 @@ impl Selecao {
             return self.clone();
         }
         let mut nova = Selecao::vazia(self.largura, self.altura);
+        // 🔑 **Tile a tile do destino, com trechos de linha copiados dos tiles
+        // da origem** — e não o `valor` de cada pixel (uma busca no mapa por
+        // pixel), que custava 150 ms numa elipse de 7,6 MP a cada evento do
+        // arrasto do contorno. O valor de cada pixel é o de sempre: o da
+        // origem andada, e 0 no que vem de fora dela.
         let l = self.limites();
-        let destino = Retangulo::novo(
-            (l.x as i64 + dx).max(0) as u32,
-            (l.y as i64 + dy).max(0) as u32,
-            l.largura,
-            l.altura,
-        )
-        .limitado(self.largura, self.altura);
-        nova.pintar(&destino, |x, y| {
-            let (ox, oy) = (x as i64 - dx, y as i64 - dy);
-            if ox < 0 || oy < 0 {
-                0
-            } else {
-                self.valor(ox as u32, oy as u32)
+        let (largura, altura) = (self.largura as i64, self.altura as i64);
+        let (x0, y0) = ((l.x as i64 + dx).max(0), (l.y as i64 + dy).max(0));
+        let x1 = (l.direita() as i64 + dx).min(largura);
+        let y1 = (l.baixo() as i64 + dy).min(altura);
+        if x1 <= x0 || y1 <= y0 {
+            return nova;
+        }
+        let lado = LADO_DO_TILE as i64;
+        for ty in y0.div_euclid(lado)..=(y1 - 1).div_euclid(lado) {
+            for tx in x0.div_euclid(lado)..=(x1 - 1).div_euclid(lado) {
+                let mut tile = vec![0; BYTES];
+                let (xa, xb) = (x0.max(tx * lado), x1.min((tx + 1) * lado));
+                for y in y0.max(ty * lado)..y1.min((ty + 1) * lado) {
+                    let oy = y - dy;
+                    let mut x = xa;
+                    while x < xb {
+                        // Até o fim do tile da origem (com `dx` quebrado, o
+                        // trecho do destino vem de dois).
+                        let ox = x - dx;
+                        let fim = xb.min(x + lado - ox.rem_euclid(lado));
+                        let posicao = (ox.div_euclid(lado) as i32, oy.div_euclid(lado) as i32);
+                        if let Ok(origem) = self.do_tile(posicao) {
+                            let n = (fim - x) as usize;
+                            let i = (oy.rem_euclid(lado) * lado + ox.rem_euclid(lado)) as usize;
+                            let k = ((y - ty * lado) * lado + x - tx * lado) as usize;
+                            tile[k..k + n].copy_from_slice(&origem[i..i + n]);
+                        }
+                        x = fim;
+                    }
+                }
+                // O que ficou todo em 0 não entra (como o `enxugar`).
+                if tile.iter().any(|v| *v != 0) {
+                    nova.tiles.insert((tx as i32, ty as i32), Arc::new(tile));
+                }
             }
-        });
-        nova.enxugar();
+        }
         nova
     }
 
@@ -1275,6 +1300,90 @@ mod testes {
         let fora = s.deslocada(-110, 0);
         assert_eq!(fora.valor(0, 60), 255);
         assert_eq!(fora.valor(10, 60), 0);
+    }
+
+    /// `deslocada` de antes de 2026-10-22: o `valor` de cada pixel do destino.
+    fn deslocada_antiga(s: &Selecao, dx: i64, dy: i64) -> Selecao {
+        if s.padrao != 0 {
+            return s.clone();
+        }
+        let mut nova = Selecao::vazia(s.largura, s.altura);
+        let l = s.limites();
+        let destino = Retangulo::novo(
+            (l.x as i64 + dx).max(0) as u32,
+            (l.y as i64 + dy).max(0) as u32,
+            l.largura,
+            l.altura,
+        )
+        .limitado(s.largura, s.altura);
+        nova.pintar(&destino, |x, y| {
+            let (ox, oy) = (x as i64 - dx, y as i64 - dy);
+            if ox < 0 || oy < 0 {
+                0
+            } else {
+                s.valor(ox as u32, oy as u32)
+            }
+        });
+        nova.enxugar();
+        nova
+    }
+
+    /// 🔑 **Andar tile a tile dá a seleção de antes, tile a tile e byte a
+    /// byte**: numa foto que não é múltiplo de 256, com elipse difusa, dois
+    /// pedaços longe um do outro (tiles vazios no meio) e um laço que encosta
+    /// na borda; andando zero, pouco, por tiles inteiros, para fora pelos
+    /// quatro lados e para longe da foto.
+    #[test]
+    fn andar_por_tiles_e_o_andar_de_antes() {
+        let (l, a) = (700, 500);
+        let elipse = Selecao::da_forma_com(
+            l,
+            a,
+            &Forma::Elipse(Retangulo::novo(60, 40, 520, 380)),
+            Acabamento {
+                suavizar: true,
+                difusao: 5,
+            },
+        );
+        let mut pedacos = Selecao::da_forma(l, a, &Forma::Retangulo(Retangulo::novo(3, 2, 40, 30)));
+        pedacos.combinar(
+            &Selecao::da_forma(l, a, &Forma::Elipse(Retangulo::novo(610, 430, 90, 70))),
+            Operacao::Somar,
+        );
+        let laco = Selecao::da_forma(
+            l,
+            a,
+            &Forma::Laco(vec![
+                (0.0, 0.0),
+                (699.5, 120.0),
+                (350.0, 499.0),
+                (20.0, 480.0),
+            ]),
+        );
+        let mut invertida = elipse.clone();
+        invertida.inverter();
+        let casos = [
+            (0, 0),
+            (13, 7),
+            (-13, -7),
+            (1, -1),
+            (256, 256),
+            (-256, 512),
+            (300, -250),
+            (-650, 30),
+            (40, -470),
+            (699, 499),
+            (-700, 0),
+            (5000, -5000),
+        ];
+        for s in [&elipse, &pedacos, &laco, &invertida, &Selecao::vazia(l, a)] {
+            for (dx, dy) in casos {
+                assert!(
+                    s.deslocada(dx, dy) == deslocada_antiga(s, dx, dy),
+                    "({dx}, {dy})"
+                );
+            }
+        }
     }
 
     #[test]
