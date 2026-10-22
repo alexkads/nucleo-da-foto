@@ -1154,6 +1154,27 @@ fn linha_projetiva(
 /// [`amostrar`] direto no buffer — a mesma conta, sem `get_pixel`.
 #[inline]
 fn amostrar_bruto(dados: &[u8], largura: u32, altura: u32, u: f32, v: f32) -> [u8; 4] {
+    // 🔑 **No miolo da foto** (quase todo ponto) os quatro vizinhos existem:
+    // o piso é o truncamento e grudar na borda não muda nada. A mesma conta,
+    // escrita canal a canal para o compilador fazer os quatro de uma vez, e
+    // arredondada sem a libm: o pixel sai igual, bit a bit
+    // (`a_amostra_do_miolo_e_a_de_sempre`). Os limites são exatos até 2²⁴.
+    let limite = |lado: u32| lado.saturating_sub(1).min(1 << 24) as f32;
+    if u >= 0.0 && v >= 0.0 && u < limite(largura) && v < limite(altura) {
+        let (x0, y0) = (u as u32, v as u32);
+        let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+        let linha = largura as usize * 4;
+        let k = y0 as usize * linha + x0 as usize * 4;
+        let (cima, baixo) = (&dados[k..k + 8], &dados[k + linha..k + linha + 8]);
+        let canais = |p: &[u8]| [p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32];
+        let (a, b) = (canais(&cima[..4]), canais(&cima[4..]));
+        let (c, d) = (canais(&baixo[..4]), canais(&baixo[4..]));
+        return std::array::from_fn(|k| {
+            let cima = a[k] + (b[k] - a[k]) * fx;
+            let baixo = c[k] + (d[k] - c[k]) * fx;
+            byte_arredondado(cima + (baixo - cima) * fy)
+        });
+    }
     let max_x = largura as i64 - 1;
     let max_y = altura as i64 - 1;
     let x0 = u.floor() as i64;
@@ -1184,6 +1205,27 @@ fn amostrar_bruto(dados: &[u8], largura: u32, altura: u32, u: f32, v: f32) -> [u
         canais[k] = (cima + (baixo - cima) * fy).round().clamp(0.0, 255.0) as u8;
     }
     canais
+}
+
+/// `x.round().clamp(0.0, 255.0) as u8`, só com contas de `f32`: sem chamar
+/// o `roundf` da libm (o x86-64 de base não tem a instrução) nem converter
+/// para inteiro com saturação, e de um jeito que o compilador faz os quatro
+/// canais de uma vez. É o mesmo do `editor-core` (`byte_arredondado`).
+///
+/// Limitar a `0..=255` antes de arredondar dá o mesmo byte (e o NaN vira 0,
+/// como no `as u8`). Ali, `x + 2²³` cai num inteiro — o mais próximo, e no
+/// empate o par —, que fica nos bits de baixo da soma. Só o meio que o par
+/// levou para baixo ainda sobe, como no `round` (para longe do zero). O byte
+/// é o mesmo do `round` em todo `f32` — conferido nos 2³²
+/// (`o_byte_arredondado_e_o_do_round` confere uma parte).
+#[inline]
+fn byte_arredondado(x: f32) -> u8 {
+    const DOIS_A_23: f32 = 8_388_608.0;
+    let x = if x > 0.0 { x } else { 0.0 };
+    let x = if x < 255.0 { x } else { 255.0 };
+    let soma = x + DOIS_A_23;
+    let empate_para_baixo = x - (soma - DOIS_A_23) == 0.5;
+    (soma.to_bits() as u8) + empate_para_baixo as u8
 }
 
 /// A foto inteira girada `angulo` graus em torno do centro, no mesmo tamanho,
@@ -1612,6 +1654,77 @@ mod testes {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// 🔑 **O arredondamento só com `f32` dá o byte do `round`.** Os 2³²
+    /// `f32` foram conferidos à parte; aqui vai um a cada 4099 padrões de bits
+    /// (todo expoente, os dois sinais, NaN e infinito), cada meio de −2 a 257
+    /// com os vizinhos dele, e os casos de borda conhecidos.
+    #[test]
+    fn o_byte_arredondado_e_o_do_round() {
+        let antes = |x: f32| x.round().clamp(0.0, 255.0) as u8;
+        for bits in (0..=u32::MAX).step_by(4099) {
+            let x = f32::from_bits(bits);
+            assert_eq!(byte_arredondado(x), antes(x), "{x:e} ({bits:#x})");
+        }
+        for n in -2..=257 {
+            for x in [n as f32, n as f32 + 0.5] {
+                for x in [x.next_down(), x, x.next_up()] {
+                    assert_eq!(byte_arredondado(x), antes(x), "{x:e}");
+                }
+            }
+        }
+        for x in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+            f32::MAX,
+            f32::MIN,
+            0.499_999_97,
+            8_388_607.5,
+        ] {
+            assert_eq!(byte_arredondado(x), antes(x), "{x:e}");
+        }
+    }
+
+    /// 🔑 **A amostra do miolo é a de sempre, bit a bit** (a [`amostrar`] de
+    /// `get_pixel` e `round`), num quadriculado fino que passa pelo miolo,
+    /// pela borda grudada e pela fronteira entre os dois caminhos — nos
+    /// centros e nas arestas dos pixels e um passo de `f32` antes e depois —,
+    /// numa foto com todo valor de byte em cada canal.
+    #[test]
+    fn a_amostra_do_miolo_e_a_de_sempre() {
+        let imagem = RgbaImage::from_fn(256, 199, |x, y| {
+            Rgba([
+                x as u8,
+                (255 - x) as u8,
+                (x ^ y) as u8,
+                (x * 7 + y * 3) as u8,
+            ])
+        });
+        let (l, a) = (imagem.width() as f32, imagem.height() as f32);
+        let mut pontos: Vec<f32> = Vec::new();
+        let mut t = -2.5f32;
+        while t < l + 2.0 {
+            pontos.push(t);
+            t += 0.613;
+        }
+        for limite in [0.0, l - 2.0, l - 1.0, a - 2.0, a - 1.0] {
+            for d in [-0.5f32, 0.0, 0.5] {
+                let x = limite + d;
+                pontos.extend([x.next_down(), x, x.next_up()]);
+            }
+        }
+        for &u in &pontos {
+            for &v in pontos.iter().step_by(5) {
+                assert_eq!(
+                    amostrar_bruto(imagem.as_raw(), imagem.width(), imagem.height(), u, v),
+                    amostrar(&imagem, u, v).0,
+                    "({u}, {v})"
+                );
             }
         }
     }

@@ -8,12 +8,13 @@
 use std::hint::black_box;
 
 use editor_core::composicao;
+use editor_core::deformar::{self, Malha};
 use editor_core::operacoes;
 use editor_core::selecao::{Forma, Molde, Selecao};
 use editor_core::tiles::CamadaDePixels;
 use editor_core::transformar::{self, Conteudo, Transformacao};
 use editor_core::vista::Vista;
-use editor_core::{Ajuste, BaseRef, Camada, Documento, Retangulo};
+use editor_core::{Ajuste, BaseRef, Camada, Documento, Mascara, Retangulo};
 use image::RgbImage;
 
 /// Roda `f` uma vez para aquecer, depois `vezes` vezes, e imprime a mediana.
@@ -74,6 +75,26 @@ fn main() {
     medir("compor 12 MP inteira (salvar, varinha)", 3, || {
         black_box(composicao::compor(&base, &doc));
     });
+    // A camada pintada a 70 %: cada pixel passa pela mescla, e não pelo
+    // atalho do Normal opaco.
+    let mut a_70 = doc.clone();
+    a_70.camadas[1].opacidade = 0.7;
+    medir("compor 12 MP inteira com a camada a 70 %", 3, || {
+        black_box(composicao::compor(&base, &a_70));
+    });
+    // Uma máscara pintada com difusão de 20 px: cada pixel lê o mapa
+    // desfocado (a bilinear da difusão); o mapa é feito no aquecimento.
+    let mut difusa = doc.clone();
+    let mut mascara = Mascara::nova(255, w, h);
+    mascara.pixels = CamadaDePixels::da_imagem(&RgbImage::from_fn(w, h, |x, y| {
+        let v = if (x / 500 + y / 400) % 2 == 0 { 255 } else { 0 };
+        image::Rgb([v, v, v])
+    }));
+    mascara.difusao = 20.0;
+    difusa.camadas[1].mascara = Some(mascara);
+    medir("compor 12 MP inteira com uma máscara difusa", 3, || {
+        black_box(composicao::compor(&base, &difusa));
+    });
     let camada = &doc.camadas[1].pixels;
     medir("mover: deslocar a camada de 12 MP por (0, 0)", 5, || {
         black_box(operacoes::deslocada(camada, 0, 0));
@@ -110,6 +131,16 @@ fn main() {
             black_box(transformar::desenhar(&conteudo, &girando, w, h));
         },
     );
+    // O Deformar: a malha com os pontos de baixo levantados (o retoque do
+    // queixo), cada evento do arrasto.
+    let mut malha = Malha::da_caixa(&conteudo.caixa);
+    malha.mover_ponto(2, 1, 0.0, -60.0);
+    malha.mover_ponto(2, 2, 0.0, -60.0);
+    malha.mover_ponto(3, 1, 0.0, -25.0);
+    malha.mover_ponto(3, 2, 0.0, -25.0);
+    medir("Deformar: desenhar 12 MP com a malha puxada", 3, || {
+        black_box(deformar::desenhar(&conteudo, &malha, w, h));
+    });
     let quebrado = Transformacao::deslocamento(13.5, 7.25);
     medir("⌘T: desenhar 12 MP deslocando (13,5, 7,25)", 3, || {
         black_box(transformar::desenhar(&conteudo, &quebrado, w, h));

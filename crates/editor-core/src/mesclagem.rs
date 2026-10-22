@@ -320,7 +320,7 @@ pub fn mesclar(baixo: [u8; 3], cima: [u8; 4], opacidade: f32, modo: Modo) -> [u8
     };
     let mistura = |b: u8, c: f32| -> u8 {
         let b = b as f32;
-        (b + (c - b) * a).round().clamp(0.0, 255.0) as u8
+        crate::byte_arredondado(b + (c - b) * a)
     };
     [
         mistura(baixo[0], alvo[0]),
@@ -362,13 +362,13 @@ pub fn mesclar_em_camada(baixo: [u8; 4], cima: [u8; 4], opacidade: f32, modo: Mo
     let canal = |i: usize| -> u8 {
         let c_linha = (1.0 - a_b) * c[i] + a_b * misturada[i].clamp(0.0, 1.0);
         let v = (a_s * c_linha + a_b * (1.0 - a_s) * b[i]) / a_o;
-        (v * 255.0).round().clamp(0.0, 255.0) as u8
+        crate::byte_arredondado(v * 255.0)
     };
     [
         canal(0),
         canal(1),
         canal(2),
-        (a_o * 255.0).round().clamp(0.0, 255.0) as u8,
+        crate::byte_arredondado(a_o * 255.0),
     ]
 }
 

@@ -10,15 +10,19 @@ Na bancada (`make bancada`, contra a v0.1.2), foto de 12 MP, 4 núcleos:
 
 | Caminho | v0.1.2 | Agora |
 |---|---:|---:|
-| Enquadrar: girar 90° e recortar | 156 ms | 26 ms |
-| Enquadrar: endireitar 3° e recortar | 521 ms | 159 ms |
-| Tela do Enquadrar: endireitar 3° (foto inteira) | 750 ms | 230 ms |
-| Compor a foto inteira (salvar, varinha mágica) | 312 ms | 149 ms |
-| Guia da Claridade, Textura e Remover névoa (1º uso numa foto) | 127 ms | 46 ms |
-| Começar o ⌘T ou o Mover com seleção (o conteúdo de uma elipse) | 545 ms | 51 ms |
-| ⌘T deslocando, por evento do ponteiro | 217 ms | 22 ms |
-| Mover com seleção, por evento do ponteiro | 227 ms | 22 ms |
-| Mover só o contorno da seleção, por evento | 163 ms | 4 ms |
+| Enquadrar: girar 90° e recortar | 159 ms | 33 ms |
+| Enquadrar: endireitar 3° e recortar | 552 ms | 90 ms |
+| Tela do Enquadrar: endireitar 3° (foto inteira) | 780 ms | 92 ms |
+| Compor a foto inteira (salvar, varinha mágica) | 299 ms | 104 ms |
+| Compor com a camada a 60 % e máscara difusa | 974 ms | 242 ms |
+| Guia da Claridade, Textura e Remover névoa (1º uso numa foto) | 130 ms | 45 ms |
+| Começar o ⌘T ou o Mover com seleção (o conteúdo de uma elipse) | 609 ms | 51 ms |
+| ⌘T deslocando, por evento do ponteiro | 214 ms | 19 ms |
+| ⌘T girando e ampliando, por evento do ponteiro | 298 ms | 130 ms |
+| Deformar, por evento do ponteiro | 350 ms | 170 ms |
+| Mover com seleção, por evento do ponteiro | 242 ms | 24 ms |
+| Mover só o contorno da seleção, por evento | 161 ms | 5 ms |
+| Transformar a seleção, por evento | 96 ms | 60 ms |
 
 - `revelacao-core`: sem ângulo, espelhos + giro de 90° + recorte reto viram uma passada só, por
   índice, sem a imagem girada inteira no meio (RGBA8 e RGB8). Endireitar e a tela do Enquadrar
@@ -35,13 +39,23 @@ Na bancada (`make bancada`, contra a v0.1.2), foto de 12 MP, 4 núcleos:
   linhas (no wasm32, uma por vez), e as passadas verticais da caixa e do mínimo andam linha a
   linha, e não coluna a coluna — a mesma soma, na mesma ordem. Numa thread só (o site), 89 → 48 ms
   numa foto de 2560 × 1707.
+- `editor-core` e `revelacao-core`, **a amostra bilinear e o arredondamento sem a libm**: no miolo
+  da imagem (quase todo ponto) os quatro vizinhos são lidos direto, sem conferir a borda de cada
+  um, com a mesma conta escrita canal a canal para o compilador fazer os quatro de uma vez; e o
+  arredondamento para byte sai só com contas de `f32` (no x86-64 de base o `round` é uma chamada à
+  libm) — o mesmo byte em todo `f32`, conferido nos 2³². Vale para o ⌘T com escala ou giro, o
+  Deformar, o Transformar seleção, o Endireitar, a tela do Enquadrar e a perspectiva, a mescla de
+  camada com opacidade ou alfa parcial e a máscara difusa. O Deformar e o Transformar seleção
+  acham o tile pela coluna (era um `BTreeMap` por pixel), como o ⌘T.
 
 ### Novo
 - A bancada compara com a **v0.1.2** e ganhou os casos "Endireitar 3° na tela do Enquadrar", a
-  guia, o começo do Mover com seleção, o Mover com seleção e o contorno por evento; o arrasto
-  passa a conferir também a seleção, tile a tile.
+  guia, o começo do Mover com seleção, a composição com a camada a 60 % e máscara difusa, e por
+  evento o ⌘T girando, o Deformar, o Mover com seleção, o contorno e o Transformar seleção; o
+  arrasto passa a conferir também a seleção, tile a tile.
 - `cargo bench -p editor-core` e `-p revelacao-core`: o ⌘T (começar, desenhar com e sem
-  deslocamento inteiro, pôr por cima), a seleção (andar, transformar) e a guia.
+  deslocamento inteiro, pôr por cima), o Deformar, a seleção (andar, transformar), a composição
+  com opacidade e com máscara difusa, e a guia.
 
 ## v0.1.2 — 19/out/2026
 

@@ -495,32 +495,66 @@ impl Molde {
                 self.densa[(j * rl + i) as usize] as f32
             }
         };
+        // 🔑 **No miolo da região** os quatro vizinhos existem: o piso é o
+        // truncamento (a região está na foto, `u ≥ 0`) e nenhum cai fora — a
+        // mesma conta, lida direto da máscara densa, sem conferir a borda de
+        // cada vizinho nem chamar a libm (`byte_arredondado`). A borda faz a
+        // conta de sempre. Os limites vão até 2²⁴, onde o `f32` ainda conta
+        // de um em um: exatos (e, além disso, o miolo fica vazio).
+        let limite = |v: i64| v.min(1 << 24) as f32;
+        let miolo = (
+            limite(rx),
+            limite(ry),
+            limite(rx + rl - 1),
+            limite(ry + ra - 1),
+        );
+        let valor_em = |u: f32, v: f32| -> u8 {
+            if u >= miolo.0 && v >= miolo.1 && u < miolo.2 && v < miolo.3 {
+                let (x0, y0) = (u as i64, v as i64);
+                let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+                let k = ((y0 - ry) * rl + x0 - rx) as usize;
+                let (cima, baixo) = (&self.densa[k..k + 2], &self.densa[k + rl as usize..][..2]);
+                let topo = cima[0] as f32 * (1.0 - fx) + cima[1] as f32 * fx;
+                let base = baixo[0] as f32 * (1.0 - fx) + baixo[1] as f32 * fx;
+                return crate::byte_arredondado(topo * (1.0 - fy) + base * fy);
+            }
+            let (x0, y0) = (u.floor(), v.floor());
+            let (fx, fy) = (u - x0, v - y0);
+            let (x0, y0) = (x0 as i64, y0 as i64);
+            let topo = ler(x0, y0) * (1.0 - fx) + ler(x0 + 1, y0) * fx;
+            let base = ler(x0, y0 + 1) * (1.0 - fx) + ler(x0 + 1, y0 + 1) * fx;
+            (topo * (1.0 - fy) + base * fy).round().clamp(0.0, 255.0) as u8
+        };
+        // As colunas de tiles do destino.
+        let coluna0 = destino.x / LADO_DO_TILE;
+        let colunas = (destino.direita() - 1) / LADO_DO_TILE - coluna0 + 1;
         let faixa = |linha: u32| -> Vec<(Posicao, Vec<u8>)> {
-            let mut tiles: BTreeMap<Posicao, Vec<u8>> = BTreeMap::new();
+            // 🔑 Um tile por coluna, achado pelo índice — e não um `BTreeMap`
+            // consultado a cada pixel, como no ⌘T dos pixels.
+            let mut tiles: Vec<Option<Vec<u8>>> = vec![None; colunas as usize];
             let ya = destino.y.max(linha * LADO_DO_TILE);
             let yb = destino.baixo().min((linha + 1) * LADO_DO_TILE);
             for y in ya..yb {
                 let yc = y as f32 + 0.5;
+                let ly = y % LADO_DO_TILE;
                 for x in destino.x..destino.direita() {
                     let xc = x as f32 + 0.5;
                     let u = c.0 + a.0 * xc + b.0 * yc - 0.5;
                     let v = c.1 + a.1 * xc + b.1 * yc - 0.5;
-                    let (x0, y0) = (u.floor(), v.floor());
-                    let (fx, fy) = (u - x0, v - y0);
-                    let (x0, y0) = (x0 as i64, y0 as i64);
-                    let topo = ler(x0, y0) * (1.0 - fx) + ler(x0 + 1, y0) * fx;
-                    let base = ler(x0, y0 + 1) * (1.0 - fx) + ler(x0 + 1, y0 + 1) * fx;
-                    let valor = (topo * (1.0 - fy) + base * fy).round().clamp(0.0, 255.0) as u8;
+                    let valor = valor_em(u, v);
                     if valor == 0 {
                         continue;
                     }
-                    let tile = tiles
-                        .entry(crate::tiles::tile_de(x, y))
-                        .or_insert_with(|| vec![0; BYTES]);
-                    tile[((y % LADO_DO_TILE) * LADO_DO_TILE + x % LADO_DO_TILE) as usize] = valor;
+                    let tile = tiles[(x / LADO_DO_TILE - coluna0) as usize]
+                        .get_or_insert_with(|| vec![0; BYTES]);
+                    tile[(ly * LADO_DO_TILE + x % LADO_DO_TILE) as usize] = valor;
                 }
             }
-            tiles.into_iter().collect()
+            tiles
+                .into_iter()
+                .zip(coluna0..)
+                .filter_map(|(tile, tx)| tile.map(|t| ((tx as i32, linha as i32), t)))
+                .collect()
         };
         let linhas: Vec<u32> =
             (destino.y / LADO_DO_TILE..=(destino.baixo() - 1) / LADO_DO_TILE).collect();
@@ -1776,6 +1810,134 @@ mod testes {
     }
 
     // ------------------------------------------------- transformar seleção
+
+    /// `Molde::transformado` de antes de 2026-10-22: os quatro vizinhos
+    /// conferidos um a um, e um `BTreeMap` de tiles consultado a cada pixel.
+    fn transformado_antigo(
+        m: &Molde,
+        destino: &Retangulo,
+        c: (f32, f32),
+        a: (f32, f32),
+        b: (f32, f32),
+    ) -> Selecao {
+        let mut s = Selecao::vazia(m.largura, m.altura);
+        let destino = destino.limitado(m.largura, m.altura);
+        if destino.vazio() || m.regiao.vazio() {
+            return s;
+        }
+        let (rx, ry) = (m.regiao.x as i64, m.regiao.y as i64);
+        let (rl, ra) = (m.regiao.largura as i64, m.regiao.altura as i64);
+        let ler = |x: i64, y: i64| -> f32 {
+            let (i, j) = (x - rx, y - ry);
+            if i < 0 || j < 0 || i >= rl || j >= ra {
+                0.0
+            } else {
+                m.densa[(j * rl + i) as usize] as f32
+            }
+        };
+        let mut tiles: BTreeMap<Posicao, Vec<u8>> = BTreeMap::new();
+        for y in destino.y..destino.baixo() {
+            let yc = y as f32 + 0.5;
+            for x in destino.x..destino.direita() {
+                let xc = x as f32 + 0.5;
+                let u = c.0 + a.0 * xc + b.0 * yc - 0.5;
+                let v = c.1 + a.1 * xc + b.1 * yc - 0.5;
+                let (x0, y0) = (u.floor(), v.floor());
+                let (fx, fy) = (u - x0, v - y0);
+                let (x0, y0) = (x0 as i64, y0 as i64);
+                let topo = ler(x0, y0) * (1.0 - fx) + ler(x0 + 1, y0) * fx;
+                let base = ler(x0, y0 + 1) * (1.0 - fx) + ler(x0 + 1, y0 + 1) * fx;
+                let valor = (topo * (1.0 - fy) + base * fy).round().clamp(0.0, 255.0) as u8;
+                if valor == 0 {
+                    continue;
+                }
+                let tile = tiles
+                    .entry(crate::tiles::tile_de(x, y))
+                    .or_insert_with(|| vec![0; BYTES]);
+                tile[((y % LADO_DO_TILE) * LADO_DO_TILE + x % LADO_DO_TILE) as usize] = valor;
+            }
+        }
+        for (posicao, tile) in tiles {
+            s.tiles.insert(posicao, Arc::new(tile));
+        }
+        s
+    }
+
+    /// 🔑 **O molde transformado pelo miolo e por coluna é o de antes, tile a
+    /// tile, byte a byte**: uma elipse difusa, um laço que encosta na borda
+    /// da foto e dois pedaços longe um do outro, numa foto que não é múltiplo
+    /// de 256 — parados, andando um pedaço de pixel, ampliados, girados,
+    /// espremidos e levados para fora, num destino inteiro e num que não
+    /// começa no canto de um tile.
+    #[test]
+    fn o_molde_transformado_e_o_de_antes() {
+        let (l, a) = (700, 520);
+        let suave = Acabamento {
+            suavizar: true,
+            difusao: 5,
+        };
+        let elipse = Selecao::da_forma_com(
+            l,
+            a,
+            &Forma::Elipse(Retangulo::novo(90, 60, 430, 300)),
+            suave,
+        );
+        let borda = Selecao::da_forma_com(
+            l,
+            a,
+            &Forma::Laco(vec![
+                (0.0, 10.0),
+                (300.0, 0.0),
+                (700.0, 260.0),
+                (40.0, 520.0),
+            ]),
+            suave,
+        );
+        let mut pedacos =
+            Selecao::da_forma(l, a, &Forma::Retangulo(Retangulo::novo(20, 30, 70, 50)));
+        pedacos.combinar(
+            &Selecao::da_forma(l, a, &Forma::Elipse(Retangulo::novo(560, 400, 90, 80))),
+            Operacao::Somar,
+        );
+        // A inversa afim de escala, giro e deslocamento em volta do centro.
+        let afim = |escala: f32, angulo: f32, dx: f32, dy: f32| {
+            let (s, cs) = angulo.sin_cos();
+            let (cx, cy) = (350.0, 260.0);
+            let inversa = |x: f32, y: f32| {
+                let (px, py) = (x - cx - dx, y - cy - dy);
+                (
+                    cx + (px * cs + py * s) / escala,
+                    cy + (-px * s + py * cs) / escala,
+                )
+            };
+            let c = inversa(0.0, 0.0);
+            let ex = inversa(1.0, 0.0);
+            let ey = inversa(0.0, 1.0);
+            (c, (ex.0 - c.0, ex.1 - c.1), (ey.0 - c.0, ey.1 - c.1))
+        };
+        let casos = [
+            afim(1.0, 0.0, 0.0, 0.0),
+            afim(1.0, 0.0, 13.5, -7.25),
+            afim(1.3, 0.0, 0.0, 0.0),
+            afim(0.7, 0.4, 20.0, 10.0),
+            afim(1.1, -1.2, -300.0, 150.0),
+            ((0.0, 0.0), (1.8, 0.1), (0.05, 0.6)),
+        ];
+        for selecao in [&elipse, &borda, &pedacos] {
+            let m = Molde::de(selecao);
+            for (c, ea, eb) in casos {
+                for destino in [Retangulo::inteiro(l, a), Retangulo::novo(37, 211, 600, 290)] {
+                    let novo = m.transformado(&destino, c, ea, eb);
+                    let antes = transformado_antigo(&m, &destino, c, ea, eb);
+                    assert!(
+                        novo == antes,
+                        "{:?} com ({c:?}, {ea:?}, {eb:?}) em {destino:?}",
+                        m.caixa()
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn o_molde_anda_e_amplia_a_selecao() {

@@ -134,6 +134,12 @@ const TODOS: &[Caso] = &[
     },
     Caso {
         grupo: "Editor",
+        nome: "Compor com a camada a 60 % e máscara difusa",
+        so_raw: false,
+        rodar: compor_com_mascara_difusa,
+    },
+    Caso {
+        grupo: "Editor",
         nome: "Mover a camada: 1º evento do arrasto (0, 0)",
         so_raw: false,
         rodar: mover_sem_sair_do_lugar,
@@ -164,6 +170,18 @@ const TODOS: &[Caso] = &[
     },
     Caso {
         grupo: "Arrastar",
+        nome: "⌘T girando e ampliando, por evento do ponteiro",
+        so_raw: false,
+        rodar: arrastar_transformar_girando,
+    },
+    Caso {
+        grupo: "Arrastar",
+        nome: "Deformar, por evento do ponteiro",
+        so_raw: false,
+        rodar: arrastar_deformar,
+    },
+    Caso {
+        grupo: "Arrastar",
         nome: "Mover com seleção, por evento do ponteiro",
         so_raw: false,
         rodar: arrastar_com_selecao,
@@ -173,6 +191,12 @@ const TODOS: &[Caso] = &[
         nome: "Mover só o contorno da seleção, por evento",
         so_raw: false,
         rodar: arrastar_o_contorno,
+    },
+    Caso {
+        grupo: "Arrastar",
+        nome: "Transformar a seleção, por evento",
+        so_raw: false,
+        rodar: arrastar_transformar_a_selecao,
     },
     Caso {
         grupo: "Arrastar",
@@ -489,6 +513,49 @@ fn compor_inteira(foto: &Foto) -> Medida {
     }
 }
 
+/// O documento de sempre com a camada pintada a 60 % e uma máscara de
+/// difusão 20 px nela: cada pixel passa pela mescla e lê o mapa desfocado.
+macro_rules! com_mascara_difusa {
+    ($ec:ident, $doc:expr) => {{
+        let mut doc = $doc;
+        let (w, h) = (doc.largura(), doc.altura());
+        let mut mascara = $ec::Mascara::nova(255, w, h);
+        mascara.pixels = $ec::tiles::CamadaDePixels::da_imagem(&RgbImage::from_fn(w, h, |x, y| {
+            let v = if (x / 500 + y / 400) % 2 == 0 { 255 } else { 0 };
+            image::Rgb([v, v, v])
+        }));
+        mascara.difusao = 20.0;
+        doc.camadas[1].mascara = Some(mascara);
+        doc.camadas[1].opacidade = 0.6;
+        doc
+    }};
+}
+
+fn compor_com_mascara_difusa(foto: &Foto) -> Medida {
+    let (base, camada) = base_e_camada(foto);
+    let doc_antes = com_mascara_difusa!(
+        editor_core_antes,
+        documento!(editor_core_antes, &base, &camada)
+    );
+    let doc_depois = com_mascara_difusa!(editor_core, documento!(editor_core, &base, &camada));
+    // O mapa desfocado é feito no primeiro uso e guardado na máscara: fora do
+    // relógio, como no app (ele já existe quando se salva).
+    editor_core_antes::composicao::compor(&base, &doc_antes);
+    editor_core::composicao::compor(&base, &doc_depois);
+    let (a, d, sa, sd) = comparar(
+        vezes(foto, 3),
+        || (),
+        |_| editor_core_antes::composicao::compor(&base, &doc_antes).into_raw(),
+        || (),
+        |_| editor_core::composicao::compor(&base, &doc_depois).into_raw(),
+    );
+    Medida {
+        antes_ms: a,
+        depois_ms: d,
+        mesma_saida: sa == sd,
+    }
+}
+
 /// Os tiles de uma camada, para comparar as duas versões.
 macro_rules! tiles {
     ($camada:expr) => {
@@ -691,6 +758,40 @@ fn arrastar_transformar(foto: &Foto) -> Medida {
     )
 }
 
+/// A escala e o giro mudam a cada evento: a amostra bilinear de cada pixel.
+fn arrastar_transformar_girando(foto: &Foto) -> Medida {
+    arrasto!(
+        foto,
+        vezes(foto, 5),
+        |s| s.comecar_a_transformar(),
+        |s, k| s.definir_transformacao(ec::transformar::Transformacao {
+            dx: 3.0 * k as f32,
+            dy: 2.0 * k as f32,
+            escala_x: 1.0 + 0.01 * k as f32,
+            escala_y: 1.0 + 0.01 * k as f32,
+            angulo: 0.01 * k as f32,
+        }),
+        |s| s.aplicar_transformacao()
+    )
+}
+
+/// Os dois pontos de dentro, embaixo, sobem 3 px a cada evento (o queixo).
+fn arrastar_deformar(foto: &Foto) -> Medida {
+    arrasto!(
+        foto,
+        vezes(foto, 5),
+        |s| s.comecar_a_deformar(),
+        |s, _k| {
+            if let Some((_, mut malha)) = s.malha() {
+                malha.mover_ponto(2, 1, 0.0, -3.0);
+                malha.mover_ponto(2, 2, 0.0, -3.0);
+                s.definir_malha(malha);
+            }
+        },
+        |s| s.aplicar_transformacao()
+    )
+}
+
 fn arrastar_com_selecao(foto: &Foto) -> Medida {
     let (w, h) = foto.rgba.dimensions();
     arrasto!(
@@ -716,6 +817,27 @@ fn arrastar_o_contorno(foto: &Foto) -> Medida {
         },
         |s, k| s.mover_o_contorno_por(5 * k as i64, 3 * k as i64),
         |s| s.terminar_de_mover_o_contorno()
+    )
+}
+
+/// "Transformar seleção": só o contorno, ampliado e girado a cada evento.
+fn arrastar_transformar_a_selecao(foto: &Foto) -> Medida {
+    let (w, h) = foto.rgba.dimensions();
+    arrasto!(
+        foto,
+        vezes(foto, 5),
+        |s| {
+            s.selecionar(&elipse!(ec, w, h), ec::selecao::Operacao::Nova);
+            s.comecar_a_transformar_a_selecao()
+        },
+        |s, k| s.definir_transformacao(ec::transformar::Transformacao {
+            dx: 2.0 * k as f32,
+            dy: k as f32,
+            escala_x: 1.0 + 0.01 * k as f32,
+            escala_y: 1.0 + 0.01 * k as f32,
+            angulo: 0.01 * k as f32,
+        }),
+        |s| s.aplicar_transformacao()
     )
 }
 

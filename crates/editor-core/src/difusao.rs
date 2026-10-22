@@ -345,10 +345,29 @@ impl MapaDifuso {
         }
         let u = (x as f32 + 0.5) / k - 0.5;
         let v = (y as f32 + 0.5) / k - 0.5;
-        let (u0, v0) = (u.floor(), v.floor());
-        let (fu, fv) = (u - u0, v - v0);
         let lm = self.largura as i64;
         let am = self.altura as i64;
+        // 🔑 **No miolo da grade** (quase todo pixel da foto) os quatro
+        // vizinhos existem: o piso é o truncamento e o `clamp` não muda nada.
+        // A mesma conta, sem a libm (`byte_arredondado`) — a composição lê
+        // este valor a cada pixel de toda camada com máscara difusa
+        // (`o_valor_do_miolo_e_o_de_sempre`). Os limites vão até 2²⁴, onde o
+        // `f32` ainda conta de um em um: exatos.
+        let limite = |lado: i64| (lado - 1).min(1 << 24) as f32;
+        if u >= 0.0 && v >= 0.0 && u < limite(lm) && v < limite(am) {
+            let (u0, v0) = (u as usize, v as usize);
+            let (fu, fv) = (u - u0 as f32, v - v0 as f32);
+            let i = v0 * lm as usize + u0;
+            let (cima, baixo) = (
+                &self.valores[i..i + 2],
+                &self.valores[i + lm as usize..][..2],
+            );
+            let topo = cima[0] as f32 * (1.0 - fu) + cima[1] as f32 * fu;
+            let base = baixo[0] as f32 * (1.0 - fu) + baixo[1] as f32 * fu;
+            return crate::byte_arredondado(topo * (1.0 - fv) + base * fv);
+        }
+        let (u0, v0) = (u.floor(), v.floor());
+        let (fu, fv) = (u - u0, v - v0);
         let ler = |a: i64, b: i64| {
             self.valores[(b.clamp(0, am - 1) * lm + a.clamp(0, lm - 1)) as usize] as f32
         };
@@ -479,6 +498,61 @@ mod testes {
             }
         }
         c
+    }
+
+    /// `valor` de antes de 2026-10-22: o piso da libm e os quatro vizinhos
+    /// grudados na borda, sempre.
+    fn valor_antigo(m: &MapaDifuso, x: i64, y: i64) -> u8 {
+        let k = m.k as f32;
+        if m.k == 1 {
+            let xc = x.clamp(0, m.largura as i64 - 1) as usize;
+            let yc = y.clamp(0, m.altura as i64 - 1) as usize;
+            return m.valores[yc * m.largura as usize + xc];
+        }
+        let u = (x as f32 + 0.5) / k - 0.5;
+        let v = (y as f32 + 0.5) / k - 0.5;
+        let (u0, v0) = (u.floor(), v.floor());
+        let (fu, fv) = (u - u0, v - v0);
+        let lm = m.largura as i64;
+        let am = m.altura as i64;
+        let ler = |a: i64, b: i64| {
+            m.valores[(b.clamp(0, am - 1) * lm + a.clamp(0, lm - 1)) as usize] as f32
+        };
+        let (u0, v0) = (u0 as i64, v0 as i64);
+        let topo = ler(u0, v0) * (1.0 - fu) + ler(u0 + 1, v0) * fu;
+        let base = ler(u0, v0 + 1) * (1.0 - fu) + ler(u0 + 1, v0 + 1) * fu;
+        (topo * (1.0 - fv) + base * fv).round() as u8
+    }
+
+    /// 🔑 **O valor do miolo é o de antes, em todo pixel**: dentro da foto e
+    /// além dela pelos quatro lados, com blocos de 2, 3, 2 e 15 px numa foto
+    /// que não é múltiplo deles, e com um traço de valores variados para o
+    /// arredondamento cair de todo jeito.
+    #[test]
+    fn o_valor_do_miolo_e_o_de_sempre() {
+        let (largura, altura) = (611u32, 437u32);
+        let mut pixels = com_quadrado(largura, altura);
+        for y in 20..420u32 {
+            for x in (330 + y % 7)..(600 - y % 11) {
+                let v = ((x * 7) ^ (y * 13)) as u8;
+                let t = pixels.tile_mut(((x / 256) as i32, (y / 256) as i32));
+                let i = indice(x % 256, y % 256);
+                t[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        for (fundo, difusao) in [(0, 4.0), (255, 7.0), (128, 5.0), (0, 30.0)] {
+            let mapa = MapaDifuso::novo(&pixels, fundo, difusao);
+            assert!(mapa.k > 1, "o bloco da difusão {difusao} passa de um pixel");
+            for y in -40..altura as i64 + 40 {
+                for x in -40..largura as i64 + 40 {
+                    assert_eq!(
+                        mapa.valor(x, y),
+                        valor_antigo(&mapa, x, y),
+                        "({x}, {y}), fundo {fundo}, difusão {difusao}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
