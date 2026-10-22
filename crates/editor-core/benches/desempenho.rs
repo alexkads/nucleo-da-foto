@@ -9,7 +9,9 @@ use std::hint::black_box;
 
 use editor_core::composicao;
 use editor_core::operacoes;
+use editor_core::selecao::{Forma, Selecao};
 use editor_core::tiles::CamadaDePixels;
+use editor_core::transformar::{self, Conteudo, Transformacao};
 use editor_core::vista::Vista;
 use editor_core::{Ajuste, BaseRef, Camada, Documento, Retangulo};
 use image::RgbImage;
@@ -79,4 +81,59 @@ fn main() {
     medir("mover: deslocar a camada de 12 MP por (13, 7)", 5, || {
         black_box(operacoes::deslocada(camada, 13, 7));
     });
+
+    // ⌘T: o conteúdo da camada inteira, tirado no começo do gesto e
+    // desenhado a cada evento do arrasto.
+    let elipse = Selecao::da_forma(w, h, &Forma::Elipse(Retangulo::novo(200, 150, 3600, 2700)));
+    medir("⌘T: começar (o conteúdo da camada de 12 MP)", 3, || {
+        black_box(Conteudo::da_camada(camada, None));
+    });
+    medir(
+        "mover com seleção: começar (a elipse de 7,6 MP)",
+        3,
+        || {
+            black_box(Conteudo::da_camada(camada, Some(&elipse)));
+        },
+    );
+    let conteudo = Conteudo::da_camada(camada, None).expect("a camada tem pixels");
+    let girando = Transformacao {
+        dx: 13.0,
+        dy: 7.0,
+        escala_x: 1.05,
+        escala_y: 1.05,
+        angulo: 0.035,
+    };
+    medir(
+        "⌘T: desenhar 12 MP com escala 1,05 e giro de 2°",
+        3,
+        || {
+            black_box(transformar::desenhar(&conteudo, &girando, w, h));
+        },
+    );
+    let quebrado = Transformacao::deslocamento(13.5, 7.25);
+    medir("⌘T: desenhar 12 MP deslocando (13,5, 7,25)", 3, || {
+        black_box(transformar::desenhar(&conteudo, &quebrado, w, h));
+    });
+    // O Mover com seleção e o colar: deslocamento inteiro.
+    let andando = Transformacao::deslocamento(13.0, 7.0);
+    medir("⌘T: desenhar 12 MP deslocando (13, 7)", 3, || {
+        black_box(transformar::desenhar(&conteudo, &andando, w, h));
+    });
+    let desenhado = transformar::desenhar(&conteudo, &andando, w, h);
+    medir(
+        "⌘T com seleção: o desenhado sobre o fundo (12 MP)",
+        3,
+        || {
+            black_box(transformar::sobre(camada, &desenhado));
+        },
+    );
+
+    // O Mover com a seleção: a seleção anda junto a cada evento.
+    medir(
+        "mover a seleção (elipse de 7,6 MP) por (13, 7)",
+        5,
+        || {
+            black_box(elipse.deslocada(13, 7));
+        },
+    );
 }

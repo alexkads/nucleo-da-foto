@@ -345,6 +345,14 @@ pub fn mesclar_em_camada(baixo: [u8; 4], cima: [u8; 4], opacidade: f32, modo: Mo
     if a_s <= 0.0 {
         return baixo;
     }
+    // 🔑 **Normal com opacidade cheia: cima opaco, ou nada por baixo, é a
+    // cor de cima, exata** — o ⌘T e o colar quase sempre caem aqui. A conta
+    // abaixo devolve `cima` nesses dois casos para todo par de bytes
+    // (`os_atalhos_da_camada_sao_a_conta_de_sempre` confere os 65 536), e
+    // sair antes poupa as divisões e os arredondamentos por pixel.
+    if modo == Modo::Normal && opacidade >= 1.0 && (cima[3] == 255 || baixo[3] == 0) {
+        return cima;
+    }
     let a_b = baixo[3] as f32 / 255.0;
     let n = |v: u8| v as f32 / 255.0;
     let b = [n(baixo[0]), n(baixo[1]), n(baixo[2])];
@@ -367,6 +375,64 @@ pub fn mesclar_em_camada(baixo: [u8; 4], cima: [u8; 4], opacidade: f32, modo: Mo
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// A conta de `mesclar_em_camada` sem os atalhos — a de antes de
+    /// 2026-10-22, para conferir que eles dão o mesmo byte.
+    fn em_camada_pela_conta(baixo: [u8; 4], cima: [u8; 4]) -> [u8; 4] {
+        let a_s = cima[3] as f32 / 255.0 * 1.0;
+        if a_s <= 0.0 {
+            return baixo;
+        }
+        let a_b = baixo[3] as f32 / 255.0;
+        let n = |v: u8| v as f32 / 255.0;
+        let b = [n(baixo[0]), n(baixo[1]), n(baixo[2])];
+        let c = [n(cima[0]), n(cima[1]), n(cima[2])];
+        let misturada = Modo::Normal.misturar(b, c);
+        let a_o = a_s + a_b * (1.0 - a_s);
+        let canal = |i: usize| -> u8 {
+            let c_linha = (1.0 - a_b) * c[i] + a_b * misturada[i].clamp(0.0, 1.0);
+            let v = (a_s * c_linha + a_b * (1.0 - a_s) * b[i]) / a_o;
+            (v * 255.0).round().clamp(0.0, 255.0) as u8
+        };
+        [
+            canal(0),
+            canal(1),
+            canal(2),
+            (a_o * 255.0).round().clamp(0.0, 255.0) as u8,
+        ]
+    }
+
+    /// 🚨 **Os atalhos do Normal em camada são a conta de sempre**, byte a
+    /// byte: cima opaco sobre todo alfa de baixo, e todo alfa de cima sobre
+    /// nada — com todo valor de canal (o resultado de cada canal só depende
+    /// dele e dos dois alfas), e a cor de baixo variando junto.
+    #[test]
+    fn os_atalhos_da_camada_sao_a_conta_de_sempre() {
+        for alfa in 0..=255u8 {
+            for v in 0..=255u8 {
+                let w = v.wrapping_mul(37).wrapping_add(11);
+                // Cima opaco, baixo com qualquer alfa.
+                let (baixo, cima) = ([w, v, 255 - v, alfa], [v, w, 255 - w, 255]);
+                assert_eq!(
+                    mesclar_em_camada(baixo, cima, 1.0, Modo::Normal),
+                    em_camada_pela_conta(baixo, cima),
+                    "opaco sobre alfa {alfa}, canal {v}"
+                );
+                // Nada por baixo, cima com qualquer alfa.
+                let (baixo, cima) = ([w, 255 - v, v, 0], [v, w, 255 - w, alfa]);
+                assert_eq!(
+                    mesclar_em_camada(baixo, cima, 1.0, Modo::Normal),
+                    em_camada_pela_conta(baixo, cima),
+                    "alfa {alfa} sobre nada, canal {v}"
+                );
+                // E acima de 1 a opacidade conta como 1.
+                assert_eq!(
+                    mesclar_em_camada(baixo, cima, 1.5, Modo::Normal),
+                    em_camada_pela_conta(baixo, cima)
+                );
+            }
+        }
+    }
 
     /// 🚨 **O atalho do Normal opaco devolve o que a conta devolvia**, para
     /// todo par de valores e para opacidade acima de 1.
