@@ -16,11 +16,11 @@
 //! 🔑 Deslocamento inteiro, sem escala nem giro, cai exatamente nos centros
 //! dos pixels: o mover não borra nada.
 
-use crate::byte_arredondado;
 use crate::mesclagem::{mesclar_em_camada, Modo};
 use crate::retangulo::Retangulo;
 use crate::selecao::Selecao;
 use crate::tiles::{indice, origem_do_tile, CamadaDePixels, LADO_DO_TILE};
+use crate::{byte_arredondado, SOBRE_255};
 
 /// A caixa do conteúdo, em pixels da foto — pode começar antes da foto (o
 /// conteúdo levado para fora, etapa 14), por isso com sinal.
@@ -77,18 +77,6 @@ impl From<Retangulo> for Caixa {
         Self::nova(r.x as i32, r.y as i32, r.largura, r.altura)
     }
 }
-
-/// `v / 255` para cada byte — a mesma divisão de sempre, feita uma vez: a
-/// amostra bilinear do ⌘T fazia quatro por vizinho, quatro vizinhos por pixel.
-const SOBRE_255: [f32; 256] = {
-    let mut tabela = [0.0f32; 256];
-    let mut v = 0;
-    while v < 256 {
-        tabela[v] = v as f32 / 255.0;
-        v += 1;
-    }
-    tabela
-};
 
 /// A seleção sobre um tile da camada: o valor de cada pixel dele, com o tile
 /// da seleção achado uma vez — o mesmo de [`Selecao::valor`], 0 fora da foto

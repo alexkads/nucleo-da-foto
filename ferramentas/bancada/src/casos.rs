@@ -28,7 +28,7 @@ impl Medida {
 #[derive(Clone, Copy)]
 pub struct Caso {
     /// O grupo na tabela: Abrir, Revelar, Exportar, Enquadrar, Editor,
-    /// Arrastar, Retoque.
+    /// Arrastar, Pintar, Retoque.
     pub grupo: &'static str,
     /// O que o caso faz, como o usuário diz.
     pub nome: &'static str,
@@ -209,6 +209,30 @@ const TODOS: &[Caso] = &[
         nome: "Opacidade da camada, por valor do slider",
         so_raw: false,
         rodar: arrastar_opacidade,
+    },
+    Caso {
+        grupo: "Pintar",
+        nome: "Pincel padrão (raio 40), um traço de lado a lado",
+        so_raw: false,
+        rodar: pintar_com_o_padrao,
+    },
+    Caso {
+        grupo: "Pintar",
+        nome: "Pincel macio de raio 200 (o de máscara), um traço",
+        so_raw: false,
+        rodar: pintar_macio,
+    },
+    Caso {
+        grupo: "Pintar",
+        nome: "Carimbo de raio 100, um traço",
+        so_raw: false,
+        rodar: pintar_com_o_carimbo,
+    },
+    Caso {
+        grupo: "Pintar",
+        nome: "Misturador de raio 100, um traço",
+        so_raw: false,
+        rodar: pintar_misturando,
     },
     Caso {
         grupo: "Retoque",
@@ -593,6 +617,125 @@ fn mover_um_pouco(foto: &Foto) -> Medida {
 }
 
 /// Um buraco de 80 px no meio de um pedaço de 400 × 300 do centro da foto.
+/// O caminho de um traço de um lado a outro da foto: um evento do ponteiro
+/// a cada 8 px, ondulando em volta do meio.
+fn caminho_do_traco(w: u32, h: u32) -> Vec<(f32, f32)> {
+    let (w, h) = (w as f32, h as f32);
+    (0..)
+        .map(|k| 0.1 * w + 8.0 * k as f32)
+        .take_while(|x| *x < 0.9 * w)
+        .map(|x| (x, h / 2.0 + (x * 0.01).sin() * h / 10.0))
+        .collect()
+}
+
+/// O passo do desfazer de um traço, para comparar as duas versões.
+macro_rules! passo {
+    ($mudanca:expr) => {
+        $mudanca.map(|m| {
+            let lista = |v: Vec<((i32, i32), Option<std::sync::Arc<Vec<u8>>>)>| {
+                v.into_iter()
+                    .map(|(p, t)| (p, t.map(|t| t.as_slice().to_vec())))
+                    .collect::<Vec<_>>()
+            };
+            (lista(m.antes), lista(m.depois))
+        })
+    };
+}
+
+/// Um traço inteiro nas duas versões, do primeiro evento ao soltar, na
+/// camada pintada (cheia e opaca) do documento de sempre. `$traco` monta o
+/// traço com `ec` (o crate do editor daquele lado), o documento e a base. A
+/// camada que sai e o passo do desfazer têm de ser os mesmos.
+macro_rules! pintar {
+    ($foto:expr, |$doc:ident, $base:ident| $traco:expr) => {{
+        let (base, camada) = base_e_camada($foto);
+        let (w, h) = base.dimensions();
+        let doc_antes = documento!(editor_core_antes, &base, &camada);
+        let doc_depois = documento!(editor_core, &base, &camada);
+        let base = std::sync::Arc::new(base);
+        let caminho = caminho_do_traco(w, h);
+        let (a, d, (ca, pa), (cd, pd)) = comparar(
+            vezes($foto, 3),
+            || doc_antes.camadas[1].pixels.clone(),
+            |mut camada| {
+                use editor_core_antes as ec;
+                let ($doc, $base) = (&doc_antes, &base);
+                let mut traco = $traco;
+                for &(x, y) in &caminho {
+                    traco.ate(&mut camada, x, y);
+                }
+                let passo = traco.terminar(&mut camada);
+                (camada, passo)
+            },
+            || doc_depois.camadas[1].pixels.clone(),
+            |mut camada| {
+                use editor_core as ec;
+                let ($doc, $base) = (&doc_depois, &base);
+                let mut traco = $traco;
+                for &(x, y) in &caminho {
+                    traco.ate(&mut camada, x, y);
+                }
+                let passo = traco.terminar(&mut camada);
+                (camada, passo)
+            },
+        );
+        Medida {
+            antes_ms: a,
+            depois_ms: d,
+            mesma_saida: tiles!(ca) == tiles!(cd) && passo!(pa) == passo!(pd),
+        }
+    }};
+}
+
+fn pintar_com_o_padrao(foto: &Foto) -> Medida {
+    pintar!(foto, |_doc, _base| ec::pincel::Traco::novo(ec::Pincel {
+        cor: [200, 40, 90],
+        ..ec::Pincel::default()
+    }))
+}
+
+fn pintar_macio(foto: &Foto) -> Medida {
+    pintar!(foto, |_doc, _base| ec::pincel::Traco::novo(ec::Pincel {
+        raio: 200.0,
+        dureza: 0.0,
+        cor: [200, 40, 90],
+        ..ec::Pincel::default()
+    }))
+}
+
+/// O carimbo copiando de um doze avos da largura à esquerda e um quinze
+/// avos da altura acima, da foto como aparece até a camada pintada (a
+/// atual).
+fn pintar_com_o_carimbo(foto: &Foto) -> Medida {
+    let (w, h) = foto.rgba.dimensions();
+    let deslocamento = (-(w as f32) / 12.0, -(h as f32) / 15.0);
+    pintar!(foto, |doc, base| ec::pincel::Traco::novo(ec::Pincel {
+        ferramenta: ec::Ferramenta::Carimbo,
+        raio: 100.0,
+        ..ec::Pincel::default()
+    })
+    .copiando_de(ec::carimbo::Fonte::nova(
+        base.clone(),
+        doc,
+        1,
+        deslocamento
+    )))
+}
+
+/// O Misturador "Úmido" (o padrão), carregado com uma cor.
+fn pintar_misturando(foto: &Foto) -> Medida {
+    pintar!(foto, |_doc, _base| {
+        let mut tinta = ec::misturador::Tinta::default();
+        tinta.carregar([200, 40, 90]);
+        ec::pincel::Traco::novo(ec::Pincel {
+            ferramenta: ec::Ferramenta::Misturador,
+            raio: 100.0,
+            ..ec::Pincel::default()
+        })
+        .misturando(tinta, ec::misturador::OpcoesDoMisturador::default())
+    })
+}
+
 fn content_aware(foto: &Foto) -> Medida {
     let (fw, fh) = foto.rgba.dimensions();
     let (w, h) = (400.min(fw), 300.min(fh));

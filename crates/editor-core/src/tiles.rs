@@ -161,6 +161,27 @@ impl CamadaDePixels {
         Arc::make_mut(tile)
     }
 
+    /// Os tiles destas posições para escrever, todos de uma vez e na ordem
+    /// pedida — cada um como o [`tile_mut`](Self::tile_mut) o daria. As
+    /// posições não se repetem.
+    pub(crate) fn varios_tiles_mut(&mut self, posicoes: &[Posicao]) -> Vec<&mut Vec<u8>> {
+        for posicao in posicoes {
+            self.tiles
+                .entry(*posicao)
+                .or_insert_with(|| Arc::new(vec![0; BYTES_DO_TILE]));
+        }
+        let mut achados: Vec<Option<&mut Vec<u8>>> = posicoes.iter().map(|_| None).collect();
+        for (posicao, tile) in self.tiles.iter_mut() {
+            if let Some(k) = posicoes.iter().position(|p| p == posicao) {
+                achados[k] = Some(Arc::make_mut(tile));
+            }
+        }
+        achados
+            .into_iter()
+            .map(|t| t.expect("o tile foi criado acima"))
+            .collect()
+    }
+
     /// Tira o tile que ficou todo transparente — a camada volta a ser esparsa
     /// depois da borracha.
     pub fn enxugar(&mut self, posicao: Posicao) {

@@ -7,14 +7,17 @@
 
 use std::hint::black_box;
 
+use editor_core::carimbo::Fonte;
 use editor_core::composicao;
 use editor_core::deformar::{self, Malha};
+use editor_core::misturador::{OpcoesDoMisturador, Tinta};
 use editor_core::operacoes;
+use editor_core::pincel::{Ferramenta, Traco};
 use editor_core::selecao::{Forma, Molde, Selecao};
 use editor_core::tiles::CamadaDePixels;
 use editor_core::transformar::{self, Conteudo, Transformacao};
 use editor_core::vista::Vista;
-use editor_core::{Ajuste, BaseRef, Camada, Documento, Mascara, Retangulo};
+use editor_core::{Ajuste, BaseRef, Camada, Documento, Mascara, Pincel, Retangulo};
 use image::RgbImage;
 
 /// Roda `f` uma vez para aquecer, depois `vezes` vezes, e imprime a mediana.
@@ -95,6 +98,80 @@ fn main() {
     medir("compor 12 MP inteira com uma máscara difusa", 3, || {
         black_box(composicao::compor(&base, &difusa));
     });
+    // O pincel: um traço de um lado a outro da foto, com um evento do
+    // ponteiro a cada 8 px, na camada cheia — a ponta padrão (raio 40) e uma
+    // grande e macia (raio 200, dureza 0, a de pintar máscara).
+    for (nome, pincel) in [
+        (
+            "pincel: traço de 3600 px, raio 40 (o padrão)",
+            Pincel::default(),
+        ),
+        (
+            "pincel: traço de 3600 px, raio 200 e dureza 0",
+            Pincel {
+                raio: 200.0,
+                dureza: 0.0,
+                ..Pincel::default()
+            },
+        ),
+    ] {
+        let mut pintada = doc.camadas[1].pixels.clone();
+        medir(nome, 3, || {
+            let mut traco = Traco::novo(pincel);
+            let mut x = 200.0f32;
+            while x < 3800.0 {
+                traco.ate(&mut pintada, x, 1500.0 + (x * 0.01).sin() * 300.0);
+                x += 8.0;
+            }
+            black_box(traco.terminar(&mut pintada));
+        });
+    }
+    // O Carimbo (copiando 300 px para a esquerda e 200 para cima, da foto
+    // composta até a camada) e o Misturador, com a ponta de raio 100.
+    let base_compartilhada = std::sync::Arc::new(base.clone());
+    let traco_de = |pincel: Pincel| {
+        let mut traco = Traco::novo(pincel);
+        match pincel.ferramenta {
+            Ferramenta::Carimbo => {
+                traco = traco.copiando_de(Fonte::nova(
+                    base_compartilhada.clone(),
+                    &doc,
+                    1,
+                    (-300.0, -200.0),
+                ));
+            }
+            Ferramenta::Misturador => {
+                let mut tinta = Tinta::default();
+                tinta.carregar([200, 40, 90]);
+                traco = traco.misturando(tinta, OpcoesDoMisturador::default());
+            }
+            _ => {}
+        }
+        traco
+    };
+    for (nome, ferramenta) in [
+        ("carimbo: traço de 3600 px, raio 100", Ferramenta::Carimbo),
+        (
+            "misturador: traço de 3600 px, raio 100",
+            Ferramenta::Misturador,
+        ),
+    ] {
+        let pincel = Pincel {
+            ferramenta,
+            raio: 100.0,
+            ..Pincel::default()
+        };
+        let mut pintada = doc.camadas[1].pixels.clone();
+        medir(nome, 3, || {
+            let mut traco = traco_de(pincel);
+            let mut x = 400.0f32;
+            while x < 3800.0 {
+                traco.ate(&mut pintada, x, 1500.0 + (x * 0.01).sin() * 300.0);
+                x += 8.0;
+            }
+            black_box(traco.terminar(&mut pintada));
+        });
+    }
     let camada = &doc.camadas[1].pixels;
     medir("mover: deslocar a camada de 12 MP por (0, 0)", 5, || {
         black_box(operacoes::deslocada(camada, 0, 0));
