@@ -23,6 +23,10 @@ Na bancada (`make bancada`, contra a v0.1.2), foto de 12 MP, 4 núcleos:
 | Mover com seleção, por evento do ponteiro | 242 ms | 24 ms |
 | Mover só o contorno da seleção, por evento | 161 ms | 5 ms |
 | Transformar a seleção, por evento | 96 ms | 60 ms |
+| Pintar: pincel padrão (raio 40), um traço de lado a lado | 84 ms | 49 ms |
+| Pintar: pincel macio de raio 200 (o de máscara), um traço | 632 ms | 130 ms |
+| Pintar: carimbo de raio 100, um traço | 263 ms | 112 ms |
+| Pintar: Misturador de raio 100, um traço | 534 ms | 255 ms |
 
 - `revelacao-core`: sem ângulo, espelhos + giro de 90° + recorte reto viram uma passada só, por
   índice, sem a imagem girada inteira no meio (RGBA8 e RGB8). Endireitar e a tela do Enquadrar
@@ -47,15 +51,24 @@ Na bancada (`make bancada`, contra a v0.1.2), foto de 12 MP, 4 núcleos:
   Deformar, o Transformar seleção, o Endireitar, a tela do Enquadrar e a perspectiva, a mescla de
   camada com opacidade ou alfa parcial e a máscara difusa. O Deformar e o Transformar seleção
   acham o tile pela coluna (era um `BTreeMap` por pixel), como o ⌘T.
+- `editor-core`, **pintar** (pincel, borracha, carimbo, recuperação, tom, foco e Misturador): cada
+  carimbo da ponta arredonda sem a libm (a tabela da ponta, a cobertura e cada canal) e lê
+  `v / 255` de uma tabela; a fonte do carimbo acha o tile por uma grade (era um `BTreeMap` por
+  pixel); o Misturador lê e grava por trecho de linha de cada tile. Com a ponta de 128 × 128 px
+  ou mais, a conta dos pixels se divide em faixas de linhas entre os núcleos, e a fonte é lida
+  por todas as threads, cada tile composto uma vez.
 
 ### Novo
 - A bancada compara com a **v0.1.2** e ganhou os casos "Endireitar 3° na tela do Enquadrar", a
   guia, o começo do Mover com seleção, a composição com a camada a 60 % e máscara difusa, e por
   evento o ⌘T girando, o Deformar, o Mover com seleção, o contorno e o Transformar seleção; o
   arrasto passa a conferir também a seleção, tile a tile.
+- A bancada ganhou o grupo **Pintar**: um traço de lado a lado com o pincel padrão, com o pincel
+  macio de raio 200, com o carimbo e com o Misturador, conferindo a camada e o passo do desfazer.
 - `cargo bench -p editor-core` e `-p revelacao-core`: o ⌘T (começar, desenhar com e sem
   deslocamento inteiro, pôr por cima), o Deformar, a seleção (andar, transformar), a composição
-  com opacidade e com máscara difusa, e a guia.
+  com opacidade e com máscara difusa, o pincel (raio 40, e 200 macio), o carimbo, o Misturador e
+  a guia.
 
 ## v0.1.2 — 19/out/2026
 
