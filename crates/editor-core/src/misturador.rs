@@ -139,15 +139,7 @@ impl Tinta {
     ) {
         let n = lado * lado;
         debug_assert!(cobertura.len() == n && amostra.len() == n && tela.len() == n);
-        let pm = |p: [u8; 4]| {
-            let a = p[3] as f32 / 255.0;
-            [
-                p[0] as f32 / 255.0 * a,
-                p[1] as f32 / 255.0 * a,
-                p[2] as f32 / 255.0 * a,
-                a,
-            ]
-        };
+        let pm = pre_multiplicado;
         if self.sujeira.as_ref().is_none_or(|(l, _)| *l != lado) {
             // Pincel limpo (ou de outro tamanho): a primeira amostra entra
             // como sujeira — com o reservatório vazio, o primeiro carimbo não
@@ -207,19 +199,236 @@ impl Tinta {
     }
 }
 
-/// Pré-multiplicado em `0..=1` → RGBA reto de 8 bits.
+/// RGBA reto de 8 bits → pré-multiplicado em `0..=1`. O `v / 255` sai da
+/// tabela: a mesma divisão, feita uma vez.
+fn pre_multiplicado(p: [u8; 4]) -> [f32; 4] {
+    let a = crate::SOBRE_255[p[3] as usize];
+    [
+        crate::SOBRE_255[p[0] as usize] * a,
+        crate::SOBRE_255[p[1] as usize] * a,
+        crate::SOBRE_255[p[2] as usize] * a,
+        a,
+    ]
+}
+
+/// Pré-multiplicado em `0..=1` → RGBA reto de 8 bits. O `round` de sempre,
+/// sem a libm (`byte_arredondado`).
 fn reto(p: [f32; 4]) -> [u8; 4] {
     let a = p[3].clamp(0.0, 1.0);
     if a <= 1e-6 {
         return [0; 4];
     }
-    let q = |v: f32| ((v / a).clamp(0.0, 1.0) * 255.0).round() as u8;
-    [q(p[0]), q(p[1]), q(p[2]), (a * 255.0).round() as u8]
+    let q = |v: f32| crate::byte_arredondado((v / a).clamp(0.0, 1.0) * 255.0);
+    [
+        q(p[0]),
+        q(p[1]),
+        q(p[2]),
+        crate::byte_arredondado(a * 255.0),
+    ]
 }
 
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    impl Tinta {
+        /// `Tinta::carimbar` de antes de 2026-10-22: `v / 255` pela divisão e
+        /// o `round` da libm.
+        pub(crate) fn carimbar_antigo(
+            &mut self,
+            opcoes: &OpcoesDoMisturador,
+            lado: usize,
+            cobertura: &[f32],
+            amostra: &[Option<[u8; 4]>],
+            tela: &mut [Option<[u8; 4]>],
+            alfa_travado: bool,
+        ) {
+            let n = lado * lado;
+            let pm = |p: [u8; 4]| {
+                let a = p[3] as f32 / 255.0;
+                [
+                    p[0] as f32 / 255.0 * a,
+                    p[1] as f32 / 255.0 * a,
+                    p[2] as f32 / 255.0 * a,
+                    a,
+                ]
+            };
+            if self.sujeira.as_ref().is_none_or(|(l, _)| *l != lado) {
+                let px = amostra
+                    .iter()
+                    .map(|a| a.map_or([0.0; 4], pm))
+                    .collect::<Vec<_>>();
+                self.sujeira = Some((lado, px));
+            }
+            let (_, sujeira) = self.sujeira.as_mut().expect("sujeira");
+            let reservatorio = self.cor.map(|c| {
+                let c = c.map(|v| v as f32 / 255.0);
+                [c[0], c[1], c[2], 1.0]
+            });
+            let k = (1.0 - opcoes.mistura.clamp(0.0, 1.0)) * self.quantidade;
+            let umidade = opcoes.umidade.clamp(0.0, 1.0);
+            for i in 0..n {
+                let a = cobertura[i];
+                let Some(atual) = tela[i] else {
+                    continue;
+                };
+                if a > 0.0 {
+                    let s = sujeira[i];
+                    let tinta = match reservatorio {
+                        Some(r) => [0, 1, 2, 3].map(|c| s[c] + (r[c] - s[c]) * k),
+                        None => s,
+                    };
+                    let t = pm(atual);
+                    let mut novo = [0, 1, 2, 3].map(|c| t[c] + (tinta[c] - t[c]) * a);
+                    if alfa_travado {
+                        let alfa = t[3];
+                        if novo[3] > 1e-6 {
+                            for c in 0..3 {
+                                novo[c] = novo[c] / novo[3] * alfa;
+                            }
+                        }
+                        novo[3] = alfa;
+                    }
+                    tela[i] = Some(reto_antigo(novo));
+                }
+                if cobertura[i] > 0.0 {
+                    if let Some(am) = amostra[i] {
+                        let am = pm(am);
+                        let s = &mut sujeira[i];
+                        for c in 0..4 {
+                            s[c] += (am[c] - s[c]) * umidade;
+                        }
+                    }
+                }
+            }
+            if self.cor.is_some() {
+                self.quantidade *= 1.0 - SECAGEM * (1.0 - opcoes.carga.clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// `reto` de antes de 2026-10-22, com o `round` da libm.
+    fn reto_antigo(p: [f32; 4]) -> [u8; 4] {
+        let a = p[3].clamp(0.0, 1.0);
+        if a <= 1e-6 {
+            return [0; 4];
+        }
+        let q = |v: f32| ((v / a).clamp(0.0, 1.0) * 255.0).round() as u8;
+        [q(p[0]), q(p[1]), q(p[2]), (a * 255.0).round() as u8]
+    }
+
+    /// 🔑 **A tinta de agora deposita e recolhe o que a de antes depositava
+    /// e recolhia**, carimbo a carimbo: pontas com cobertura de zero a
+    /// cheia, telas e amostras com todo tipo de alfa (e fora da foto),
+    /// umidade, carga e mistura nas pontas e no meio, o pincel limpo e o
+    /// carregado, com e sem o alfa travado.
+    #[test]
+    fn a_tinta_e_a_de_antes() {
+        let mut semente = 0x2545_f491_u32;
+        let mut sorteio = move || {
+            semente ^= semente << 13;
+            semente ^= semente >> 17;
+            semente ^= semente << 5;
+            semente
+        };
+        let lado = 9;
+        let n = lado * lado;
+        for (umidade, carga, mistura) in [
+            (0.5, 0.5, 0.5),
+            (1.0, 0.0, 1.0),
+            (0.0, 1.0, 0.0),
+            (0.3, 0.2, 0.8),
+        ] {
+            let opcoes = OpcoesDoMisturador {
+                umidade,
+                carga,
+                mistura,
+                ..Default::default()
+            };
+            for carregada in [false, true] {
+                for travado in [false, true] {
+                    let (mut nova, mut antiga) = (Tinta::default(), Tinta::default());
+                    if carregada {
+                        nova.carregar([200, 40, 90]);
+                        antiga.carregar([200, 40, 90]);
+                    }
+                    for carimbo in 0..40 {
+                        let pixel = |s: u32| -> Option<[u8; 4]> {
+                            let alfa = match s % 5 {
+                                0 => 0,
+                                1 => 255,
+                                _ => (s >> 24) as u8,
+                            };
+                            (s % 11 != 0).then_some([
+                                s as u8,
+                                (s >> 8) as u8,
+                                (s >> 16) as u8,
+                                alfa,
+                            ])
+                        };
+                        let cobertura: Vec<f32> = (0..n)
+                            .map(|_| match sorteio() % 4 {
+                                0 => 0.0,
+                                1 => 1.0,
+                                _ => (sorteio() % 10_001) as f32 / 10_000.0,
+                            })
+                            .collect();
+                        let amostra: Vec<_> = (0..n).map(|_| pixel(sorteio())).collect();
+                        let mut tela: Vec<_> = (0..n).map(|_| pixel(sorteio())).collect();
+                        let mut tela_antiga = tela.clone();
+                        nova.carimbar(&opcoes, lado, &cobertura, &amostra, &mut tela, travado);
+                        antiga.carimbar_antigo(
+                            &opcoes,
+                            lado,
+                            &cobertura,
+                            &amostra,
+                            &mut tela_antiga,
+                            travado,
+                        );
+                        let caso = format!(
+                            "{opcoes:?} carregada {carregada} travado {travado} carimbo {carimbo}"
+                        );
+                        assert_eq!(tela, tela_antiga, "{caso}");
+                        assert_eq!(nova, antiga, "{caso}: a tinta");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A conversão de cada pixel, sozinha: todo byte com todo alfa para o
+    /// pré-multiplicado, e de volta numa grade fina (inclusive fora de
+    /// `0..=1`).
+    #[test]
+    fn as_conversoes_sao_as_de_antes() {
+        let antigo = |p: [u8; 4]| {
+            let a = p[3] as f32 / 255.0;
+            [
+                p[0] as f32 / 255.0 * a,
+                p[1] as f32 / 255.0 * a,
+                p[2] as f32 / 255.0 * a,
+                a,
+            ]
+        };
+        for alfa in 0..=255u8 {
+            for v in 0..=255u8 {
+                let p = [v, 255 - v, v / 3, alfa];
+                assert_eq!(
+                    pre_multiplicado(p).map(f32::to_bits),
+                    antigo(p).map(f32::to_bits),
+                    "{p:?}"
+                );
+            }
+        }
+        for ka in 0..=1300u32 {
+            let a = ka as f32 / 1024.0 - 0.1;
+            for kv in 0..=700u32 {
+                let v = (kv as f32 / 512.0 - 0.1) * a;
+                let p = [v, v * 0.37, 1.0 - v, a];
+                assert_eq!(reto(p), reto_antigo(p), "{p:?}");
+            }
+        }
+    }
 
     /// Uma ponta 3 × 3 cheia.
     fn cheia() -> Vec<f32> {

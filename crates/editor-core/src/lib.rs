@@ -101,6 +101,40 @@ pub(crate) fn byte_arredondado(x: f32) -> u8 {
     (soma.to_bits() as u8) + empate_para_baixo as u8
 }
 
+/// O mesmo `f32` de `x.round()`, bit a bit, sem chamar o `roundf` da libm
+/// quando `0 < x < 2²³` (o caso de quem arredonda uma conta positiva: o
+/// índice de uma tabela, a cobertura de um traço). Ali, `x + 2²³` cai no
+/// inteiro mais próximo — no empate, o par —, e o meio que o par levou para
+/// baixo sobe, como no `round` (para longe do zero). Fora dali (zero, os
+/// negativos, os enormes, NaN) é o próprio `round`. Conferido nos 2³² `f32`
+/// (nos testes do `pincel`, `o_arredondado_e_o_round` confere uma parte).
+#[inline]
+pub(crate) fn arredondado(x: f32) -> f32 {
+    const DOIS_A_23: f32 = 8_388_608.0;
+    if x > 0.0 && x < DOIS_A_23 {
+        let perto = (x + DOIS_A_23) - DOIS_A_23;
+        if x - perto == 0.5 {
+            perto + 1.0
+        } else {
+            perto
+        }
+    } else {
+        x.round()
+    }
+}
+
+/// `v / 255` para cada byte — a mesma divisão de sempre, feita uma vez: quem
+/// passa um pixel de 8 bits para `0..=1` a cada pixel lê daqui.
+pub(crate) const SOBRE_255: [f32; 256] = {
+    let mut tabela = [0.0f32; 256];
+    let mut v = 0;
+    while v < 256 {
+        tabela[v] = v as f32 / 255.0;
+        v += 1;
+    }
+    tabela
+};
+
 /// Quantos núcleos o sistema diz ter — perguntado uma vez por processo.
 ///
 /// 🔑 No Linux, `available_parallelism` lê os arquivos do cgroup a cada

@@ -400,12 +400,14 @@ impl Tabela {
         Self { alcance, valores }
     }
 
+    #[inline]
     fn em(&self, d2: f32) -> u8 {
         let t = d2 / (self.alcance * self.alcance);
         if t >= 1.0 {
             return 0;
         }
-        self.valores[(t * TAMANHO_DA_TABELA as f32).round() as usize]
+        // O `round` de sempre, sem a chamada à libm a cada pixel da ponta.
+        self.valores[crate::arredondado(t * TAMANHO_DA_TABELA as f32) as usize]
     }
 }
 
@@ -669,8 +671,8 @@ impl Traco {
                     }
                     // m ← m + fluxo·c·(1 − m), em 16 bits.
                     let m = cobertura[k] as f32 / CHEIO as f32;
-                    let novo_m = m + fluxo * (c as f32 / 255.0) * (1.0 - m);
-                    let q = (novo_m * CHEIO as f32).round().min(CHEIO as f32) as u16;
+                    let novo_m = m + fluxo * crate::SOBRE_255[c as usize] * (1.0 - m);
+                    let q = crate::arredondado(novo_m * CHEIO as f32).min(CHEIO as f32) as u16;
                     if q <= cobertura[k] {
                         continue;
                     }
@@ -747,25 +749,44 @@ impl Traco {
         let mut cobertura = vec![0f32; lado * lado];
         let mut amostra = vec![None; lado * lado];
         let mut tela = vec![None; lado * lado];
-        for j in 0..lado * lado {
-            let (x, y) = (ox + (j % lado) as i64, oy + (j / lado) as i64);
-            if x < 0 || y < 0 || x >= largura || y >= altura {
-                continue;
+        // O quadrado da ponta dentro da foto, por trechos de linha que não
+        // saem de um tile: o tile da camada e o da seleção são procurados
+        // uma vez por trecho, e não a cada pixel.
+        let (x0, x1) = (ox.max(0), (ox + lado as i64).min(largura));
+        let (y0, y1) = (oy.max(0), (oy + lado as i64).min(altura));
+        for y in y0..y1 {
+            let linha = (y - oy) as usize * lado;
+            let y = y as u32;
+            for (inicio, fim) in trechos(x0, x1) {
+                let posicao = crate::tiles::tile_de(inicio, y);
+                let tile = camada.tile(posicao);
+                // A seleção: o tile dela (ou o valor do tile inteiro), e 0
+                // além da largura e da altura dela — como no `Selecao::valor`.
+                let mascara = self.selecao.as_deref().map(|s| {
+                    let limite = if y < s.altura() { s.largura() } else { 0 };
+                    (s.do_tile(posicao), limite)
+                });
+                for x in inicio..fim {
+                    let j = linha + (x as i64 - ox) as usize;
+                    let k = ((y % LADO_DO_TILE) * LADO_DO_TILE + x % LADO_DO_TILE) as usize;
+                    let i = 4 * k;
+                    let atual = tile.map_or([0; 4], |t| [t[i], t[i + 1], t[i + 2], t[i + 3]]);
+                    tela[j] = Some(atual);
+                    amostra[j] = match self.fonte.as_mut() {
+                        Some(f) => f.no_lugar(x, y),
+                        None => Some(atual),
+                    };
+                    let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                    let c = crate::SOBRE_255[self.tabela.em(dx * dx + dy * dy) as usize];
+                    let m = match &mascara {
+                        None => 1.0,
+                        Some((_, limite)) if x >= *limite => 0.0,
+                        Some((Ok(t), _)) => crate::SOBRE_255[t[k] as usize],
+                        Some((Err(v), _)) => crate::SOBRE_255[*v as usize],
+                    };
+                    cobertura[j] = c * m * forca;
+                }
             }
-            let (x, y) = (x as u32, y as u32);
-            let atual = camada.pixel(x, y);
-            tela[j] = Some(atual);
-            amostra[j] = match self.fonte.as_mut() {
-                Some(f) => f.no_lugar(x, y),
-                None => Some(atual),
-            };
-            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
-            let c = self.tabela.em(dx * dx + dy * dy) as f32 / 255.0;
-            let m = self
-                .selecao
-                .as_ref()
-                .map_or(1.0, |s| s.valor(x, y) as f32 / 255.0);
-            cobertura[j] = c * m * forca;
         }
         let antes = tela.clone();
         tinta.carimbar(
@@ -777,27 +798,40 @@ impl Traco {
             self.alfa_travado,
         );
         self.misturador = Some((tinta, opcoes));
-        let mut sujo = Retangulo::default();
-        for j in 0..lado * lado {
-            let (Some(novo), Some(velho)) = (tela[j], antes[j]) else {
-                continue;
-            };
-            if novo == velho {
-                continue;
+        // Grava o que mudou, trecho a trecho: o tile de antes (do desfazer)
+        // e o tile para escrever saem uma vez por trecho que mudou — e só
+        // nos que mudaram, como pixel a pixel.
+        let mut caixa: Option<(u32, u32, u32, u32)> = None;
+        for y in y0..y1 {
+            let linha = (y - oy) as usize * lado;
+            let y = y as u32;
+            for (inicio, fim) in trechos(x0, x1) {
+                let j = |x: u32| linha + (x as i64 - ox) as usize;
+                let mudou = |x: &u32| tela[j(*x)] != antes[j(*x)];
+                let Some(primeiro) = (inicio..fim).find(mudou) else {
+                    continue;
+                };
+                let posicao = crate::tiles::tile_de(inicio, y);
+                self.antes
+                    .entry(posicao)
+                    .or_insert_with(|| camada.tile(posicao).cloned());
+                let tile = camada.tile_mut(posicao);
+                let mut ultimo = primeiro;
+                for x in (primeiro..fim).filter(mudou) {
+                    let Some(novo) = tela[j(x)] else { continue };
+                    let i = indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
+                    tile[i..i + 4].copy_from_slice(&novo);
+                    ultimo = x;
+                }
+                caixa = Some(match caixa {
+                    None => (primeiro, y, ultimo, y),
+                    Some((xa, ya, xb, _)) => (xa.min(primeiro), ya, xb.max(ultimo), y),
+                });
             }
-            let (x, y) = (
-                (ox + (j % lado) as i64) as u32,
-                (oy + (j / lado) as i64) as u32,
-            );
-            let posicao = crate::tiles::tile_de(x, y);
-            self.antes
-                .entry(posicao)
-                .or_insert_with(|| camada.tile(posicao).cloned());
-            let i = indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
-            camada.tile_mut(posicao)[i..i + 4].copy_from_slice(&novo);
-            sujo = sujo.uniao(&Retangulo::novo(x, y, 1, 1));
         }
-        sujo
+        caixa.map_or(Retangulo::default(), |(xa, ya, xb, yb)| {
+            Retangulo::novo(xa, ya, xb - xa + 1, yb - ya + 1)
+        })
     }
 
     /// A recuperação (`Ferramenta::Recuperacao`), no soltar: o traço já
@@ -970,22 +1004,35 @@ fn aplicar_alfa(pincel: &Pincel, antes: [u8; 4], a: f32) -> [u8; 4] {
             if alfa <= 0.0 {
                 return [0; 4];
             }
-            let canal = |cor: u8, velho: u8| -> u8 {
-                let v = (cor as f32 * a + velho as f32 * alfa_antes * (1.0 - a)) / alfa;
-                v.round().clamp(0.0, 255.0) as u8
-            };
-            [
-                canal(pincel.cor[0], antes[0]),
-                canal(pincel.cor[1], antes[1]),
-                canal(pincel.cor[2], antes[2]),
-                quantizar(alfa),
-            ]
+            // Os três canais lado a lado, para o compilador fazer as contas
+            // (e as divisões) juntas; a de cada canal é a de sempre.
+            let v: [f32; 3] = std::array::from_fn(|k| {
+                (pincel.cor[k] as f32 * a + antes[k] as f32 * alfa_antes * (1.0 - a)) / alfa
+            });
+            let [r, g, b] = v.map(crate::byte_arredondado);
+            [r, g, b, quantizar(alfa)]
         }
     }
 }
 
+/// Os trechos `[início, fim)` de `x0..x1` (com `0 ≤ x0`) que não saem de uma
+/// coluna de tiles.
+fn trechos(x0: i64, x1: i64) -> impl Iterator<Item = (u32, u32)> {
+    let lado = LADO_DO_TILE as i64;
+    let mut x = x0;
+    std::iter::from_fn(move || {
+        (x < x1).then(|| {
+            let fim = ((x / lado + 1) * lado).min(x1);
+            let trecho = (x as u32, fim as u32);
+            x = fim;
+            trecho
+        })
+    })
+}
+
+/// `(alfa · 255).round().clamp(0, 255)`, sem a libm (`byte_arredondado`).
 fn quantizar(alfa: f32) -> u8 {
-    (alfa * 255.0).round().clamp(0.0, 255.0) as u8
+    crate::byte_arredondado(alfa * 255.0)
 }
 
 #[cfg(test)]
@@ -1389,5 +1436,616 @@ mod testes {
             cor_da_ferramenta(Ferramenta::Nitidez, [150, 100, 0], [100, 100, 0]),
             [200, 100, 0]
         );
+    }
+
+    /// `Tabela::em` de antes de 2026-10-22: o `round` da libm.
+    fn em_antigo(tabela: &Tabela, d2: f32) -> u8 {
+        let t = d2 / (tabela.alcance * tabela.alcance);
+        if t >= 1.0 {
+            return 0;
+        }
+        tabela.valores[(t * TAMANHO_DA_TABELA as f32).round() as usize]
+    }
+
+    /// `aplicar_alfa` de antes de 2026-10-22: canal a canal, com o `round` da
+    /// libm.
+    fn aplicar_alfa_antigo(pincel: &Pincel, antes: [u8; 4], a: f32) -> [u8; 4] {
+        let quantizar = |alfa: f32| (alfa * 255.0).round().clamp(0.0, 255.0) as u8;
+        let alfa_antes = antes[3] as f32 / 255.0;
+        match pincel.ferramenta {
+            Ferramenta::Borracha => {
+                let alfa = alfa_antes * (1.0 - a);
+                [antes[0], antes[1], antes[2], quantizar(alfa)]
+            }
+            _ => {
+                let alfa = a + alfa_antes * (1.0 - a);
+                if alfa <= 0.0 {
+                    return [0; 4];
+                }
+                let canal = |cor: u8, velho: u8| -> u8 {
+                    let v = (cor as f32 * a + velho as f32 * alfa_antes * (1.0 - a)) / alfa;
+                    v.round().clamp(0.0, 255.0) as u8
+                };
+                [
+                    canal(pincel.cor[0], antes[0]),
+                    canal(pincel.cor[1], antes[1]),
+                    canal(pincel.cor[2], antes[2]),
+                    quantizar(alfa),
+                ]
+            }
+        }
+    }
+
+    fn pintar_antigo(pincel: &Pincel, antes: [u8; 4], a: f32) -> [u8; 4] {
+        if pincel.modo == Modo::Normal || pincel.ferramenta == Ferramenta::Borracha {
+            return aplicar_alfa_antigo(pincel, antes, a);
+        }
+        let [r, g, b] = pincel.cor;
+        crate::mesclagem::mesclar_em_camada(antes, [r, g, b, 255], a, pincel.modo)
+    }
+
+    /// `Traco::carimbar` de antes de 2026-10-22 (fora o Misturador): o
+    /// `round` da libm na tabela, na cobertura e nos canais, e `c / 255` pela
+    /// divisão.
+    fn carimbar_antigo(t: &mut Traco, camada: &mut CamadaDePixels, cx: f32, cy: f32) -> Retangulo {
+        let raio = t.tabela.alcance;
+        let (largura, altura) = (camada.largura(), camada.altura());
+        let x0 = (cx - raio).floor().max(0.0) as u32;
+        let y0 = (cy - raio).floor().max(0.0) as u32;
+        let x1 = ((cx + raio).ceil().max(0.0) as u32).min(largura);
+        let y1 = ((cy + raio).ceil().max(0.0) as u32).min(altura);
+        if x1 <= x0 || y1 <= y0 {
+            return Retangulo::default();
+        }
+        let area = Retangulo::novo(x0, y0, x1 - x0, y1 - y0);
+        for posicao in camada.tiles_do_retangulo(&area) {
+            t.antes
+                .entry(posicao)
+                .or_insert_with(|| camada.tile(posicao).cloned());
+            let antes = t.antes.get(&posicao).cloned().flatten();
+            let cobertura = t
+                .cobertura
+                .entry(posicao)
+                .or_insert_with(|| vec![0; (LADO_DO_TILE * LADO_DO_TILE) as usize]);
+            let fluxo = t.pincel.fluxo.clamp(0.0, 1.0);
+            let opacidade = t.pincel.opacidade.clamp(0.0, 1.0);
+            let mascara = t.selecao.as_ref().map(|s| s.do_tile(posicao));
+            if let Some(Err(0)) = mascara {
+                continue;
+            }
+            let tile = camada.tile_mut(posicao);
+            let (tx0, ty0) = (
+                posicao.0 as u32 * LADO_DO_TILE,
+                posicao.1 as u32 * LADO_DO_TILE,
+            );
+            let (px0, px1) = (x0.max(tx0), x1.min(tx0 + LADO_DO_TILE));
+            let (py0, py1) = (y0.max(ty0), y1.min(ty0 + LADO_DO_TILE));
+            for py in py0..py1 {
+                for px in px0..px1 {
+                    let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
+                    let mut c = em_antigo(&t.tabela, dx * dx + dy * dy);
+                    if c == 0 {
+                        continue;
+                    }
+                    let (lx, ly) = (px - tx0, py - ty0);
+                    let k = (ly * LADO_DO_TILE + lx) as usize;
+                    match mascara {
+                        None | Some(Err(255)) => {}
+                        Some(Err(m)) => c = ((c as u32 * m as u32 + 127) / 255) as u8,
+                        Some(Ok(m)) => c = ((c as u32 * m[k] as u32 + 127) / 255) as u8,
+                    }
+                    if c == 0 {
+                        continue;
+                    }
+                    let m = cobertura[k] as f32 / CHEIO as f32;
+                    let novo_m = m + fluxo * (c as f32 / 255.0) * (1.0 - m);
+                    let q = (novo_m * CHEIO as f32).round().min(CHEIO as f32) as u16;
+                    if q <= cobertura[k] {
+                        continue;
+                    }
+                    cobertura[k] = q;
+                    let a = q as f32 / CHEIO as f32 * opacidade;
+                    let i = indice(lx, ly);
+                    let de_antes = match &antes {
+                        Some(t) => [t[i], t[i + 1], t[i + 2], t[i + 3]],
+                        None => [0; 4],
+                    };
+                    let alfa_de_antes = de_antes[3];
+                    let de_antes = match t.alfa_travado {
+                        true if alfa_de_antes == 0 => continue,
+                        true => [de_antes[0], de_antes[1], de_antes[2], 255],
+                        false => de_antes,
+                    };
+                    let mut novo = match (t.pincel.ferramenta, t.fonte.as_mut()) {
+                        (Ferramenta::Carimbo | Ferramenta::Recuperacao, Some(fonte)) => {
+                            match fonte.cor_com_alfa(px, py) {
+                                Some([r, g, b, alfa]) => {
+                                    let a = a * alfa as f32 / 255.0;
+                                    if a <= 0.0 {
+                                        continue;
+                                    }
+                                    pintar_antigo(
+                                        &Pincel {
+                                            cor: [r, g, b],
+                                            ..t.pincel
+                                        },
+                                        de_antes,
+                                        a,
+                                    )
+                                }
+                                None => continue,
+                            }
+                        }
+                        (f, Some(fonte)) if f.le_a_foto() => {
+                            let (Some(foto), Some(suave)) =
+                                (fonte.cor(px, py), fonte.desfocada(px, py))
+                            else {
+                                continue;
+                            };
+                            let cor = cor_da_ferramenta(f, foto, suave);
+                            aplicar_alfa_antigo(&Pincel { cor, ..t.pincel }, de_antes, a)
+                        }
+                        _ => pintar_antigo(&t.pincel, de_antes, a),
+                    };
+                    if t.alfa_travado {
+                        novo[3] = alfa_de_antes;
+                    }
+                    tile[i..i + 4].copy_from_slice(&novo);
+                }
+            }
+        }
+        area
+    }
+
+    /// Uma camada de 700 × 520 com cor e alfa variando (zero inclusive), uns
+    /// tiles cheios e outros que não existem.
+    fn camada_variada() -> CamadaDePixels {
+        let mut c = CamadaDePixels::nova(700, 520);
+        for posicao in [(0, 0), (1, 0), (1, 1), (2, 1), (0, 2)] {
+            let (tx, ty) = (posicao.0 as u32 * 256, posicao.1 as u32 * 256);
+            for (k, p) in c
+                .tile_mut(posicao)
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                let (x, y) = (tx + k as u32 % 256, ty + k as u32 / 256);
+                let alfa = if (x / 29 + y / 31) % 4 == 0 {
+                    0
+                } else {
+                    (x * 3 + y) as u8 | 1
+                };
+                *p = [(x * 5) as u8, (y * 3) as u8, (x ^ y) as u8, alfa];
+            }
+        }
+        c
+    }
+
+    /// 🔑 **O carimbo de agora pinta o que o de antes pintava, byte a byte**,
+    /// carimbo a carimbo — a camada, a cobertura do traço e os tiles de antes,
+    /// e o passo do desfazer no fim —, com todas as ferramentas que passam por
+    /// ele (o pincel, a borracha, o carimbo, a recuperação, as de tom e as de
+    /// foco), pontas pequena e dura, média e grande e macia, os modos Normal
+    /// e Multiplicação com fluxo e opacidade cheios e parciais, sem seleção e
+    /// com uma elipse difusa (e invertida), com e sem o alfa travado, e
+    /// carimbos que saem da foto.
+    #[test]
+    fn o_carimbo_e_o_de_antes() {
+        use crate::documento::{BaseRef, Documento};
+        use crate::selecao::{Acabamento, Forma};
+        let (l, a) = (700, 520);
+        let base = Arc::new(image::RgbImage::from_fn(l, a, |x, y| {
+            image::Rgb([(x * 3) as u8, (y * 7) as u8, (x ^ y) as u8])
+        }));
+        let doc = Documento::novo(BaseRef::da_imagem(&base));
+        let elipse = Arc::new(Selecao::da_forma_com(
+            l,
+            a,
+            &Forma::Elipse(Retangulo::novo(80, 60, 520, 380)),
+            Acabamento {
+                suavizar: true,
+                difusao: 8,
+            },
+        ));
+        let mut invertida = (*elipse).clone();
+        invertida.inverter();
+        let invertida = Arc::new(invertida);
+        let ferramentas = [
+            Ferramenta::Pincel,
+            Ferramenta::Borracha,
+            Ferramenta::Carimbo,
+            Ferramenta::Recuperacao,
+            Ferramenta::Subexposicao(Faixa::MeiosTons),
+            Ferramenta::Superexposicao(Faixa::Realces),
+            Ferramenta::Desfoque,
+            Ferramenta::Nitidez,
+        ];
+        let centros = [
+            (350.0, 260.0),
+            (352.3, 261.7),
+            (100.0, 400.0),
+            (690.0, 10.0),
+            (-30.0, 250.0),
+            (500.5, 300.25),
+        ];
+        for ferramenta in ferramentas {
+            for (raio, dureza) in [(3.5, 1.0), (40.0, 0.8), (190.0, 0.0)] {
+                for (modo, fluxo, opacidade) in
+                    [(Modo::Normal, 1.0, 1.0), (Modo::Multiplicacao, 0.07, 0.6)]
+                {
+                    let selecoes = if raio > 100.0 {
+                        vec![None, Some(elipse.clone())]
+                    } else {
+                        vec![None, Some(elipse.clone()), Some(invertida.clone())]
+                    };
+                    for selecao in selecoes {
+                        for travado in [false, true] {
+                            let pincel = Pincel {
+                                ferramenta,
+                                raio,
+                                dureza,
+                                modo,
+                                fluxo,
+                                opacidade,
+                                cor: [200, 40, 90],
+                                ..Pincel::default()
+                            };
+                            let traco = || {
+                                let mut t = Traco::novo(pincel)
+                                    .dentro_de(selecao.clone())
+                                    .com_alfa_travado(travado);
+                                if ferramenta.le_a_foto() {
+                                    let deslocamento = if ferramenta.copia_da_origem() {
+                                        (-120.0, 35.0)
+                                    } else {
+                                        (0.0, 0.0)
+                                    };
+                                    t = t.copiando_de(Fonte::nova(
+                                        base.clone(),
+                                        &doc,
+                                        0,
+                                        deslocamento,
+                                    ));
+                                }
+                                t
+                            };
+                            let (mut novo, mut antigo) = (traco(), traco());
+                            let (mut c_novo, mut c_antigo) = (camada_variada(), camada_variada());
+                            let caso = format!(
+                                "{ferramenta:?} raio {raio} {modo:?} seleção {} travado {travado}",
+                                selecao.is_some()
+                            );
+                            for (cx, cy) in centros {
+                                let sujo = novo.carimbar(&mut c_novo, cx, cy);
+                                let sujo_antes =
+                                    carimbar_antigo(&mut antigo, &mut c_antigo, cx, cy);
+                                assert_eq!(sujo, sujo_antes, "{caso} em ({cx}, {cy})");
+                                assert!(c_novo == c_antigo, "{caso} em ({cx}, {cy})");
+                                assert!(
+                                    novo.cobertura == antigo.cobertura
+                                        && novo.antes == antigo.antes,
+                                    "{caso} em ({cx}, {cy}): o estado do traço"
+                                );
+                            }
+                            assert!(
+                                novo.terminar(&mut c_novo) == antigo.terminar(&mut c_antigo),
+                                "{caso}: o passo do desfazer"
+                            );
+                            assert!(c_novo == c_antigo, "{caso}: a camada no fim");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `Traco::carimbar_misturando` de antes de 2026-10-22: pixel a pixel,
+    /// com a camada, a seleção, o tile de antes e o de escrever procurados a
+    /// cada um, e a tinta de antes.
+    fn carimbar_misturando_antigo(
+        t: &mut Traco,
+        camada: &mut CamadaDePixels,
+        cx: f32,
+        cy: f32,
+    ) -> Retangulo {
+        let Some((mut tinta, opcoes)) = t.misturador.take() else {
+            return Retangulo::default();
+        };
+        let r = t.tabela.alcance.ceil() as i64;
+        let lado = (2 * r + 1) as usize;
+        let (ox, oy) = (cx.floor() as i64 - r, cy.floor() as i64 - r);
+        let (largura, altura) = (camada.largura() as i64, camada.altura() as i64);
+        let forca = t.pincel.fluxo.clamp(0.0, 1.0) * t.pincel.opacidade.clamp(0.0, 1.0);
+        let mut cobertura = vec![0f32; lado * lado];
+        let mut amostra = vec![None; lado * lado];
+        let mut tela = vec![None; lado * lado];
+        for j in 0..lado * lado {
+            let (x, y) = (ox + (j % lado) as i64, oy + (j / lado) as i64);
+            if x < 0 || y < 0 || x >= largura || y >= altura {
+                continue;
+            }
+            let (x, y) = (x as u32, y as u32);
+            let atual = camada.pixel(x, y);
+            tela[j] = Some(atual);
+            amostra[j] = match t.fonte.as_mut() {
+                Some(f) => f.no_lugar(x, y),
+                None => Some(atual),
+            };
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            let c = em_antigo(&t.tabela, dx * dx + dy * dy) as f32 / 255.0;
+            let m = t
+                .selecao
+                .as_ref()
+                .map_or(1.0, |s| s.valor(x, y) as f32 / 255.0);
+            cobertura[j] = c * m * forca;
+        }
+        let antes = tela.clone();
+        tinta.carimbar_antigo(
+            &opcoes,
+            lado,
+            &cobertura,
+            &amostra,
+            &mut tela,
+            t.alfa_travado,
+        );
+        t.misturador = Some((tinta, opcoes));
+        let mut sujo = Retangulo::default();
+        for j in 0..lado * lado {
+            let (Some(novo), Some(velho)) = (tela[j], antes[j]) else {
+                continue;
+            };
+            if novo == velho {
+                continue;
+            }
+            let (x, y) = (
+                (ox + (j % lado) as i64) as u32,
+                (oy + (j / lado) as i64) as u32,
+            );
+            let posicao = crate::tiles::tile_de(x, y);
+            t.antes
+                .entry(posicao)
+                .or_insert_with(|| camada.tile(posicao).cloned());
+            let i = indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
+            camada.tile_mut(posicao)[i..i + 4].copy_from_slice(&novo);
+            sujo = sujo.uniao(&Retangulo::novo(x, y, 1, 1));
+        }
+        sujo
+    }
+
+    /// 🔑 **O Misturador de agora pinta o que o de antes pintava, byte a
+    /// byte**, carimbo a carimbo — a camada, os tiles de antes, a tinta que
+    /// segue no pincel e o passo do desfazer —, com umidade, carga e mistura
+    /// variadas, amostrando a camada ou a foto composta, o pincel limpo e o
+    /// carregado, pontas pequena, média e grande, fluxo e opacidade cheios e
+    /// parciais, sem seleção, com uma elipse difusa (e invertida) e com uma
+    /// seleção menor que a camada (e invertida: fora dela não se pinta), com
+    /// e sem o alfa travado, e carimbos que saem da foto (ou caem fora
+    /// dela).
+    #[test]
+    fn o_misturador_e_o_de_antes() {
+        use crate::carimbo::AmostraDoCarimbo;
+        use crate::documento::{BaseRef, Camada, Documento};
+        use crate::misturador::{OpcoesDoMisturador, Tinta};
+        use crate::selecao::{Acabamento, Forma};
+        let (l, a) = (700, 520);
+        let base = Arc::new(image::RgbImage::from_fn(l, a, |x, y| {
+            image::Rgb([(x * 3) as u8, (y * 7) as u8, (x ^ y) as u8])
+        }));
+        let mut doc = Documento::novo(BaseRef::da_imagem(&base));
+        let mut camada = Camada::nova("Pintada", l, a);
+        camada.pixels = camada_variada();
+        doc.camadas.push(camada);
+        let difusa = Acabamento {
+            suavizar: true,
+            difusao: 8,
+        };
+        let elipse = Selecao::da_forma_com(
+            l,
+            a,
+            &Forma::Elipse(Retangulo::novo(80, 60, 520, 380)),
+            difusa,
+        );
+        let pequena = Selecao::da_forma_com(
+            500,
+            400,
+            &Forma::Elipse(Retangulo::novo(200, 150, 400, 300)),
+            difusa,
+        );
+        let invertida = |s: &Selecao| {
+            let mut s = s.clone();
+            s.inverter();
+            Arc::new(s)
+        };
+        let (elipse_invertida, pequena_invertida) = (invertida(&elipse), invertida(&pequena));
+        let (elipse, pequena) = (Arc::new(elipse), Arc::new(pequena));
+        let opcoes = [
+            OpcoesDoMisturador::default(),
+            OpcoesDoMisturador {
+                umidade: 1.0,
+                carga: 0.0,
+                mistura: 1.0,
+                ..OpcoesDoMisturador::default()
+            },
+            OpcoesDoMisturador {
+                umidade: 0.0,
+                carga: 1.0,
+                mistura: 0.0,
+                ..OpcoesDoMisturador::default()
+            },
+            OpcoesDoMisturador {
+                umidade: 0.3,
+                carga: 0.2,
+                mistura: 0.8,
+                todas_as_camadas: true,
+                ..OpcoesDoMisturador::default()
+            },
+        ];
+        let centros = [
+            (350.0, 260.0),
+            (352.3, 261.7),
+            (100.0, 400.0),
+            (-900.0, -900.0),
+            (690.0, 10.0),
+            (-30.0, 250.0),
+            (500.5, 300.25),
+        ];
+        for (raio, dureza) in [(3.5, 1.0), (40.0, 0.6), (120.0, 0.0)] {
+            let grande = raio > 100.0;
+            let selecoes = if grande {
+                vec![None, Some(pequena_invertida.clone())]
+            } else {
+                vec![
+                    None,
+                    Some(elipse.clone()),
+                    Some(elipse_invertida.clone()),
+                    Some(pequena.clone()),
+                    Some(pequena_invertida.clone()),
+                ]
+            };
+            let tintas = if grande {
+                &[true][..]
+            } else {
+                &[true, false][..]
+            };
+            let forcas = if grande {
+                &[(1.0, 1.0)][..]
+            } else {
+                &[(1.0, 1.0), (0.4, 0.7)][..]
+            };
+            for opcoes in opcoes {
+                for selecao in &selecoes {
+                    for &carregada in tintas {
+                        for &(fluxo, opacidade) in forcas {
+                            for travado in [false, true] {
+                                let pincel = Pincel {
+                                    ferramenta: Ferramenta::Misturador,
+                                    raio,
+                                    dureza,
+                                    fluxo,
+                                    opacidade,
+                                    ..Pincel::default()
+                                };
+                                let traco = || {
+                                    let mut tinta = Tinta::default();
+                                    if carregada {
+                                        tinta.carregar([200, 40, 90]);
+                                    }
+                                    let mut t = Traco::novo(pincel)
+                                        .dentro_de(selecao.clone())
+                                        .com_alfa_travado(travado)
+                                        .misturando(tinta, opcoes);
+                                    if opcoes.todas_as_camadas {
+                                        t = t.copiando_de(Fonte::da_amostra(
+                                            base.clone(),
+                                            &doc,
+                                            0,
+                                            AmostraDoCarimbo::Todas,
+                                            (0.0, 0.0),
+                                        ));
+                                    }
+                                    t
+                                };
+                                let (mut novo, mut antigo) = (traco(), traco());
+                                let (mut c_novo, mut c_antigo) =
+                                    (camada_variada(), camada_variada());
+                                let caso = format!(
+                                    "raio {raio} {opcoes:?} seleção {} carregada {carregada} \
+                                     fluxo {fluxo} travado {travado}",
+                                    selecao.is_some()
+                                );
+                                for (cx, cy) in centros {
+                                    let sujo = novo.carimbar(&mut c_novo, cx, cy);
+                                    let sujo_antes = carimbar_misturando_antigo(
+                                        &mut antigo,
+                                        &mut c_antigo,
+                                        cx,
+                                        cy,
+                                    );
+                                    assert_eq!(sujo, sujo_antes, "{caso} em ({cx}, {cy})");
+                                    assert!(c_novo == c_antigo, "{caso} em ({cx}, {cy})");
+                                    assert!(
+                                        novo.antes == antigo.antes,
+                                        "{caso} em ({cx}, {cy}): os tiles de antes"
+                                    );
+                                    assert_eq!(
+                                        novo.tinta(),
+                                        antigo.tinta(),
+                                        "{caso} em ({cx}, {cy}): a tinta"
+                                    );
+                                }
+                                assert!(
+                                    novo.terminar(&mut c_novo) == antigo.terminar(&mut c_antigo),
+                                    "{caso}: o passo do desfazer"
+                                );
+                                assert!(c_novo == c_antigo, "{caso}: a camada no fim");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A conta de cada pixel, sozinha: todo alfa de antes, cores variadas e
+    /// a cobertura de 0 a 1 em passos finos (inclusive os que caem no meio
+    /// de um byte), no pincel e na borracha.
+    #[test]
+    fn a_conta_do_pixel_e_a_de_antes() {
+        for ferramenta in [Ferramenta::Pincel, Ferramenta::Borracha] {
+            for alfa in 0..=255u8 {
+                for k in 0..=600u32 {
+                    let a = k as f32 / 600.0;
+                    let cor = [(k * 7) as u8, (k * 13) as u8 ^ alfa, 255 - alfa];
+                    let antes = [alfa.wrapping_mul(3), (k % 256) as u8, 128, alfa];
+                    let pincel = Pincel {
+                        ferramenta,
+                        cor,
+                        ..Pincel::default()
+                    };
+                    assert_eq!(
+                        aplicar_alfa(&pincel, antes, a),
+                        aplicar_alfa_antigo(&pincel, antes, a),
+                        "{ferramenta:?} alfa {alfa} a {a}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 🔑 **O `arredondado` é o `round`, bit a bit.** Os 2³² `f32` foram
+    /// conferidos à parte (4 s em release, quatro núcleos); aqui vai um a cada
+    /// 4099 padrões de bits (todo expoente, os dois sinais, NaN e infinito),
+    /// cada meio de −3 a 70 000 com os vizinhos dele, e as bordas do 2²³.
+    #[test]
+    fn o_arredondado_e_o_round() {
+        let igual = |x: f32| {
+            let (antes, agora) = (x.round(), crate::arredondado(x));
+            antes.to_bits() == agora.to_bits() || (antes.is_nan() && agora.is_nan())
+        };
+        for bits in (0..=u32::MAX).step_by(4099) {
+            let x = f32::from_bits(bits);
+            assert!(igual(x), "{x:e} ({bits:#x})");
+        }
+        for n in -3..=70_000 {
+            for x in [n as f32, n as f32 + 0.5] {
+                for x in [x.next_down(), x, x.next_up()] {
+                    assert!(igual(x), "{x:e}");
+                }
+            }
+        }
+        for x in [
+            0.0,
+            -0.0,
+            f32::MIN_POSITIVE,
+            0.499_999_97,
+            8_388_607.5,
+            8_388_608.0,
+            8_388_608.0f32.next_down(),
+            f32::INFINITY,
+            f32::NAN,
+        ] {
+            assert!(igual(x), "{x:e}");
+        }
     }
 }
