@@ -27,7 +27,8 @@ impl Medida {
 /// Um caminho a comparar.
 #[derive(Clone, Copy)]
 pub struct Caso {
-    /// O grupo na tabela: Abrir, Exportar, Enquadrar, Editor, Retoque.
+    /// O grupo na tabela: Abrir, Revelar, Exportar, Enquadrar, Editor,
+    /// Arrastar, Retoque.
     pub grupo: &'static str,
     /// O que o caso faz, como o usuário diz.
     pub nome: &'static str,
@@ -64,6 +65,12 @@ const TODOS: &[Caso] = &[
         nome: "Adobe RGB → sRGB numa miniatura de 256 px",
         so_raw: false,
         rodar: converter_cor,
+    },
+    Caso {
+        grupo: "Revelar",
+        nome: "Guia da Claridade, Textura e Névoa (1º uso numa foto)",
+        so_raw: false,
+        rodar: guia,
     },
     Caso {
         grupo: "Exportar",
@@ -138,6 +145,12 @@ const TODOS: &[Caso] = &[
         rodar: mover_um_pouco,
     },
     Caso {
+        grupo: "Editor",
+        nome: "Começar o Mover com seleção (o conteúdo de uma elipse)",
+        so_raw: false,
+        rodar: tirar_o_conteudo,
+    },
+    Caso {
         grupo: "Arrastar",
         nome: "Mover a camada, por evento do ponteiro",
         so_raw: false,
@@ -148,6 +161,18 @@ const TODOS: &[Caso] = &[
         nome: "⌘T deslocando, por evento do ponteiro",
         so_raw: false,
         rodar: arrastar_transformar,
+    },
+    Caso {
+        grupo: "Arrastar",
+        nome: "Mover com seleção, por evento do ponteiro",
+        so_raw: false,
+        rodar: arrastar_com_selecao,
+    },
+    Caso {
+        grupo: "Arrastar",
+        nome: "Mover só o contorno da seleção, por evento",
+        so_raw: false,
+        rodar: arrastar_o_contorno,
     },
     Caso {
         grupo: "Arrastar",
@@ -567,10 +592,14 @@ macro_rules! arrasto {
         let mut antes = sessao!(editor_core_antes, $foto);
         let mut depois = sessao!(editor_core, $foto);
         {
+            #[allow(unused_imports)] // só os começos que nomeiam um tipo usam
+            use editor_core_antes as ec;
             let $s = &mut antes;
             $comecar;
         }
         {
+            #[allow(unused_imports)] // só os começos que nomeiam um tipo usam
+            use editor_core as ec;
             let $s = &mut depois;
             $comecar;
         }
@@ -606,9 +635,37 @@ macro_rules! arrasto {
             antes_ms: a,
             depois_ms: d,
             mesma_saida: antes.vista().imagem().as_raw() == depois.vista().imagem().as_raw()
-                && antes.compor().as_raw() == depois.compor().as_raw(),
+                && antes.compor().as_raw() == depois.compor().as_raw()
+                && selecao!(antes) == selecao!(depois),
         }
     }};
+}
+
+/// A seleção da sessão, tile a tile (a máscara, ou o valor do tile que não
+/// existe), para comparar as duas versões.
+macro_rules! selecao {
+    ($sessao:expr) => {
+        $sessao.selecao().map(|s| {
+            let lado = editor_core::tiles::LADO_DO_TILE;
+            (0..s.altura().div_ceil(lado) as i32)
+                .flat_map(|ty| (0..s.largura().div_ceil(lado) as i32).map(move |tx| (tx, ty)))
+                .map(|p| s.do_tile(p).map(<[u8]>::to_vec))
+                .collect::<Vec<_>>()
+        })
+    };
+}
+
+/// Uma elipse que pega quase a foto toda — a seleção dos casos que andam
+/// com ela.
+macro_rules! elipse {
+    ($ec:ident, $w:expr, $h:expr) => {
+        $ec::selecao::Forma::Elipse($ec::Retangulo::novo(
+            $w / 20,
+            $h / 20,
+            $w * 9 / 10,
+            $h * 9 / 10,
+        ))
+    };
 }
 
 fn arrastar_mover(foto: &Foto) -> Medida {
@@ -632,6 +689,86 @@ fn arrastar_transformar(foto: &Foto) -> Medida {
         )),
         |s| s.aplicar_transformacao()
     )
+}
+
+fn arrastar_com_selecao(foto: &Foto) -> Medida {
+    let (w, h) = foto.rgba.dimensions();
+    arrasto!(
+        foto,
+        vezes(foto, 5),
+        |s| {
+            s.selecionar(&elipse!(ec, w, h), ec::selecao::Operacao::Nova);
+            s.comecar_a_mover()
+        },
+        |s, k| s.mover_por(5 * k as i64, 3 * k as i64),
+        |s| s.terminar_de_mover()
+    )
+}
+
+fn arrastar_o_contorno(foto: &Foto) -> Medida {
+    let (w, h) = foto.rgba.dimensions();
+    arrasto!(
+        foto,
+        vezes(foto, 7),
+        |s| {
+            s.selecionar(&elipse!(ec, w, h), ec::selecao::Operacao::Nova);
+            s.comecar_a_mover_o_contorno()
+        },
+        |s, k| s.mover_o_contorno_por(5 * k as i64, 3 * k as i64),
+        |s| s.terminar_de_mover_o_contorno()
+    )
+}
+
+/// O começo do ⌘T e do Mover com seleção: o conteúdo da camada vezes a
+/// seleção, tirado dela.
+fn tirar_o_conteudo(foto: &Foto) -> Medida {
+    let (_, camada) = base_e_camada(foto);
+    let (w, h) = camada.dimensions();
+    let camada_antes = editor_core_antes::tiles::CamadaDePixels::da_imagem(&camada);
+    let camada_depois = editor_core::tiles::CamadaDePixels::da_imagem(&camada);
+    let sel_antes =
+        editor_core_antes::selecao::Selecao::da_forma(w, h, &elipse!(editor_core_antes, w, h));
+    let sel_depois = editor_core::selecao::Selecao::da_forma(w, h, &elipse!(editor_core, w, h));
+    let (a, d, sa, sd) = comparar(
+        vezes(foto, 5),
+        || (),
+        |_| {
+            editor_core_antes::transformar::Conteudo::da_camada(&camada_antes, Some(&sel_antes))
+                .map(|c| ((c.caixa.x, c.caixa.y), c.imagem().into_raw()))
+        },
+        || (),
+        |_| {
+            editor_core::transformar::Conteudo::da_camada(&camada_depois, Some(&sel_depois))
+                .map(|c| ((c.caixa.x, c.caixa.y), c.imagem().into_raw()))
+        },
+    );
+    Medida {
+        antes_ms: a,
+        depois_ms: d,
+        mesma_saida: sa == sd,
+    }
+}
+
+/// A guia que a Claridade, a Textura e o Remover névoa leem: calculada uma
+/// vez por foto, no primeiro uso de um dos três (e na exportação).
+fn guia(foto: &Foto) -> Medida {
+    let (w, h) = foto.rgba.dimensions();
+    let pixels = foto.rgba.as_raw();
+    let (a, d, sa, sd) = comparar(
+        vezes(foto, 5),
+        || (),
+        |_| revelacao_core_antes::guia::calcular(pixels, w, h),
+        || (),
+        |_| revelacao_core::guia::calcular(pixels, w, h),
+    );
+    let bits = |t: &[f32]| t.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    Medida {
+        antes_ms: a,
+        depois_ms: d,
+        mesma_saida: (sa.largura, sa.altura, sa.luz_do_ceu.to_bits())
+            == (sd.largura, sd.altura, sd.luz_do_ceu.to_bits())
+            && bits(&sa.texels) == bits(&sd.texels),
+    }
 }
 
 fn arrastar_filtro(foto: &Foto) -> Medida {
