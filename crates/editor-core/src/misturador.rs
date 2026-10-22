@@ -359,7 +359,7 @@ mod testes {
                                 1 => 255,
                                 _ => (s >> 24) as u8,
                             };
-                            (s % 11 != 0).then_some([
+                            (!s.is_multiple_of(11)).then_some([
                                 s as u8,
                                 (s >> 8) as u8,
                                 (s >> 16) as u8,

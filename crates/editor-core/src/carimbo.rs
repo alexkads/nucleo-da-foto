@@ -13,7 +13,7 @@
 //! seriam 65 ms numa foto de 24 MP; o carimbo só lê os tiles por onde a origem
 //! passa, e cada um é composto uma vez por traço.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use image::RgbImage;
 
@@ -77,13 +77,13 @@ pub struct Fonte {
     base: Arc<RgbImage>,
     doc: Documento,
     /// "Camada atual": os pixels da camada, sem compor (com alfa).
-    so_a_camada: Option<Grade<Tile>>,
+    so_a_camada: Option<Grade<Option<Tile>>>,
     /// Da posição pintada à posição copiada, em pixels da foto.
     deslocamento: (i64, i64),
     /// Os tiles compostos, feitos sob demanda.
-    tiles: Grade<RgbImage>,
+    tiles: Grade<OnceLock<RgbImage>>,
     /// Os mesmos tiles, desfocados — o desfoque e a nitidez leem daqui.
-    suaves: Grade<RgbImage>,
+    suaves: Grade<OnceLock<RgbImage>>,
 }
 
 /// Os tiles de uma imagem de `largura × altura`, um lugar por tile, linha a
@@ -92,14 +92,18 @@ pub struct Fonte {
 /// 🔑 **O tile achado pelo índice**, e não num mapa: a fonte é lida a cada
 /// pixel da ponta do carimbo (e duas vezes na recuperação), e uma busca num
 /// `BTreeMap` por pixel custava mais que a cópia da cor.
-struct Grade<T> {
+///
+/// 🧵 Os tiles feitos sob demanda ficam em `OnceLock`: as threads de um
+/// carimbo grande leem a mesma fonte, e cada tile é feito uma vez — por
+/// quem chegar primeiro; o tile é o mesmo, seja quem for.
+struct Grade<C> {
     largura: u32,
     altura: u32,
     colunas: usize,
-    tiles: Vec<Option<T>>,
+    tiles: Vec<C>,
 }
 
-impl<T> Grade<T> {
+impl<C: Default> Grade<C> {
     fn nova(largura: u32, altura: u32) -> Self {
         let colunas = largura.div_ceil(LADO_DO_TILE) as usize;
         let linhas = altura.div_ceil(LADO_DO_TILE) as usize;
@@ -107,17 +111,19 @@ impl<T> Grade<T> {
             largura,
             altura,
             colunas,
-            tiles: std::iter::repeat_with(|| None)
+            tiles: std::iter::repeat_with(C::default)
                 .take(colunas * linhas)
                 .collect(),
         }
     }
+}
 
+impl<C> Grade<C> {
     /// O lugar do tile de `(x, y)`, dentro da imagem.
     #[inline]
-    fn lugar(&mut self, x: u32, y: u32) -> &mut Option<T> {
+    fn lugar(&self, x: u32, y: u32) -> &C {
         let k = (y / LADO_DO_TILE) as usize * self.colunas + (x / LADO_DO_TILE) as usize;
-        &mut self.tiles[k]
+        &self.tiles[k]
     }
 }
 
@@ -176,13 +182,17 @@ impl Fonte {
     /// A foto desfocada em `(x, y)` (sem deslocamento: o desfoque e a nitidez
     /// trabalham no lugar). `None` fora da foto.
     pub fn desfocada(&mut self, x: u32, y: u32) -> Option<[u8; 3]> {
+        self.ler_desfocada(x, y)
+    }
+
+    /// A [`desfocada`](Self::desfocada), lida por qualquer thread.
+    pub(crate) fn ler_desfocada(&self, x: u32, y: u32) -> Option<[u8; 3]> {
         let (largura, altura) = (self.base.width(), self.base.height());
         if x >= largura || y >= altura {
             return None;
         }
         let posicao = crate::tiles::tile_de(x, y);
-        let (base, doc) = (&self.base, &self.doc);
-        let tile = self.suaves.lugar(x, y).get_or_insert_with(|| {
+        let tile = self.suaves.lugar(x, y).get_or_init(|| {
             // O tile com uma margem do raio, composto e desfocado em duas
             // passadas (linhas, depois colunas).
             let ret = retangulo_do_tile(posicao, largura, altura);
@@ -192,7 +202,7 @@ impl Fonte {
             let x1 = (ret.direita() + r).min(largura);
             let y1 = (ret.baixo() + r).min(altura);
             let largo = Retangulo::novo(x0, y0, x1 - x0, y1 - y0);
-            let foto = composicao::compor_recorte(base, doc, &largo);
+            let foto = composicao::compor_recorte(&self.base, &self.doc, &largo);
             let (w, h) = (foto.width() as i64, foto.height() as i64);
             let passar = |img: &RgbImage, horizontal: bool| -> RgbImage {
                 RgbImage::from_fn(img.width(), img.height(), |px, py| {
@@ -224,6 +234,11 @@ impl Fonte {
     /// A cor que vai para `(x, y)` com o alfa da origem (255 na foto
     /// composta; o da camada em "Camada atual"); `None` fora da foto.
     pub fn cor_com_alfa(&mut self, x: u32, y: u32) -> Option<[u8; 4]> {
+        self.ler_cor_com_alfa(x, y)
+    }
+
+    /// A [`cor_com_alfa`](Self::cor_com_alfa), lida por qualquer thread.
+    pub(crate) fn ler_cor_com_alfa(&self, x: u32, y: u32) -> Option<[u8; 4]> {
         let (ox, oy) = (
             x as i64 + self.deslocamento.0,
             y as i64 + self.deslocamento.1,
@@ -237,8 +252,8 @@ impl Fonte {
         self.ler(x as i64, y as i64)
     }
 
-    fn ler(&mut self, ox: i64, oy: i64) -> Option<[u8; 4]> {
-        if let Some(camada) = &mut self.so_a_camada {
+    fn ler(&self, ox: i64, oy: i64) -> Option<[u8; 4]> {
+        if let Some(camada) = &self.so_a_camada {
             if ox < 0 || oy < 0 || ox >= camada.largura as i64 || oy >= camada.altura as i64 {
                 return None;
             }
@@ -256,16 +271,15 @@ impl Fonte {
     /// A foto composta em `(ox, oy)` (o tile composto na primeira leitura);
     /// `None` fora da foto.
     #[inline]
-    fn cor_composta(&mut self, ox: i64, oy: i64) -> Option<[u8; 3]> {
+    fn cor_composta(&self, ox: i64, oy: i64) -> Option<[u8; 3]> {
         let (largura, altura) = (self.base.width(), self.base.height());
         if ox < 0 || oy < 0 || ox >= largura as i64 || oy >= altura as i64 {
             return None;
         }
         let (ox, oy) = (ox as u32, oy as u32);
-        let (base, doc) = (&self.base, &self.doc);
-        let tile = self.tiles.lugar(ox, oy).get_or_insert_with(|| {
+        let tile = self.tiles.lugar(ox, oy).get_or_init(|| {
             let ret = retangulo_do_tile(crate::tiles::tile_de(ox, oy), largura, altura);
-            composicao::compor_recorte(base, doc, &ret)
+            composicao::compor_recorte(&self.base, &self.doc, &ret)
         });
         Some(tile.get_pixel(ox % LADO_DO_TILE, oy % LADO_DO_TILE).0)
     }
@@ -288,6 +302,11 @@ impl Fonte {
 
     /// A cor que vai para `(x, y)`; `None` quando a origem cai fora da foto.
     pub fn cor(&mut self, x: u32, y: u32) -> Option<[u8; 3]> {
+        self.ler_cor(x, y)
+    }
+
+    /// A [`cor`](Self::cor), lida por qualquer thread.
+    pub(crate) fn ler_cor(&self, x: u32, y: u32) -> Option<[u8; 3]> {
         self.cor_composta(
             x as i64 + self.deslocamento.0,
             y as i64 + self.deslocamento.1,

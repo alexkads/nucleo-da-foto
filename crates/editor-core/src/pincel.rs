@@ -616,6 +616,17 @@ impl Traco {
     }
 
     fn carimbar(&mut self, camada: &mut CamadaDePixels, cx: f32, cy: f32) -> Retangulo {
+        self.carimbar_com(camada, cx, cy, crate::nucleos().unwrap_or(1))
+    }
+
+    /// O carimbo, com até `nucleos` threads na conta dos pixels.
+    fn carimbar_com(
+        &mut self,
+        camada: &mut CamadaDePixels,
+        cx: f32,
+        cy: f32,
+        nucleos: usize,
+    ) -> Retangulo {
         if self.pincel.ferramenta == Ferramenta::Misturador {
             return self.carimbar_misturando(camada, cx, cy);
         }
@@ -629,6 +640,25 @@ impl Traco {
             return Retangulo::default();
         }
         let area = Retangulo::novo(x0, y0, x1 - x0, y1 - y0);
+        let ponta = Ponta {
+            pincel: self.pincel,
+            tabela: &self.tabela,
+            alfa_travado: self.alfa_travado,
+            centro: (cx, cy),
+            fluxo: self.pincel.fluxo.clamp(0.0, 1.0),
+            opacidade: self.pincel.opacidade.clamp(0.0, 1.0),
+            xs: (x0, x1),
+            ys: (y0, y1),
+        };
+        // 🧵 **A ponta grande em faixas, uma thread por núcleo.** Os tiles
+        // de antes (do desfazer), a cobertura e o tile para escrever são
+        // registrados antes, em série e na ordem de sempre; cada pixel só lê
+        // o que é dele (e a fonte, que todas as threads leem), então a conta
+        // de cada um é a mesma, em qualquer ordem — a camada sai igual byte
+        // a byte.
+        let paralelo =
+            nucleos > 1 && area.largura as usize * area.altura as usize >= PIXELS_PARA_DIVIDIR;
+        let mut divididos = Vec::new();
         for posicao in camada.tiles_do_retangulo(&area) {
             self.antes
                 .entry(posicao)
@@ -638,99 +668,90 @@ impl Traco {
                 .cobertura
                 .entry(posicao)
                 .or_insert_with(|| vec![0; (LADO_DO_TILE * LADO_DO_TILE) as usize]);
-            let fluxo = self.pincel.fluxo.clamp(0.0, 1.0);
-            let opacidade = self.pincel.opacidade.clamp(0.0, 1.0);
             let mascara = self.selecao.as_ref().map(|s| s.do_tile(posicao));
             if let Some(Err(0)) = mascara {
                 // O tile inteiro está fora da seleção.
                 continue;
             }
             let tile = camada.tile_mut(posicao);
-            let (tx0, ty0) = (
-                posicao.0 as u32 * LADO_DO_TILE,
-                posicao.1 as u32 * LADO_DO_TILE,
+            if paralelo {
+                divididos.push((posicao, antes, mascara));
+                continue;
+            }
+            ponta.no_tile(
+                self.fonte.as_ref(),
+                posicao,
+                0,
+                mascara,
+                antes.as_deref().map(Vec::as_slice),
+                tile,
+                cobertura,
             );
-            let (px0, px1) = (x0.max(tx0), x1.min(tx0 + LADO_DO_TILE));
-            let (py0, py1) = (y0.max(ty0), y1.min(ty0 + LADO_DO_TILE));
-            for py in py0..py1 {
-                for px in px0..px1 {
-                    let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
-                    let mut c = self.tabela.em(dx * dx + dy * dy);
-                    if c == 0 {
-                        continue;
-                    }
-                    let (lx, ly) = (px - tx0, py - ty0);
-                    let k = (ly * LADO_DO_TILE + lx) as usize;
-                    match mascara {
-                        None | Some(Err(255)) => {}
-                        Some(Err(m)) => c = ((c as u32 * m as u32 + 127) / 255) as u8,
-                        Some(Ok(m)) => c = ((c as u32 * m[k] as u32 + 127) / 255) as u8,
-                    }
-                    if c == 0 {
-                        continue;
-                    }
-                    // m ← m + fluxo·c·(1 − m), em 16 bits.
-                    let m = cobertura[k] as f32 / CHEIO as f32;
-                    let novo_m = m + fluxo * crate::SOBRE_255[c as usize] * (1.0 - m);
-                    let q = crate::arredondado(novo_m * CHEIO as f32).min(CHEIO as f32) as u16;
-                    if q <= cobertura[k] {
-                        continue;
-                    }
-                    cobertura[k] = q;
-                    let a = q as f32 / CHEIO as f32 * opacidade;
-                    let i = indice(lx, ly);
-                    let de_antes = match &antes {
-                        Some(t) => [t[i], t[i + 1], t[i + 2], t[i + 3]],
-                        None => [0; 4],
-                    };
-                    let alfa_de_antes = de_antes[3];
-                    let de_antes = match self.alfa_travado {
-                        true if alfa_de_antes == 0 => continue,
-                        // A conta como se o pixel fosse opaco: só a cor muda.
-                        true => [de_antes[0], de_antes[1], de_antes[2], 255],
-                        false => de_antes,
-                    };
-                    let mut novo = match (self.pincel.ferramenta, self.fonte.as_mut()) {
-                        (Ferramenta::Carimbo | Ferramenta::Recuperacao, Some(fonte)) => {
-                            match fonte.cor_com_alfa(px, py) {
-                                // O alfa da origem (a camada atual tem
-                                // transparência) entra na cobertura.
-                                Some([r, g, b, alfa]) => {
-                                    let a = a * alfa as f32 / 255.0;
-                                    if a <= 0.0 {
-                                        continue;
-                                    }
-                                    pintar(
-                                        &Pincel {
-                                            cor: [r, g, b],
-                                            ..self.pincel
-                                        },
-                                        de_antes,
-                                        a,
-                                    )
-                                }
-                                // A origem caiu fora da foto: este pixel fica.
-                                None => continue,
-                            }
-                        }
-                        (f, Some(fonte)) if f.le_a_foto() => {
-                            let (Some(foto), Some(suave)) =
-                                (fonte.cor(px, py), fonte.desfocada(px, py))
-                            else {
-                                continue;
-                            };
-                            let cor = cor_da_ferramenta(f, foto, suave);
-                            aplicar_alfa(&Pincel { cor, ..self.pincel }, de_antes, a)
-                        }
-                        _ => pintar(&self.pincel, de_antes, a),
-                    };
-                    if self.alfa_travado {
-                        novo[3] = alfa_de_antes;
-                    }
-                    tile[i..i + 4].copy_from_slice(&novo);
+        }
+        if divididos.is_empty() {
+            return area;
+        }
+        // Cada tile em faixas de linhas, e as faixas repartidas entre as
+        // threads (a borda da ponta tem menos pixels que o miolo).
+        let posicoes: Vec<Posicao> = divididos.iter().map(|(p, _, _)| *p).collect();
+        let tiles = camada.varios_tiles_mut(&posicoes);
+        let coberturas = varios_mut(&mut self.cobertura, &posicoes);
+        let lado = LADO_DO_TILE as usize;
+        let mut faixas = Vec::new();
+        for (((posicao, antes, mascara), tile), cobertura) in
+            divididos.iter().zip(tiles).zip(coberturas)
+        {
+            let ty0 = posicao.1 as u32 * LADO_DO_TILE;
+            let (ly0, ly1) = (y0.max(ty0) - ty0, y1.min(ty0 + LADO_DO_TILE) - ty0);
+            for (k, (linhas, cobertura)) in tile
+                .chunks_mut(LINHAS_POR_FAIXA * lado * 4)
+                .zip(cobertura.chunks_mut(LINHAS_POR_FAIXA * lado))
+                .enumerate()
+            {
+                let primeira = (k * LINHAS_POR_FAIXA) as u32;
+                if primeira >= ly1 || primeira + LINHAS_POR_FAIXA as u32 <= ly0 {
+                    continue;
                 }
+                faixas.push((
+                    *posicao,
+                    primeira,
+                    *mascara,
+                    antes.as_deref(),
+                    linhas,
+                    cobertura,
+                ));
             }
         }
+        let n = nucleos.min(faixas.len());
+        let mut lotes: Vec<Vec<_>> = (0..n).map(|_| Vec::new()).collect();
+        for (k, faixa) in faixas.into_iter().enumerate() {
+            lotes[k % n].push(faixa);
+        }
+        let fonte = self.fonte.as_ref();
+        let carimbar = |lote: Vec<_>| {
+            for (posicao, primeira, mascara, antes, linhas, cobertura) in lote {
+                let antes: Option<&Vec<u8>> = antes;
+                ponta.no_tile(
+                    fonte,
+                    posicao,
+                    primeira,
+                    mascara,
+                    antes.map(Vec::as_slice),
+                    linhas,
+                    cobertura,
+                );
+            }
+        };
+        std::thread::scope(|escopo| {
+            let mut lotes = lotes.into_iter();
+            let aqui = lotes.next();
+            for lote in lotes {
+                escopo.spawn(move || carimbar(lote));
+            }
+            if let Some(lote) = aqui {
+                carimbar(lote);
+            }
+        });
         area
     }
 
@@ -1013,6 +1034,153 @@ fn aplicar_alfa(pincel: &Pincel, antes: [u8; 4], a: f32) -> [u8; 4] {
             [r, g, b, quantizar(alfa)]
         }
     }
+}
+
+/// Uma ponta de área (em pixels) a partir da qual o carimbo divide a conta
+/// entre os núcleos: abaixo dela, abrir as threads custa mais que o ganho.
+const PIXELS_PARA_DIVIDIR: usize = 128 * 128;
+
+/// Quantas linhas de um tile vão em cada faixa do carimbo dividido.
+const LINHAS_POR_FAIXA: usize = 16;
+
+/// O que o carimbo usa em cada pixel — o mesmo para todas as faixas.
+#[derive(Clone, Copy)]
+struct Ponta<'a> {
+    pincel: Pincel,
+    tabela: &'a Tabela,
+    alfa_travado: bool,
+    centro: (f32, f32),
+    fluxo: f32,
+    opacidade: f32,
+    /// A área do carimbo na foto: `x0..x1`, `y0..y1`.
+    xs: (u32, u32),
+    ys: (u32, u32),
+}
+
+impl Ponta<'_> {
+    /// Carimba a parte da área que cai no tile em `posicao`, nas linhas de
+    /// `tile` e `cobertura` — que começam na linha `primeira` do tile (0 e o
+    /// tile inteiro, numa thread só). `mascara` e `antes` são do tile
+    /// inteiro.
+    #[allow(clippy::too_many_arguments)]
+    fn no_tile(
+        &self,
+        fonte: Option<&Fonte>,
+        posicao: Posicao,
+        primeira: u32,
+        mascara: Option<Result<&[u8], u8>>,
+        antes: Option<&[u8]>,
+        tile: &mut [u8],
+        cobertura: &mut [u16],
+    ) {
+        let (cx, cy) = self.centro;
+        let (tx0, ty0) = (
+            posicao.0 as u32 * LADO_DO_TILE,
+            posicao.1 as u32 * LADO_DO_TILE,
+        );
+        let linhas = cobertura.len() as u32 / LADO_DO_TILE;
+        let (px0, px1) = (self.xs.0.max(tx0), self.xs.1.min(tx0 + LADO_DO_TILE));
+        let (py0, py1) = (
+            self.ys.0.max(ty0 + primeira),
+            self.ys.1.min(ty0 + primeira + linhas),
+        );
+        for py in py0..py1 {
+            for px in px0..px1 {
+                let (dx, dy) = (px as f32 + 0.5 - cx, py as f32 + 0.5 - cy);
+                let mut c = self.tabela.em(dx * dx + dy * dy);
+                if c == 0 {
+                    continue;
+                }
+                let (lx, ly) = (px - tx0, py - ty0);
+                let k = (ly * LADO_DO_TILE + lx) as usize;
+                match mascara {
+                    None | Some(Err(255)) => {}
+                    Some(Err(m)) => c = ((c as u32 * m as u32 + 127) / 255) as u8,
+                    Some(Ok(m)) => c = ((c as u32 * m[k] as u32 + 127) / 255) as u8,
+                }
+                if c == 0 {
+                    continue;
+                }
+                // A cobertura e o tile para escrever, nas linhas desta faixa.
+                let kf = k - (primeira * LADO_DO_TILE) as usize;
+                // m ← m + fluxo·c·(1 − m), em 16 bits.
+                let m = cobertura[kf] as f32 / CHEIO as f32;
+                let novo_m = m + self.fluxo * crate::SOBRE_255[c as usize] * (1.0 - m);
+                let q = crate::arredondado(novo_m * CHEIO as f32).min(CHEIO as f32) as u16;
+                if q <= cobertura[kf] {
+                    continue;
+                }
+                cobertura[kf] = q;
+                let a = q as f32 / CHEIO as f32 * self.opacidade;
+                let i = indice(lx, ly);
+                let de_antes = match antes {
+                    Some(t) => [t[i], t[i + 1], t[i + 2], t[i + 3]],
+                    None => [0; 4],
+                };
+                let alfa_de_antes = de_antes[3];
+                let de_antes = match self.alfa_travado {
+                    true if alfa_de_antes == 0 => continue,
+                    // A conta como se o pixel fosse opaco: só a cor muda.
+                    true => [de_antes[0], de_antes[1], de_antes[2], 255],
+                    false => de_antes,
+                };
+                let mut novo = match (self.pincel.ferramenta, fonte) {
+                    (Ferramenta::Carimbo | Ferramenta::Recuperacao, Some(fonte)) => {
+                        match fonte.ler_cor_com_alfa(px, py) {
+                            // O alfa da origem (a camada atual tem
+                            // transparência) entra na cobertura.
+                            Some([r, g, b, alfa]) => {
+                                let a = a * alfa as f32 / 255.0;
+                                if a <= 0.0 {
+                                    continue;
+                                }
+                                pintar(
+                                    &Pincel {
+                                        cor: [r, g, b],
+                                        ..self.pincel
+                                    },
+                                    de_antes,
+                                    a,
+                                )
+                            }
+                            // A origem caiu fora da foto: este pixel fica.
+                            None => continue,
+                        }
+                    }
+                    (f, Some(fonte)) if f.le_a_foto() => {
+                        let (Some(foto), Some(suave)) =
+                            (fonte.ler_cor(px, py), fonte.ler_desfocada(px, py))
+                        else {
+                            continue;
+                        };
+                        let cor = cor_da_ferramenta(f, foto, suave);
+                        aplicar_alfa(&Pincel { cor, ..self.pincel }, de_antes, a)
+                    }
+                    _ => pintar(&self.pincel, de_antes, a),
+                };
+                if self.alfa_travado {
+                    novo[3] = alfa_de_antes;
+                }
+                let i = indice(lx, ly - primeira);
+                tile[i..i + 4].copy_from_slice(&novo);
+            }
+        }
+    }
+}
+
+/// Os valores destas chaves (que existem e não se repetem), todos de uma
+/// vez, na ordem pedida.
+fn varios_mut<'a, V>(mapa: &'a mut BTreeMap<Posicao, V>, chaves: &[Posicao]) -> Vec<&'a mut V> {
+    let mut achados: Vec<Option<&mut V>> = chaves.iter().map(|_| None).collect();
+    for (chave, valor) in mapa.iter_mut() {
+        if let Some(k) = chaves.iter().position(|c| c == chave) {
+            achados[k] = Some(valor);
+        }
+    }
+    achados
+        .into_iter()
+        .map(|v| v.expect("a chave existe"))
+        .collect()
 }
 
 /// Os trechos `[início, fim)` de `x0..x1` (com `0 ≤ x0`) que não saem de uma
@@ -1628,8 +1796,9 @@ mod testes {
     /// ele (o pincel, a borracha, o carimbo, a recuperação, as de tom e as de
     /// foco), pontas pequena e dura, média e grande e macia, os modos Normal
     /// e Multiplicação com fluxo e opacidade cheios e parciais, sem seleção e
-    /// com uma elipse difusa (e invertida), com e sem o alfa travado, e
-    /// carimbos que saem da foto.
+    /// com uma elipse difusa (e invertida, e num canto), com e sem o alfa
+    /// travado, carimbos que saem da foto, e a ponta grande numa thread e
+    /// dividida em três.
     #[test]
     fn o_carimbo_e_o_de_antes() {
         use crate::documento::{BaseRef, Documento};
@@ -1651,6 +1820,17 @@ mod testes {
         let mut invertida = (*elipse).clone();
         invertida.inverter();
         let invertida = Arc::new(invertida);
+        // Uma seleção num canto: com a ponta grande, quase todo tile fica
+        // inteiro fora dela.
+        let canto = Arc::new(Selecao::da_forma_com(
+            l,
+            a,
+            &Forma::Elipse(Retangulo::novo(40, 30, 160, 170)),
+            Acabamento {
+                suavizar: true,
+                difusao: 8,
+            },
+        ));
         let ferramentas = [
             Ferramenta::Pincel,
             Ferramenta::Borracha,
@@ -1674,13 +1854,31 @@ mod testes {
                 for (modo, fluxo, opacidade) in
                     [(Modo::Normal, 1.0, 1.0), (Modo::Multiplicacao, 0.07, 0.6)]
                 {
-                    let selecoes = if raio > 100.0 {
+                    // A ponta grande se divide entre as threads: numa e em
+                    // três (com a fonte, as três leem a mesma).
+                    let grande = raio > 100.0;
+                    let dividida = grande && !ferramenta.le_a_foto();
+                    let selecoes = if dividida {
+                        vec![
+                            None,
+                            Some(elipse.clone()),
+                            Some(invertida.clone()),
+                            Some(canto.clone()),
+                        ]
+                    } else if raio > 100.0 {
                         vec![None, Some(elipse.clone())]
                     } else {
                         vec![None, Some(elipse.clone()), Some(invertida.clone())]
                     };
+                    let combinacoes: &[(bool, usize)] = if dividida {
+                        &[(false, 1), (true, 1), (false, 3), (true, 3)]
+                    } else if grande {
+                        &[(false, 1), (true, 1), (false, 3)]
+                    } else {
+                        &[(false, 1), (true, 1)]
+                    };
                     for selecao in selecoes {
-                        for travado in [false, true] {
+                        for &(travado, nucleos) in combinacoes {
                             let pincel = Pincel {
                                 ferramenta,
                                 raio,
@@ -1713,11 +1911,12 @@ mod testes {
                             let (mut novo, mut antigo) = (traco(), traco());
                             let (mut c_novo, mut c_antigo) = (camada_variada(), camada_variada());
                             let caso = format!(
-                                "{ferramenta:?} raio {raio} {modo:?} seleção {} travado {travado}",
+                                "{ferramenta:?} raio {raio} {modo:?} seleção {} travado {travado} \
+                                 em {nucleos} thread(s)",
                                 selecao.is_some()
                             );
                             for (cx, cy) in centros {
-                                let sujo = novo.carimbar(&mut c_novo, cx, cy);
+                                let sujo = novo.carimbar_com(&mut c_novo, cx, cy, nucleos);
                                 let sujo_antes =
                                     carimbar_antigo(&mut antigo, &mut c_antigo, cx, cy);
                                 assert_eq!(sujo, sujo_antes, "{caso} em ({cx}, {cy})");
@@ -1734,6 +1933,78 @@ mod testes {
                             );
                             assert!(c_novo == c_antigo, "{caso}: a camada no fim");
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 🧵 **A ponta grande dividida entre as threads pinta o que uma thread
+    /// só pinta**, carimbo a carimbo: centros que levam o começo e o fim da
+    /// área a cada linha de uma faixa (e de um tile), ponta dura e macia,
+    /// com e sem seleção, o pincel e as ferramentas que leem a foto (o
+    /// carimbo, de outro lugar; o desfoque, no lugar), em três e em sete
+    /// threads.
+    #[test]
+    fn a_ponta_dividida_e_a_de_uma_thread() {
+        use crate::documento::{BaseRef, Documento};
+        use crate::selecao::{Acabamento, Forma};
+        let (l, a) = (700, 520);
+        let base = Arc::new(image::RgbImage::from_fn(l, a, |x, y| {
+            image::Rgb([(x * 3) as u8, (y * 7) as u8, (x ^ y) as u8])
+        }));
+        let doc = Documento::novo(BaseRef::da_imagem(&base));
+        let elipse = Arc::new(Selecao::da_forma_com(
+            l,
+            a,
+            &Forma::Elipse(Retangulo::novo(80, 60, 520, 380)),
+            Acabamento {
+                suavizar: true,
+                difusao: 8,
+            },
+        ));
+        let casos = [
+            (Ferramenta::Pincel, 70.0, 1.0),
+            (Ferramenta::Pincel, 150.0, 0.5),
+            (Ferramenta::Carimbo, 90.0, 0.7),
+            (Ferramenta::Desfoque, 90.0, 0.7),
+        ];
+        for (ferramenta, raio, dureza) in casos {
+            for selecao in [None, Some(elipse.clone())] {
+                for nucleos in [3, 7] {
+                    let pincel = Pincel {
+                        ferramenta,
+                        raio,
+                        dureza,
+                        cor: [200, 40, 90],
+                        ..Pincel::default()
+                    };
+                    let traco = || {
+                        let t = Traco::novo(pincel).dentro_de(selecao.clone());
+                        match ferramenta {
+                            Ferramenta::Carimbo => {
+                                t.copiando_de(Fonte::nova(base.clone(), &doc, 0, (-120.0, 35.0)))
+                            }
+                            Ferramenta::Desfoque => {
+                                t.copiando_de(Fonte::nova(base.clone(), &doc, 0, (0.0, 0.0)))
+                            }
+                            _ => t,
+                        }
+                    };
+                    let (mut um, mut varios) = (traco(), traco());
+                    let (mut c_um, mut c_varios) = (camada_variada(), camada_variada());
+                    for k in 0..25 {
+                        let (cx, cy) = (200.0 + k as f32 * 11.3, 230.0 + k as f32 * 0.71);
+                        let caso = format!(
+                            "{ferramenta:?} raio {raio} em {nucleos} threads, ({cx}, {cy})"
+                        );
+                        let sujo = varios.carimbar_com(&mut c_varios, cx, cy, nucleos);
+                        assert_eq!(sujo, um.carimbar_com(&mut c_um, cx, cy, 1), "{caso}");
+                        assert!(c_varios == c_um, "{caso}");
+                        assert!(
+                            varios.cobertura == um.cobertura && varios.antes == um.antes,
+                            "{caso}: o estado do traço"
+                        );
                     }
                 }
             }
