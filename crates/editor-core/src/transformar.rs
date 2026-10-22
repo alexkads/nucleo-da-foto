@@ -16,6 +16,7 @@
 //! 🔑 Deslocamento inteiro, sem escala nem giro, cai exatamente nos centros
 //! dos pixels: o mover não borra nada.
 
+use crate::byte_arredondado;
 use crate::mesclagem::{mesclar_em_camada, Modo};
 use crate::retangulo::Retangulo;
 use crate::selecao::Selecao;
@@ -287,20 +288,20 @@ impl Conteudo {
             return [0.0; 4];
         }
         let k = ((y as u32 * self.caixa.largura + x as u32) * 4) as usize;
-        let p = &self.rgba[k..k + 4];
-        let a = SOBRE_255[p[3] as usize];
-        [
-            SOBRE_255[p[0] as usize] * a,
-            SOBRE_255[p[1] as usize] * a,
-            SOBRE_255[p[2] as usize] * a,
-            a,
-        ]
+        premultiplicar(&self.rgba[k..k + 4])
     }
 
     /// Lê bilinear no ponto `(u, v)` em pixels da caixa (o centro do pixel
-    /// `(0, 0)` é `(0,5, 0,5)`). Devolve RGBA de alfa reto.
+    /// `(0, 0)` é `(0,5, 0,5)`). Devolve RGBA de alfa reto. Os laços usam o
+    /// [`Amostrador`], montado uma vez.
+    #[cfg(test)]
     pub(crate) fn amostra(&self, u: f32, v: f32) -> [u8; 4] {
-        let (u, v) = (u - 0.5, v - 0.5);
+        Amostrador::de(self).amostra(u, v)
+    }
+
+    /// A amostra de antes do miolo, vizinho a vizinho: a conta de sempre, que
+    /// a borda da caixa ainda usa.
+    fn amostra_na_borda(&self, u: f32, v: f32) -> [u8; 4] {
         let (x0, y0) = (u.floor(), v.floor());
         let (fx, fy) = (u - x0, v - y0);
         let (x0, y0) = (x0 as i64, y0 as i64);
@@ -319,13 +320,92 @@ impl Conteudo {
                 soma[i] += p[i] * peso;
             }
         }
-        let a = soma[3];
-        if a <= 1.0 / 512.0 {
-            return [0; 4];
-        }
-        let q = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
-        [q(soma[0] / a), q(soma[1] / a), q(soma[2] / a), q(a)]
+        alfa_reto(soma)
     }
+}
+
+/// A amostra bilinear de um [`Conteudo`] com os limites do miolo já
+/// contados: o que os laços do ⌘T e do Deformar chamam a cada pixel, montado
+/// uma vez fora deles.
+#[derive(Clone, Copy)]
+pub(crate) struct Amostrador<'a> {
+    conteudo: &'a Conteudo,
+    /// Abaixo daqui (`largura − 1`, `altura − 1`), `u − ½` e `v − ½` têm os
+    /// quatro vizinhos dentro da caixa.
+    miolo: (f32, f32),
+}
+
+impl<'a> Amostrador<'a> {
+    pub(crate) fn de(conteudo: &'a Conteudo) -> Self {
+        // Até 2²⁴, onde o `f32` ainda conta de um em um (o limite é exato).
+        let limite = |lado: u32| lado.saturating_sub(1).min(1 << 24) as f32;
+        let caixa = conteudo.caixa;
+        Self {
+            conteudo,
+            miolo: (limite(caixa.largura), limite(caixa.altura)),
+        }
+    }
+
+    /// [`Conteudo::amostra`].
+    #[inline]
+    pub(crate) fn amostra(&self, u: f32, v: f32) -> [u8; 4] {
+        let (u, v) = (u - 0.5, v - 0.5);
+        // 🔑 **No miolo da caixa** (quase todo ponto) os quatro vizinhos
+        // existem: o piso é o truncamento, nenhum cai fora, e o peso zero não
+        // precisa ser pulado — ele soma `+0,0`, que não muda a soma (tudo aqui
+        // é ≥ 0). A conta e a ordem são as da borda, escritas canal a canal
+        // para o compilador fazer os quatro de uma vez: o pixel sai igual, bit
+        // a bit (`a_amostra_do_miolo_e_a_da_borda`).
+        if !(u >= 0.0 && v >= 0.0 && u < self.miolo.0 && v < self.miolo.1) {
+            return self.conteudo.amostra_na_borda(u, v);
+        }
+        let (x0, y0) = (u as u32, v as u32);
+        let (fx, fy) = (u - x0 as f32, v - y0 as f32);
+        let pesos = [
+            (1.0 - fx) * (1.0 - fy),
+            fx * (1.0 - fy),
+            (1.0 - fx) * fy,
+            fx * fy,
+        ];
+        let linha = self.conteudo.caixa.largura as usize * 4;
+        let k = y0 as usize * linha + x0 as usize * 4;
+        let (cima, baixo) = (
+            &self.conteudo.rgba[k..k + 8],
+            &self.conteudo.rgba[k + linha..k + linha + 8],
+        );
+        let p = [
+            premultiplicar(&cima[..4]),
+            premultiplicar(&cima[4..]),
+            premultiplicar(&baixo[..4]),
+            premultiplicar(&baixo[4..]),
+        ];
+        alfa_reto(std::array::from_fn(|i| {
+            p[0][i] * pesos[0] + p[1][i] * pesos[1] + p[2][i] * pesos[2] + p[3][i] * pesos[3]
+        }))
+    }
+}
+
+/// Um pixel RGBA de alfa reto, pré-multiplicado, em `0..=1`.
+#[inline]
+fn premultiplicar(p: &[u8]) -> [f32; 4] {
+    let a = SOBRE_255[p[3] as usize];
+    [
+        SOBRE_255[p[0] as usize] * a,
+        SOBRE_255[p[1] as usize] * a,
+        SOBRE_255[p[2] as usize] * a,
+        a,
+    ]
+}
+
+/// A soma pré-multiplicada da amostra de volta a RGBA de alfa reto: a cor
+/// dividida pelo alfa, e cada canal `(v · 255).round().clamp(0, 255)`.
+#[inline]
+fn alfa_reto(soma: [f32; 4]) -> [u8; 4] {
+    let a = soma[3];
+    if a <= 1.0 / 512.0 {
+        return [0; 4];
+    }
+    [soma[0] / a, soma[1] / a, soma[2] / a, a].map(|v| byte_arredondado(v * 255.0))
 }
 
 /// Escala, giro e deslocamento em volta do centro da caixa.
@@ -574,15 +654,18 @@ pub fn desenhar_na_referencia(
         && [x0, x1, y0, y1].iter().all(|v| v.abs() < 1 << 21))
     .then_some((c.0 as i64, c.1 as i64));
 
-    let lado = LADO_DO_TILE as i64;
+    // Uma constante, e não uma variável que a faixa (outra thread) lê da pilha:
+    // com o 256 à vista, dividir e tirar o resto viram deslocamento e máscara.
+    const LADO: i64 = LADO_DO_TILE as i64;
     // As colunas de tiles que a faixa pode tocar.
-    let (tx0, tx1) = (x0.div_euclid(lado), (x1 - 1).div_euclid(lado));
+    let (tx0, tx1) = (x0.div_euclid(LADO), (x1 - 1).div_euclid(LADO));
+    let amostrador = Amostrador::de(conteudo);
     let faixa = |l0: i64| -> Vec<(crate::tiles::Posicao, Vec<u8>)> {
         // 🔑 Um tile por coluna, achado pelo índice — e não um `BTreeMap`
         // consultado a cada pixel (12 milhões de buscas por evento numa
         // camada de 12 MP). A faixa é uma linha de tiles: a coluna basta.
         let mut tiles: Vec<Option<Vec<u8>>> = (tx0..=tx1).map(|_| None).collect();
-        let (ya, yb) = (y0.max(l0 * lado), y1.min((l0 + 1) * lado));
+        let (ya, yb) = (y0.max(l0 * LADO), y1.min((l0 + 1) * LADO));
         for y in ya..yb {
             let yc = y as f32 + 0.5;
             let (pu, pv) = (c.0 + b.0 * yc, c.1 + b.1 * yc);
@@ -611,13 +694,13 @@ pub fn desenhar_na_referencia(
                 }
                 let (mut x, xe) = (xi.max(-du), xf.min(caixa.largura as i64 - du));
                 while x < xe {
-                    let fim = xe.min((x.div_euclid(lado) + 1) * lado);
+                    let fim = xe.min((x.div_euclid(LADO) + 1) * LADO);
                     let k = ((sy * caixa.largura as i64 + du + x) * 4) as usize;
                     let origem = &conteudo.rgba[k..k + ((fim - x) * 4) as usize];
                     if origem.chunks_exact(4).any(|p| p[3] != 0) {
-                        let tile = tiles[(x.div_euclid(lado) - tx0) as usize]
+                        let tile = tiles[(x.div_euclid(LADO) - tx0) as usize]
                             .get_or_insert_with(|| vec![0; crate::tiles::BYTES_DO_TILE]);
-                        let i = indice(x.rem_euclid(lado) as u32, y.rem_euclid(lado) as u32);
+                        let i = indice(x.rem_euclid(LADO) as u32, y.rem_euclid(LADO) as u32);
                         let destino = &mut tile[i..i + origem.len()];
                         destino.copy_from_slice(origem);
                         // O transparente fica como nada, como a amostra o devolve.
@@ -631,16 +714,25 @@ pub fn desenhar_na_referencia(
                 }
                 continue;
             }
-            for x in xi..xf {
-                let xc = x as f32 + 0.5;
-                let p = conteudo.amostra(pu + a.0 * xc, pv + a.1 * xc);
-                if p[3] == 0 {
-                    continue;
+            // Trecho a trecho de tile: o tile e o índice achados uma vez por
+            // trecho, e não a cada pixel.
+            let ly = y.rem_euclid(LADO) as u32;
+            let mut x = xi;
+            while x < xf {
+                let coluna = x.div_euclid(LADO);
+                let fim = xf.min((coluna + 1) * LADO);
+                let tile = &mut tiles[(coluna - tx0) as usize];
+                let mut i = indice(x.rem_euclid(LADO) as u32, ly);
+                for x in x..fim {
+                    let xc = x as f32 + 0.5;
+                    let p = amostrador.amostra(pu + a.0 * xc, pv + a.1 * xc);
+                    if p[3] != 0 {
+                        tile.get_or_insert_with(|| vec![0; crate::tiles::BYTES_DO_TILE])[i..i + 4]
+                            .copy_from_slice(&p);
+                    }
+                    i += 4;
                 }
-                let tile = tiles[(x.div_euclid(lado) - tx0) as usize]
-                    .get_or_insert_with(|| vec![0; crate::tiles::BYTES_DO_TILE]);
-                let i = indice(x.rem_euclid(lado) as u32, y.rem_euclid(lado) as u32);
-                tile[i..i + 4].copy_from_slice(&p);
+                x = fim;
             }
         }
         tiles
@@ -649,7 +741,7 @@ pub fn desenhar_na_referencia(
             .filter_map(|(tile, tx)| tile.map(|t| ((tx as i32, l0 as i32), t)))
             .collect()
     };
-    let faixas: Vec<i64> = (y0.div_euclid(lado)..=(y1 - 1).div_euclid(lado)).collect();
+    let faixas: Vec<i64> = (y0.div_euclid(LADO)..=(y1 - 1).div_euclid(LADO)).collect();
     let resultados: Vec<Vec<_>> = if faixas.len() == 1 {
         vec![faixa(faixas[0])]
     } else {
@@ -1202,6 +1294,90 @@ mod testes {
                     esperado,
                     "cor {c}, alfa {alfa}"
                 );
+            }
+        }
+    }
+
+    /// 🔑 **O arredondamento só com `f32` dá o byte do `round`.** Os 2³²
+    /// `f32` foram conferidos à parte (7 s em release, quatro núcleos); aqui
+    /// vai um a cada 4099 padrões de bits — todo expoente, os dois sinais, NaN
+    /// e infinito —, cada meio de −2 a 257 com os vizinhos dele, e os casos
+    /// de borda conhecidos.
+    #[test]
+    fn o_byte_arredondado_e_o_do_round() {
+        let antes = |x: f32| x.round().clamp(0.0, 255.0) as u8;
+        for bits in (0..=u32::MAX).step_by(4099) {
+            let x = f32::from_bits(bits);
+            assert_eq!(byte_arredondado(x), antes(x), "{x:e} ({bits:#x})");
+        }
+        for n in -2..=257 {
+            for x in [n as f32, n as f32 + 0.5] {
+                for x in [x.next_down(), x, x.next_up()] {
+                    assert_eq!(byte_arredondado(x), antes(x), "{x:e}");
+                }
+            }
+        }
+        for x in [
+            f32::NAN,
+            -f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+            f32::MIN_POSITIVE,
+            f32::MAX,
+            f32::MIN,
+            0.499_999_97,
+            8_388_607.5,
+            8_388_608.0,
+        ] {
+            assert_eq!(byte_arredondado(x), antes(x), "{x:e}");
+        }
+    }
+
+    /// 🔑 **A amostra do miolo é a de antes, bit a bit** — a conta pela
+    /// divisão, vizinho a vizinho —, num quadriculado fino que passa pelo
+    /// miolo, pela borda e pela fronteira entre os dois caminhos, inclusive
+    /// nos centros e nas arestas dos pixels e um passo de `f32` antes e
+    /// depois delas. Num conteúdo com todo par de cor e alfa, e num com alfa
+    /// variado (e zero) que atravessa tiles.
+    #[test]
+    fn a_amostra_do_miolo_e_a_da_borda() {
+        let pixel = |c: u32, alfa: u32| [c as u8, 255 - c as u8, c as u8 ^ 0x5a, alfa as u8];
+        let mut rgba = Vec::new();
+        for alfa in 0..256 {
+            for c in 0..256 {
+                rgba.extend_from_slice(&pixel(c, alfa));
+            }
+        }
+        let todos = Conteudo::da_imagem(&image::RgbaImage::from_raw(256, 256, rgba).unwrap(), 0, 0);
+        let variada = Conteudo::da_camada(&camada_variada(), None).unwrap();
+        for conteudo in [&todos, &variada] {
+            let amostrador = Amostrador::de(conteudo);
+            let (l, a) = (conteudo.caixa.largura as f32, conteudo.caixa.altura as f32);
+            let mut pontos: Vec<f32> = Vec::new();
+            let mut t = -2.0f32;
+            while t < l.max(a) + 2.0 {
+                pontos.push(t);
+                t += 0.731;
+            }
+            // Os centros e as arestas dos pixels perto da borda e da fronteira
+            // do miolo, e um passo de `f32` de cada lado.
+            for limite in [0.0, 1.0, l - 1.0, l, a - 1.0, a] {
+                for d in [-1.0f32, -0.5, 0.0, 0.5, 1.0] {
+                    let x = limite + d + 0.5;
+                    pontos.extend([x.next_down(), x, x.next_up()]);
+                }
+            }
+            for &u in &pontos {
+                for &v in pontos.iter().step_by(7) {
+                    assert_eq!(
+                        amostrador.amostra(u, v),
+                        amostra_antiga(conteudo, u, v),
+                        "({u}, {v}) em {:?}",
+                        conteudo.caixa
+                    );
+                }
             }
         }
     }

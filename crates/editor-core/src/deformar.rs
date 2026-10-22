@@ -44,11 +44,10 @@
 //! é pulado. Pontos não finitos são recusados ([`Malha::valida`]); o destino
 //! é limitado a uma margem em volta da foto, como o ⌘T.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::tiles::{indice, CamadaDePixels, Posicao, BYTES_DO_TILE, LADO_DO_TILE};
-use crate::transformar::{Caixa, Conteudo, Transformacao};
+use crate::transformar::{Amostrador, Caixa, Conteudo, Transformacao};
 
 /// Quanto o desenho guarda além da borda da foto, em fração do maior lado
 /// (a mesma regra do ⌘T).
@@ -377,10 +376,20 @@ pub fn desenhar(conteudo: &Conteudo, malha: &Malha, largura: u32, altura: u32) -
     let y_min = triangulos.iter().map(|t| t.y0).min().unwrap_or(0);
     let y_max = triangulos.iter().map(|t| t.y1).max().unwrap_or(0);
 
-    let lado = LADO_DO_TILE as i64;
+    // 🔑 Uma constante, e não uma variável que a faixa (outra thread) lê da
+    // pilha: com o 256 à vista, dividir e tirar o resto viram deslocamento e
+    // máscara — e não uma divisão inteira a cada pixel.
+    const LADO: i64 = LADO_DO_TILE as i64;
+    // As colunas de tiles que um pixel pode tocar (o `x` de cada triângulo
+    // fica entre as duas folgas da margem).
+    let tx0 = ((lim_x0 - 0.5).floor() as i64).div_euclid(LADO);
+    let tx1 = ((lim_x1 + 0.5).ceil() as i64 - 1).div_euclid(LADO);
+    let amostrador = Amostrador::de(conteudo);
     let faixa = |l0: i64| -> Vec<(Posicao, Vec<u8>)> {
-        let mut tiles: BTreeMap<Posicao, Vec<u8>> = BTreeMap::new();
-        let (fa, fb) = (l0 * lado, (l0 + 1) * lado);
+        // 🔑 Um tile por coluna, achado pelo índice — e não um `BTreeMap`
+        // consultado a cada pixel, como no ⌘T.
+        let mut tiles: Vec<Option<Vec<u8>>> = (tx0..=tx1).map(|_| None).collect();
+        let (fa, fb) = (l0 * LADO, (l0 + 1) * LADO);
         for t in triangulos.iter().filter(|t| t.y1 >= fa && t.y0 < fb) {
             let [(x0, y0), (x1, y1), (x2, y2)] = t.xy;
             let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
@@ -390,6 +399,7 @@ pub fn desenhar(conteudo: &Conteudo, malha: &Malha, largura: u32, altura: u32) -
             let xb = (xs.iter().cloned().fold(f32::MIN, f32::max).min(lim_x1) + 0.5).ceil() as i64;
             for y in t.y0.max(fa)..t.y1.min(fb) {
                 let py = y as f32 + 0.5;
+                let ly = y.rem_euclid(LADO) as u32;
                 for x in xa..xb {
                     let px = x as f32 + 0.5;
                     let w1 = ((px - x0) * (y2 - y0) - (x2 - x0) * (py - y0)) / area;
@@ -400,27 +410,29 @@ pub fn desenhar(conteudo: &Conteudo, malha: &Malha, largura: u32, altura: u32) -
                     }
                     let u = w0 * t.uv[0].0 + w1 * t.uv[1].0 + w2 * t.uv[2].0;
                     let v = w0 * t.uv[0].1 + w1 * t.uv[1].1 + w2 * t.uv[2].1;
-                    let p = conteudo.amostra(u * lc, v * ac);
-                    let posicao = (x.div_euclid(lado) as i32, y.div_euclid(lado) as i32);
-                    let i = indice(x.rem_euclid(lado) as u32, y.rem_euclid(lado) as u32);
+                    let p = amostrador.amostra(u * lc, v * ac);
+                    let tile = &mut tiles[(x.div_euclid(LADO) - tx0) as usize];
+                    let i = indice(x.rem_euclid(LADO) as u32, ly);
                     if p[3] == 0 {
                         // A dobra: o de cima apaga o de baixo também onde é
                         // transparente.
-                        if let Some(tile) = tiles.get_mut(&posicao) {
+                        if let Some(tile) = tile {
                             tile[i..i + 4].copy_from_slice(&p);
                         }
                         continue;
                     }
-                    let tile = tiles
-                        .entry(posicao)
-                        .or_insert_with(|| vec![0; BYTES_DO_TILE]);
-                    tile[i..i + 4].copy_from_slice(&p);
+                    tile.get_or_insert_with(|| vec![0; BYTES_DO_TILE])[i..i + 4]
+                        .copy_from_slice(&p);
                 }
             }
         }
-        tiles.into_iter().collect()
+        tiles
+            .into_iter()
+            .zip(tx0..)
+            .filter_map(|(tile, tx)| tile.map(|t| ((tx as i32, l0 as i32), t)))
+            .collect()
     };
-    let faixas: Vec<i64> = (y_min.div_euclid(lado)..=(y_max - 1).div_euclid(lado)).collect();
+    let faixas: Vec<i64> = (y_min.div_euclid(LADO)..=(y_max - 1).div_euclid(LADO)).collect();
     let resultados: Vec<Vec<_>> = std::thread::scope(|escopo| {
         let tarefas: Vec<_> = faixas
             .iter()
@@ -440,4 +452,283 @@ pub fn desenhar(conteudo: &Conteudo, malha: &Malha, largura: u32, altura: u32) -
         }
     }
     saida
+}
+
+#[cfg(test)]
+mod testes {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    /// A amostra de antes de 2026-10-22, lida da imagem do conteúdo: a conta
+    /// pela divisão, vizinho a vizinho.
+    fn amostra_antiga(imagem: &image::RgbaImage, u: f32, v: f32) -> [u8; 4] {
+        let (l, a) = imagem.dimensions();
+        let premultiplicado = |x: i64, y: i64| -> [f32; 4] {
+            if x < 0 || y < 0 || x >= l as i64 || y >= a as i64 {
+                return [0.0; 4];
+            }
+            let p = imagem.get_pixel(x as u32, y as u32).0;
+            let a = p[3] as f32 / 255.0;
+            [
+                p[0] as f32 / 255.0 * a,
+                p[1] as f32 / 255.0 * a,
+                p[2] as f32 / 255.0 * a,
+                a,
+            ]
+        };
+        let (u, v) = (u - 0.5, v - 0.5);
+        let (x0, y0) = (u.floor(), v.floor());
+        let (fx, fy) = (u - x0, v - y0);
+        let (x0, y0) = (x0 as i64, y0 as i64);
+        let mut soma = [0.0f32; 4];
+        for (dx, dy, peso) in [
+            (0, 0, (1.0 - fx) * (1.0 - fy)),
+            (1, 0, fx * (1.0 - fy)),
+            (0, 1, (1.0 - fx) * fy),
+            (1, 1, fx * fy),
+        ] {
+            if peso <= 0.0 {
+                continue;
+            }
+            let p = premultiplicado(x0 + dx, y0 + dy);
+            for i in 0..4 {
+                soma[i] += p[i] * peso;
+            }
+        }
+        let a = soma[3];
+        if a <= 1.0 / 512.0 {
+            return [0; 4];
+        }
+        let q = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        [q(soma[0] / a), q(soma[1] / a), q(soma[2] / a), q(a)]
+    }
+
+    /// `desenhar` de antes de 2026-10-22: um `BTreeMap` de tiles consultado a
+    /// cada pixel, e a amostra vizinho a vizinho.
+    fn desenhar_antigo(
+        conteudo: &Conteudo,
+        malha: &Malha,
+        largura: u32,
+        altura: u32,
+    ) -> CamadaDePixels {
+        let imagem = conteudo.imagem();
+        let mut saida = CamadaDePixels::nova(largura, altura);
+        let caixa = conteudo.caixa;
+        if caixa.vazia() || !malha.valida(largura, altura) {
+            return saida;
+        }
+        let (lc, ac) = (caixa.largura as f32, caixa.altura as f32);
+        // A tesselação: quadradinhos de até ~6 px na caixa (e na deformação
+        // comum, perto disso no destino), no máximo 256 por lado.
+        let comprimento = |pontos: &[(f32, f32)]| -> f32 {
+            pontos
+                .windows(2)
+                .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
+                .sum()
+        };
+        let mut maior_u = lc;
+        let mut maior_v = ac;
+        for k in 0..4 {
+            let t = k as f32 / 3.0;
+            let em_u: Vec<_> = (0..=16).map(|p| malha.ponto(p as f32 / 16.0, t)).collect();
+            let em_v: Vec<_> = (0..=16).map(|p| malha.ponto(t, p as f32 / 16.0)).collect();
+            maior_u = maior_u.max(comprimento(&em_u));
+            maior_v = maior_v.max(comprimento(&em_v));
+        }
+        let nu = ((maior_u / LADO_DO_QUADRADINHO).ceil() as usize).clamp(3, 256);
+        let nv = ((maior_v / LADO_DO_QUADRADINHO).ceil() as usize).clamp(3, 256);
+        // Meio pixel de folga além da caixa (a superfície continua além de
+        // `[0, 1]`): a borda do conteúdo esticado sai antisserrilhada pela
+        // bilinear, como no ⌘T, e não cortada no triângulo.
+        let grade = malha.grade_com_folga(nu, nv, 1.0 / lc, 1.0 / ac);
+
+        let margem = (largura.max(altura) as f32 * MARGEM_FORA_DA_FOTO).ceil();
+        let (lim_x0, lim_y0) = (-margem, -margem);
+        let (lim_x1, lim_y1) = (largura as f32 + margem, altura as f32 + margem);
+
+        // Os triângulos, na ordem do desenho, com a caixa de cada um no destino.
+        struct Triangulo {
+            xy: [(f32, f32); 3],
+            uv: [(f32, f32); 3],
+            y0: i64,
+            y1: i64,
+        }
+        let mut triangulos = Vec::with_capacity(nu * nv * 2);
+        for j in 0..nv {
+            for i in 0..nu {
+                let a = grade[j * (nu + 1) + i];
+                let b = grade[j * (nu + 1) + i + 1];
+                let c = grade[(j + 1) * (nu + 1) + i + 1];
+                let d = grade[(j + 1) * (nu + 1) + i];
+                for tri in [[a, b, c], [a, c, d]] {
+                    let xy = tri.map(|v| v.0);
+                    let area = (xy[1].0 - xy[0].0) * (xy[2].1 - xy[0].1)
+                        - (xy[2].0 - xy[0].0) * (xy[1].1 - xy[0].1);
+                    if area.abs() < 1e-6 {
+                        continue;
+                    }
+                    let ys = xy.map(|p| p.1);
+                    let (ymin, ymax) = (
+                        ys.iter().cloned().fold(f32::MAX, f32::min),
+                        ys.iter().cloned().fold(f32::MIN, f32::max),
+                    );
+                    triangulos.push(Triangulo {
+                        xy,
+                        uv: tri.map(|v| v.1),
+                        y0: (ymin.max(lim_y0) - 0.5).floor() as i64,
+                        y1: (ymax.min(lim_y1) + 0.5).ceil() as i64,
+                    });
+                }
+            }
+        }
+        if triangulos.is_empty() {
+            return saida;
+        }
+        let y_min = triangulos.iter().map(|t| t.y0).min().unwrap_or(0);
+        let y_max = triangulos.iter().map(|t| t.y1).max().unwrap_or(0);
+
+        let lado = LADO_DO_TILE as i64;
+        let faixa = |l0: i64| -> Vec<(Posicao, Vec<u8>)> {
+            let mut tiles: BTreeMap<Posicao, Vec<u8>> = BTreeMap::new();
+            let (fa, fb) = (l0 * lado, (l0 + 1) * lado);
+            for t in triangulos.iter().filter(|t| t.y1 >= fa && t.y0 < fb) {
+                let [(x0, y0), (x1, y1), (x2, y2)] = t.xy;
+                let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+                let eps = 1e-4;
+                let xs = [x0, x1, x2];
+                let xa =
+                    (xs.iter().cloned().fold(f32::MAX, f32::min).max(lim_x0) - 0.5).floor() as i64;
+                let xb =
+                    (xs.iter().cloned().fold(f32::MIN, f32::max).min(lim_x1) + 0.5).ceil() as i64;
+                for y in t.y0.max(fa)..t.y1.min(fb) {
+                    let py = y as f32 + 0.5;
+                    for x in xa..xb {
+                        let px = x as f32 + 0.5;
+                        let w1 = ((px - x0) * (y2 - y0) - (x2 - x0) * (py - y0)) / area;
+                        let w2 = ((x1 - x0) * (py - y0) - (px - x0) * (y1 - y0)) / area;
+                        let w0 = 1.0 - w1 - w2;
+                        if w0 < -eps || w1 < -eps || w2 < -eps {
+                            continue;
+                        }
+                        let u = w0 * t.uv[0].0 + w1 * t.uv[1].0 + w2 * t.uv[2].0;
+                        let v = w0 * t.uv[0].1 + w1 * t.uv[1].1 + w2 * t.uv[2].1;
+                        let p = amostra_antiga(&imagem, u * lc, v * ac);
+                        let posicao = (x.div_euclid(lado) as i32, y.div_euclid(lado) as i32);
+                        let i = indice(x.rem_euclid(lado) as u32, y.rem_euclid(lado) as u32);
+                        if p[3] == 0 {
+                            // A dobra: o de cima apaga o de baixo também onde é
+                            // transparente.
+                            if let Some(tile) = tiles.get_mut(&posicao) {
+                                tile[i..i + 4].copy_from_slice(&p);
+                            }
+                            continue;
+                        }
+                        let tile = tiles
+                            .entry(posicao)
+                            .or_insert_with(|| vec![0; BYTES_DO_TILE]);
+                        tile[i..i + 4].copy_from_slice(&p);
+                    }
+                }
+            }
+            tiles.into_iter().collect()
+        };
+        let faixas: Vec<i64> = (y_min.div_euclid(lado)..=(y_max - 1).div_euclid(lado)).collect();
+        let resultados: Vec<Vec<_>> = std::thread::scope(|escopo| {
+            let tarefas: Vec<_> = faixas
+                .iter()
+                .map(|&l| {
+                    let faixa = &faixa;
+                    escopo.spawn(move || faixa(l))
+                })
+                .collect();
+            tarefas
+                .into_iter()
+                .map(|t| t.join().unwrap_or_default())
+                .collect()
+        });
+        for (posicao, tile) in resultados.into_iter().flatten() {
+            if tile.iter().skip(3).step_by(4).any(|a| *a != 0) {
+                saida.definir(posicao, Some(Arc::new(tile)));
+            }
+        }
+        saida
+    }
+
+    /// Um bloco de 300 × 200 com cor e alfa variando (zero inclusive, e uma
+    /// borda difusa), que atravessa linhas e colunas de tiles.
+    fn conteudo_variado() -> Conteudo {
+        let mut c = CamadaDePixels::nova(700, 520);
+        for y in 150..350u32 {
+            for x in 180..480u32 {
+                let borda = (x - 180).min(479 - x).min(y - 150).min(349 - y);
+                let alfa = if (x / 23 + y / 17) % 7 == 0 {
+                    0
+                } else {
+                    ((borda * 40).min(255) as u8) | 1
+                };
+                let i = indice(x % LADO_DO_TILE, y % LADO_DO_TILE);
+                c.tile_mut(crate::tiles::tile_de(x, y))[i..i + 4].copy_from_slice(&[
+                    (x * 5) as u8,
+                    (y * 3) as u8,
+                    (x ^ y) as u8,
+                    alfa,
+                ]);
+            }
+        }
+        Conteudo::da_camada(&c, None).expect("o bloco tem pixels")
+    }
+
+    /// 🔑 **O Deformar com o tile achado pela coluna e o amostrador do miolo
+    /// desenha a mesma camada, byte a byte**: a malha parada, andando um
+    /// pedaço de pixel, levantando os pontos de baixo, dobrada sobre si,
+    /// saindo da foto e escalada com giro.
+    #[test]
+    fn o_desenho_por_coluna_e_o_de_antes() {
+        let conteudo = conteudo_variado();
+        let caixa = conteudo.caixa;
+        let parada = Malha::da_caixa(&caixa);
+        let mut andando = parada;
+        for p in andando.pontos.iter_mut().flatten() {
+            p.0 += 37.3;
+            p.1 -= 20.6;
+        }
+        let mut levantada = parada;
+        levantada.mover_ponto(2, 1, 0.0, -25.0);
+        levantada.mover_ponto(2, 2, 0.0, -25.0);
+        levantada.mover_ponto(3, 1, 0.0, -10.0);
+        levantada.mover_ponto(3, 2, 0.0, -10.0);
+        let mut dobrada = parada;
+        dobrada.mover_ponto(0, 0, 300.0, 250.0);
+        let mut fora = parada;
+        for p in fora.pontos.iter_mut().flatten() {
+            p.0 -= 400.0;
+            p.1 += 0.5;
+        }
+        let girada = Malha::da_transformacao(
+            &caixa,
+            &Transformacao {
+                dx: 11.0,
+                dy: -6.0,
+                escala_x: 1.4,
+                escala_y: 0.9,
+                angulo: 0.3,
+            },
+        );
+        for (nome, malha) in [
+            ("parada", parada),
+            ("andando", andando),
+            ("levantada", levantada),
+            ("dobrada", dobrada),
+            ("fora", fora),
+            ("girada", girada),
+        ] {
+            let novo = desenhar(&conteudo, &malha, 700, 520);
+            assert!(!novo.vazia(), "{nome}: desenhou alguma coisa");
+            assert!(
+                novo == desenhar_antigo(&conteudo, &malha, 700, 520),
+                "{nome}"
+            );
+        }
+    }
 }

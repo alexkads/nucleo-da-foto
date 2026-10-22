@@ -80,6 +80,27 @@ pub use sessao::{
 pub use tiles::{CamadaDePixels, LADO_DO_TILE};
 pub use transformar::{Caixa, Transformacao};
 
+/// `x.round().clamp(0.0, 255.0) as u8`, só com contas de `f32`: sem chamar
+/// o `roundf` da libm (o x86-64 de base não tem a instrução) nem converter
+/// para inteiro com saturação, e de um jeito que o compilador faz os quatro
+/// canais de uma vez.
+///
+/// Limitar a `0..=255` antes de arredondar dá o mesmo byte (e o NaN vira 0,
+/// como no `as u8`). Ali, `x + 2²³` cai num inteiro — o mais próximo, e no
+/// empate o par —, que fica nos bits de baixo da soma. Só o meio que o par
+/// levou para baixo ainda sobe, como no `round` (para longe do zero). O byte
+/// é o mesmo do `round` em todo `f32` — conferido nos 2³² (nos testes do
+/// `transformar`, `o_byte_arredondado_e_o_do_round` confere uma parte).
+#[inline]
+pub(crate) fn byte_arredondado(x: f32) -> u8 {
+    const DOIS_A_23: f32 = 8_388_608.0;
+    let x = if x > 0.0 { x } else { 0.0 };
+    let x = if x < 255.0 { x } else { 255.0 };
+    let soma = x + DOIS_A_23;
+    let empate_para_baixo = x - (soma - DOIS_A_23) == 0.5;
+    (soma.to_bits() as u8) + empate_para_baixo as u8
+}
+
 /// Quantos núcleos o sistema diz ter — perguntado uma vez por processo.
 ///
 /// 🔑 No Linux, `available_parallelism` lê os arquivos do cgroup a cada
