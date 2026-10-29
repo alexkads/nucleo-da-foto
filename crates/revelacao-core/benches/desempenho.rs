@@ -3,7 +3,10 @@
 //!
 //! Imprime a mediana de cada caminho, para comparar antes e depois de uma
 //! mudança na mesma máquina. Não é teste: nada aqui falha. O que roda na GPU
-//! fica de fora (depende da placa, não do código).
+//! fica de fora (depende da placa, não do código) — exceto o último bloco, que
+//! compara os dois caminhos da prévia da tela **na mesma GPU**: o de antes
+//! (revelar inteira + enquadrar, converter e histograma na CPU) e o de agora
+//! (`Motor::revelar_para_tela`, tudo na GPU).
 
 #![allow(clippy::print_stdout)]
 
@@ -13,6 +16,7 @@ use image::{DynamicImage, RgbaImage};
 use revelacao_core::guia;
 use revelacao_core::preenchimento::preencher_buraco;
 use revelacao_core::transformacao::{self, Corte};
+use revelacao_core::{Ajustes, Motor, OrdemDosCanais, PedidoDeTela};
 
 /// Roda `f` uma vez para aquecer, depois `vezes` vezes, e imprime a mediana.
 ///
@@ -122,4 +126,103 @@ fn main() {
             7,
         ));
     });
+
+    previa_da_tela();
+}
+
+/// A prévia de um arrasto de slider, 2560×1707, ponta a ponta na thread do
+/// motor: o caminho de antes contra o de agora (tudo na GPU). O que o de agora
+/// tira é exatamente o que antes rodava **na thread da interface**, a cada
+/// resultado: enquadrar, trocar R↔B e o histograma.
+fn previa_da_tela() {
+    let Some(mut motor) = Motor::abrir() else {
+        println!("(sem GPU: a prévia da tela fica de fora)");
+        return;
+    };
+    let (l, a) = (2560u32, 1707);
+    let pixels = std::sync::Arc::new(
+        (0..a)
+            .flat_map(|y| {
+                (0..l).flat_map(move |x| {
+                    [
+                        (x * 7 + y) as u8,
+                        ((y * 3) ^ x) as u8,
+                        ((x + y) / 5) as u8,
+                        255,
+                    ]
+                })
+            })
+            .collect::<Vec<u8>>(),
+    );
+    let ajustes = Ajustes {
+        exposure: 0.4,
+        ..Ajustes::default()
+    };
+    let perspectiva = revelacao_core::perspectiva::Perspectiva {
+        rotacao: [4.0, -3.0, 1.5],
+        ..Default::default()
+    };
+    let casos = [
+        ("sem corte", Corte::inteiro()),
+        (
+            "recorte reto",
+            Corte::novo(0.1, 0.1, 0.8, 0.8, 0, 0.0, false, false),
+        ),
+        (
+            "endireitar 3°",
+            Corte::novo(0.1, 0.1, 0.8, 0.8, 0, 3.0, false, false),
+        ),
+        (
+            "perspectiva",
+            Corte::novo(0.05, 0.05, 0.9, 0.9, 0, 1.0, false, false).com_perspectiva(perspectiva),
+        ),
+    ];
+    println!("\nprévia da tela, 2560×1707, backend {}:", motor.backend());
+    for (nome, corte) in casos {
+        motor.definir_corte(&corte);
+        medir(
+            &format!("  antes · {nome}: revelar + CPU (enquadrar, BGRA, histograma)"),
+            10,
+            || {
+                let revelada = motor.revelar(&pixels, l, a, &ajustes).expect("GPU");
+                let exibida = transformacao::aplicar(&revelada, &corte, true);
+                let mut bytes = exibida.into_rgba8();
+                for p in bytes.as_chunks_mut::<4>().0 {
+                    p.swap(0, 2);
+                }
+                // O histograma amostrado da tela (250 mil pixels).
+                let passo = (bytes.pixels().len() / 250_000).max(1);
+                let mut h = [0u32; 256];
+                for p in bytes.pixels().step_by(passo) {
+                    h[p.0[2] as usize] += 1;
+                }
+                black_box((bytes, h));
+            },
+        );
+        medir(
+            &format!("  agora · {nome}: revelar_para_tela (tudo na GPU)"),
+            10,
+            || {
+                let r = motor
+                    .revelar_para_tela(
+                        &pixels,
+                        l,
+                        a,
+                        &ajustes,
+                        PedidoDeTela {
+                            recortar: true,
+                            ordem: OrdemDosCanais::Bgra,
+                            inteira: false,
+                        },
+                    )
+                    .expect("GPU");
+                let passo = (r.tela.bytes.len() / 4 / 250_000).max(1);
+                let mut h = [0u32; 256];
+                for p in r.tela.bytes.as_chunks::<4>().0.iter().step_by(passo) {
+                    h[p[2] as usize] += 1;
+                }
+                black_box((r, h));
+            },
+        );
+    }
 }

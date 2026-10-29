@@ -5,6 +5,20 @@
 Sem mudança na foto que sai nem na API (`make semver`: nada pede versão nova). Cada caminho novo tem
 o teste que o compara byte a byte com o de antes. Troque a tag e compile.
 
+### A prévia da tela enquadrada na GPU (28/out/2026)
+
+- `revelacao-core`: **`Motor::revelar_para_tela`** — a foto volta da GPU já espelhada, girada,
+  endireitada, corrigida de perspectiva e recortada, no tamanho da saída, por uma passada de compute
+  (`shaders/enquadrar.wgsl`, `src/enquadrador.rs`) que amostra a revelada pela matriz de
+  `Corte::mapa`; e na ordem de canais que a janela desenha (`OrdemDosCanais::Bgra`), sem a troca
+  R↔B na CPU. Com `PedidoDeTela::inteira`, a foto inteira em RGBA (a de `Motor::revelar`) vem junto
+  na mesma ida. É o que o Lightroom faz: a prévia nasce na GPU; no VintageLightbox o enquadramento
+  vinha depois, na thread da interface, a cada resultado de slider (33 a 77 ms por quadro numa foto
+  com perspectiva, medido num balcão). O arquivo que sai continua pelo caminho da CPU, byte a byte
+  o de sempre; sem ângulo nem perspectiva a GPU devolve o mesmo byte (o retângulo é o inteiro de
+  `Corte::retangulo`), com ângulo ou perspectiva difere de um nível aqui e ali, nas bordas.
+  `cargo bench -p revelacao-core` ganhou o bloco "prévia da tela" (antes × agora, na mesma GPU).
+
 ### Desempenho
 Na bancada (`make bancada`, contra a v0.1.2), foto de 12 MP, 4 núcleos:
 
