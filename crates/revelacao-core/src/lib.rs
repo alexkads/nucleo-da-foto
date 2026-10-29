@@ -93,6 +93,7 @@
 
 pub mod ajustes;
 pub mod cronometro;
+pub mod enquadrador;
 pub mod guia;
 pub mod jpeg;
 pub mod lightroom;
@@ -110,6 +111,7 @@ pub mod vinheta_darktable;
 
 pub use ajustes::{Ajustes, QUANTIDADE};
 pub use cronometro::TemposDaGpu;
+pub use enquadrador::{ImagemDaTela, OrdemDosCanais, PedidoDeTela, RevelacaoParaTela};
 pub use locais::ParametrosLocais;
 pub use mascaras::MedidasDosLocais;
 #[cfg(not(target_arch = "wasm32"))]

@@ -43,6 +43,7 @@ use image::DynamicImage;
 use lru::LruCache;
 
 use crate::ajustes::{Ajustes, TAMANHO_DO_UNIFORM};
+use crate::enquadrador::{ImagemDaTela, PedidoDeTela, RevelacaoParaTela};
 use crate::locais::ParametrosLocais;
 use crate::mascaras::{Mascaras, MedidasDosLocais, Rasterizador};
 use crate::transformacao::{Corte, Quadro};
@@ -173,9 +174,11 @@ fn criar_recursos(
         Pipeline::Compute(_) => wgpu::TextureUsages::STORAGE_BINDING,
         Pipeline::Fragmento { .. } => wgpu::TextureUsages::RENDER_ATTACHMENT,
     };
+    // `TEXTURE_BINDING`: a passada do enquadramento (`enquadrador.rs`) lê a
+    // revelada com filtro bilinear para a tela.
     let textura_saida = dispositivo.create_texture(&descritor(
         "Output Texture",
-        uso_da_saida | wgpu::TextureUsages::COPY_SRC,
+        uso_da_saida | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
     ));
 
     let buffer_ajustes = dispositivo.create_buffer(&wgpu::BufferDescriptor {
@@ -601,6 +604,9 @@ pub struct Motor {
     tempos: TemposDoMotor,
     /// Ver [`Motor::info`].
     info: InfoDoAdaptador,
+    /// O enquadramento na GPU (`enquadrador.rs`), criado na primeira
+    /// revelação para a tela.
+    enquadrador: Option<crate::enquadrador::Enquadrador>,
 }
 
 /// Quem é a GPU do motor — para o relatório de desempenho.
@@ -901,6 +907,7 @@ impl Motor {
             rasterizador: None,
             medidas: MedidasDosLocais::default(),
             backend,
+            enquadrador: None,
         })
     }
 
@@ -1264,21 +1271,12 @@ impl Motor {
         let gpu = cronometro.and_then(|c| c.colher());
 
         let dados = fatia.get_mapped_range();
-        // A GPU devolve cada linha alinhada em 256 bytes; a imagem não tem esse
-        // enchimento. Copiar o buffer inteiro daria uma foto com listras
-        // deslocadas — e quanto mais estreita, mais torta.
-        let total = (recursos.bytes_por_linha * altura) as usize;
-        let mut saida = Vec::with_capacity(total);
-        if recursos.bytes_por_linha == recursos.bytes_por_linha_alinhado {
-            // Largura múltipla de 64 px: não há enchimento, e o buffer já é a
-            // imagem — uma cópia só, em vez de uma por linha.
-            saida.extend_from_slice(&dados[..total]);
-        } else {
-            for y in 0..altura {
-                let inicio = (y * recursos.bytes_por_linha_alinhado) as usize;
-                saida.extend_from_slice(&dados[inicio..inicio + recursos.bytes_por_linha as usize]);
-            }
-        }
+        let saida = sem_enchimento(
+            &dados,
+            recursos.bytes_por_linha,
+            recursos.bytes_por_linha_alinhado,
+            altura,
+        );
         drop(dados);
         recursos.buffer_saida.unmap();
         let fim = relogio();
@@ -1294,6 +1292,234 @@ impl Motor {
         Some(DynamicImage::ImageRgba8(image::RgbaImage::from_raw(
             largura, altura, saida,
         )?))
+    }
+
+    /// Revela e **enquadra na GPU**, para a tela — ver [`crate::enquadrador`].
+    ///
+    /// O que volta já está espelhado, girado, endireitado e recortado pelo
+    /// [`Corte`] de [`Motor::definir_corte`], no tamanho da saída e na ordem de
+    /// canais pedida: nada fica para a CPU fazer antes de desenhar. Com
+    /// [`PedidoDeTela::inteira`], a foto inteira em RGBA (a mesma de
+    /// [`Motor::revelar`]) vem junto, na mesma ida à GPU.
+    ///
+    /// `None` quando a GPU falha (dispositivo perdido), como [`Motor::revelar`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn revelar_para_tela(
+        &mut self,
+        pixels: &Arc<Vec<u8>>,
+        largura: u32,
+        altura: u32,
+        ajustes: &Ajustes,
+        pedido: PedidoDeTela,
+    ) -> Option<RevelacaoParaTela> {
+        pollster::block_on(self.revelar_para_tela_async(pixels, largura, altura, ajustes, pedido))
+    }
+
+    /// [`Motor::revelar_para_tela`] sem bloquear.
+    pub async fn revelar_para_tela_async(
+        &mut self,
+        pixels: &Arc<Vec<u8>>,
+        largura: u32,
+        altura: u32,
+        ajustes: &Ajustes,
+        pedido: PedidoDeTela,
+    ) -> Option<RevelacaoParaTela> {
+        let quadro = self.corte.quadro(largura, altura);
+        let relogio = crate::cronometro::relogio_ms;
+        let comeco = relogio();
+        let enquadrador = self
+            .enquadrador
+            .get_or_insert_with(|| crate::enquadrador::Enquadrador::novo(&self.dispositivo));
+        let Motor {
+            dispositivo,
+            fila,
+            pipeline,
+            cache,
+            locais,
+            rasterizador,
+            medidas,
+            cronometro,
+            medir,
+            tempos,
+            corte,
+            ..
+        } = self;
+        let recursos = preparar(
+            dispositivo,
+            fila,
+            pipeline,
+            cache,
+            pixels,
+            largura,
+            altura,
+            ajustes,
+            &quadro,
+        );
+        let preparado = relogio();
+        let mut cronometro = cronometro.as_mut().filter(|_| *medir);
+        let medindo = cronometro.as_deref_mut().is_some_and(|c| c.comecar());
+
+        let mut encoder = dispositivo.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Revelação Encoder (tela)"),
+        });
+        atualizar_mascaras(
+            dispositivo,
+            fila,
+            pipeline,
+            &mut encoder,
+            recursos,
+            rasterizador,
+            locais,
+            largura,
+            altura,
+            medidas,
+        );
+        let vista_de_saida = recursos
+            .textura_saida
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        crate::cronometro::na_etapa(crate::cronometro::EtapaDaGpu::Revelacao, || {
+            despachar(
+                dispositivo,
+                pipeline,
+                &mut encoder,
+                recursos,
+                largura,
+                altura,
+                &vista_de_saida,
+                FORMATO_DE_LEITURA,
+            )
+        });
+        if pedido.inteira {
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &recursos.textura_saida,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &recursos.buffer_saida,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(recursos.bytes_por_linha_alinhado),
+                        rows_per_image: Some(altura),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: largura,
+                    height: altura,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        // O enquadramento conta como parte da revelação no cronômetro: é a
+        // passada que substitui o recorte da CPU.
+        let saida = crate::cronometro::na_etapa(crate::cronometro::EtapaDaGpu::Revelacao, || {
+            enquadrador.gravar(
+                dispositivo,
+                fila,
+                &mut encoder,
+                &recursos.textura_saida,
+                (largura, altura),
+                corte,
+                pedido.recortar,
+                pedido.ordem,
+            )
+        });
+        if medindo {
+            if let Some(c) = cronometro.as_deref_mut() {
+                c.encerrar(&mut encoder);
+            }
+        }
+        fila.submit(std::iter::once(encoder.finish()));
+        if medindo {
+            if let Some(c) = cronometro.as_deref_mut() {
+                c.pedir_leitura();
+            }
+        }
+        let enviado = relogio();
+
+        // Os dois mapeamentos são pedidos antes de esperar: um `poll(Wait)`
+        // leva a GPU ao fim dos dois.
+        let fatia_da_tela = saida.buffer.slice(..);
+        let (avisa, espera_da_tela) = futures_channel::oneshot::channel();
+        fatia_da_tela.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = avisa.send(r);
+        });
+        let fatia_inteira = pedido.inteira.then(|| recursos.buffer_saida.slice(..));
+        let espera_inteira = fatia_inteira.as_ref().map(|fatia| {
+            let (avisa, espera) = futures_channel::oneshot::channel();
+            fatia.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = avisa.send(r);
+            });
+            espera
+        });
+        // 🚨 Mapeamento que falhou desmapeia antes de sair — ver `revelar_async`.
+        let tela_ok = esperar_o_mapeamento(dispositivo, fila, espera_da_tela)
+            .await
+            .is_some();
+        let inteira_ok = match espera_inteira {
+            Some(espera) => esperar_o_mapeamento(dispositivo, fila, espera)
+                .await
+                .is_some(),
+            None => true,
+        };
+        if !(tela_ok && inteira_ok) {
+            saida.buffer.unmap();
+            if pedido.inteira {
+                recursos.buffer_saida.unmap();
+            }
+            return None;
+        }
+        let voltou = relogio();
+        let gpu = cronometro.and_then(|c| c.colher());
+
+        let (largura_da_tela, altura_da_tela) = (saida.textura.width(), saida.textura.height());
+        let bytes = {
+            let dados = fatia_da_tela.get_mapped_range();
+            sem_enchimento(
+                &dados,
+                saida.bytes_por_linha,
+                saida.bytes_por_linha_alinhado,
+                altura_da_tela,
+            )
+        };
+        saida.buffer.unmap();
+        let inteira = match fatia_inteira {
+            Some(fatia) => {
+                let dados = fatia.get_mapped_range();
+                let pixels = sem_enchimento(
+                    &dados,
+                    recursos.bytes_por_linha,
+                    recursos.bytes_por_linha_alinhado,
+                    altura,
+                );
+                drop(dados);
+                recursos.buffer_saida.unmap();
+                Some(DynamicImage::ImageRgba8(image::RgbaImage::from_raw(
+                    largura, altura, pixels,
+                )?))
+            }
+            None => None,
+        };
+        let fim = relogio();
+        *tempos = TemposDoMotor {
+            preparo_ms: (preparado - comeco) as f32,
+            gravacao_ms: (enviado - preparado) as f32,
+            espera_ms: (voltou - enviado) as f32,
+            leitura_ms: (fim - voltou) as f32,
+            subiu_textura: recursos.subiu_agora,
+            gpu,
+        };
+        Some(RevelacaoParaTela {
+            tela: ImagemDaTela {
+                largura: largura_da_tela,
+                altura: altura_da_tela,
+                ordem: pedido.ordem,
+                bytes,
+            },
+            inteira,
+        })
     }
 
     /// Revela **para um alvo de quem chama**, sem ler de volta — a superfície
@@ -1365,6 +1591,27 @@ impl Motor {
         fila.submit(std::iter::once(encoder.finish()));
         Some(())
     }
+}
+
+/// Os pixels da imagem a partir do buffer lido da GPU.
+///
+/// A GPU devolve cada linha alinhada em 256 bytes; a imagem não tem esse
+/// enchimento. Copiar o buffer inteiro daria uma foto com listras deslocadas —
+/// e quanto mais estreita, mais torta.
+fn sem_enchimento(dados: &[u8], bytes_por_linha: u32, alinhado: u32, altura: u32) -> Vec<u8> {
+    let total = (bytes_por_linha * altura) as usize;
+    let mut saida = Vec::with_capacity(total);
+    if bytes_por_linha == alinhado {
+        // Largura múltipla de 64 px: não há enchimento, e o buffer já é a
+        // imagem — uma cópia só, em vez de uma por linha.
+        saida.extend_from_slice(&dados[..total]);
+    } else {
+        for y in 0..altura {
+            let inicio = (y * alinhado) as usize;
+            saida.extend_from_slice(&dados[inicio..inicio + bytes_por_linha as usize]);
+        }
+    }
+    saida
 }
 
 /// Garante os recursos do tamanho, sobe os pixels se mudaram e grava os ajustes.
@@ -1819,6 +2066,168 @@ mod testes {
             .expect("o motor não devolveu imagem")
             .into_rgba8()
             .into_raw()
+    }
+
+    /// Um degradê com detalhe fino no terceiro canal: diferença de um pixel
+    /// de deslocamento aparece como diferença de nível.
+    fn degrade(largura: u32, altura: u32) -> Arc<Vec<u8>> {
+        Arc::new(
+            (0..altura)
+                .flat_map(|y| {
+                    (0..largura).flat_map(move |x| {
+                        [
+                            (x * 255 / largura.max(1)) as u8,
+                            (y * 255 / altura.max(1)) as u8,
+                            ((x ^ y) % 256) as u8,
+                            255,
+                        ]
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// Os enquadramentos que a tela pede, um por caminho da CPU.
+    fn cortes_de_prova() -> Vec<(&'static str, Corte, bool)> {
+        let perspectiva = crate::perspectiva::Perspectiva {
+            rotacao: [4.0, -3.0, 1.5],
+            ..Default::default()
+        };
+        vec![
+            ("inteiro", Corte::inteiro(), true),
+            (
+                "reto",
+                Corte::novo(0.13, 0.21, 0.5, 0.6, 0, 0.0, false, false),
+                true,
+            ),
+            (
+                "girado",
+                Corte::novo(0.1, 0.1, 0.7, 0.8, 1, 0.0, false, false),
+                true,
+            ),
+            (
+                "espelhado",
+                Corte::novo(0.0, 0.0, 1.0, 1.0, 2, 0.0, true, true),
+                true,
+            ),
+            (
+                "girado sem recortar",
+                Corte::novo(0.1, 0.1, 0.7, 0.8, 3, 0.0, true, false),
+                false,
+            ),
+            (
+                "endireitado",
+                Corte::novo(0.1, 0.1, 0.8, 0.8, 0, 7.0, false, false),
+                true,
+            ),
+            (
+                "endireitado inteiro",
+                Corte::novo(0.1, 0.1, 0.8, 0.8, 0, -5.0, false, false),
+                false,
+            ),
+            (
+                "perspectiva",
+                Corte::novo(0.05, 0.05, 0.9, 0.9, 0, 2.0, false, false)
+                    .com_perspectiva(perspectiva),
+                true,
+            ),
+            (
+                "perspectiva inteira",
+                Corte::novo(0.05, 0.05, 0.9, 0.9, 1, 0.0, false, false)
+                    .com_perspectiva(perspectiva),
+                false,
+            ),
+        ]
+    }
+
+    /// 🔑 **O enquadramento na GPU dá a foto da CPU.** Sem reamostragem (reto,
+    /// girado, espelhado) o pixel é o mesmo byte; com ângulo ou perspectiva o
+    /// filtro bilinear da GPU e o da CPU arredondam diferente por um nível aqui
+    /// e ali — no máximo 1 % dos pixels passa de dois níveis, e é nas bordas.
+    /// E a foto inteira que vem junto é a de `revelar`, byte a byte.
+    #[test]
+    fn o_enquadramento_na_gpu_e_o_da_cpu() {
+        let mut motor = motor_pronto();
+        let (l, a) = (97u32, 61);
+        let pixels = degrade(l, a);
+        let ajustes = Ajustes {
+            exposure: 0.3,
+            ..Ajustes::default()
+        };
+        for (nome, corte, recortar) in cortes_de_prova() {
+            motor.definir_corte(&corte);
+            let pedido = PedidoDeTela {
+                recortar,
+                ordem: crate::enquadrador::OrdemDosCanais::Rgba,
+                inteira: true,
+            };
+            let r = motor
+                .revelar_para_tela(&pixels, l, a, &ajustes, pedido)
+                .expect("o motor não devolveu imagem");
+            let inteira = r.inteira.expect("a inteira foi pedida");
+            let de_sempre = motor
+                .revelar(&pixels, l, a, &ajustes)
+                .expect("o motor não devolveu imagem");
+            assert_eq!(
+                inteira.as_bytes(),
+                de_sempre.as_bytes(),
+                "{nome}: a inteira é a de `revelar`"
+            );
+            let cpu = crate::transformacao::aplicar(&inteira, &corte, recortar).into_rgba8();
+            assert_eq!(
+                (r.tela.largura, r.tela.altura),
+                cpu.dimensions(),
+                "{nome}: o tamanho da saída"
+            );
+            let gpu = image::RgbaImage::from_raw(r.tela.largura, r.tela.altura, r.tela.bytes)
+                .expect("os bytes têm o tamanho da saída");
+            let exato = !corte.tem_perspectiva() && corte.angulo() == 0.0;
+            let (mut diferentes, mut pior) = (0usize, 0u8);
+            for (p, q) in gpu.pixels().zip(cpu.pixels()) {
+                let d = (0..4).map(|c| p.0[c].abs_diff(q.0[c])).max().unwrap_or(0);
+                if d > 2 {
+                    diferentes += 1;
+                }
+                pior = pior.max(d);
+            }
+            let total = gpu.pixels().len();
+            if exato {
+                assert_eq!(pior, 0, "{nome}: sem reamostragem o pixel é o mesmo byte");
+            } else {
+                assert!(
+                    diferentes * 100 <= total,
+                    "{nome}: {diferentes} de {total} pixels diferem mais de 2 níveis (pior {pior})"
+                );
+            }
+        }
+    }
+
+    /// Em BGRA o vermelho e o azul trocam de lugar — e só eles.
+    #[test]
+    fn a_ordem_bgra_troca_o_vermelho_com_o_azul() {
+        let mut motor = motor_pronto();
+        let (l, a) = (65u32, 33);
+        let pixels = degrade(l, a);
+        motor.definir_corte(&Corte::inteiro());
+        let r = motor
+            .revelar_para_tela(
+                &pixels,
+                l,
+                a,
+                &Ajustes::default(),
+                PedidoDeTela {
+                    recortar: true,
+                    ordem: crate::enquadrador::OrdemDosCanais::Bgra,
+                    inteira: false,
+                },
+            )
+            .expect("o motor não devolveu imagem");
+        assert!(r.inteira.is_none(), "não foi pedida");
+        let mut esperado = pixels.to_vec();
+        for p in esperado.as_chunks_mut::<4>().0 {
+            p.swap(0, 2);
+        }
+        assert_eq!(r.tela.bytes, esperado);
     }
 
     /// 🚨 O neutro tem de sair **igual** ao que entrou.
