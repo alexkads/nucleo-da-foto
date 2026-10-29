@@ -1,11 +1,10 @@
 # Changelog
 
-## v0.1.3 — 29/out/2026
+## v0.1.4 — 29/out/2026
 
-Sem mudança na foto que sai nem na API (`make semver`: nada pede versão nova). Cada caminho novo tem
-o teste que o compara byte a byte com o de antes. Troque a tag e compile.
+Sem mudança no arquivo que sai: só um caminho novo, para a tela. Troque a tag e compile.
 
-### A prévia da tela enquadrada na GPU (28/out/2026)
+### A prévia da tela enquadrada na GPU
 
 - `revelacao-core`: **`Motor::revelar_para_tela`** — a foto volta da GPU já espelhada, girada,
   endireitada, corrigida de perspectiva e recortada, no tamanho da saída, por uma passada de compute
@@ -18,6 +17,11 @@ o teste que o compara byte a byte com o de antes. Troque a tag e compile.
   o de sempre; sem ângulo nem perspectiva a GPU devolve o mesmo byte (o retângulo é o inteiro de
   `Corte::retangulo`), com ângulo ou perspectiva difere de um nível aqui e ali, nas bordas.
   `cargo bench -p revelacao-core` ganhou o bloco "prévia da tela" (antes × agora, na mesma GPU).
+
+## v0.1.3 — 29/out/2026
+
+Sem mudança na foto que sai nem na API (`make semver`: nada pede versão nova). Cada caminho novo tem
+o teste que o compara byte a byte com o de antes. Troque a tag e compile.
 
 ### Desempenho
 Na bancada (`make bancada`, contra a v0.1.2), foto de 12 MP, 4 núcleos:
