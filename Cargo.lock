@@ -835,6 +835,7 @@ dependencies = [
 name = "fotolivro"
 version = "0.1.2"
 dependencies = [
+ "foto-codec",
  "image",
  "printpdf",
 ]

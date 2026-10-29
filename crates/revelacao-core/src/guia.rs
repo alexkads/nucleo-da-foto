@@ -74,7 +74,7 @@ pub fn calcular(pixels: &[u8], largura: u32, altura: u32) -> Guia {
         for y in ya..yb {
             let linha = &pixels[y * w * 4..(y + 1) * w * 4];
             for (soma, bloco) in somas.iter_mut().zip(linha.chunks(f * 4)) {
-                for p in bloco.chunks_exact(4) {
+                for p in bloco.as_chunks::<4>().0 {
                     let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
                     soma[0] += r + g + b;
                     soma[1] += r.min(g).min(b);

@@ -63,3 +63,12 @@ Na mesma leva, o teste que troca cada byte do cabeçalho de um DNG sintético
   ocupa bytes inteiros — pânico no debug, e no release o contador dá a volta. Agora é
   `get_bits(bias)`. Teste: `decodifica_um_dng_de_14_bits_com_linhas_que_nao_comecam_num_byte`
   (falha sem a correção).
+
+## 2026-10-28 — revelar tomando o RawImage, sem copiar o sensor
+
+`imgop/develop.rs`: `RawDevelop::develop_intermediate_dono(RawImage)` ao lado do
+`develop_intermediate(&RawImage)`, que passa a chamá-lo com um `clone()`. O original clonava o
+`RawImage` inteiro no começo (os 24–42 MP do sensor em `u16`) e depois copiava de novo os valores
+em `f32` (`as_f32().into_owned()`); o `_dono` move o `data` para fora do `RawImage` e o converte
+uma vez. A conta é a mesma, na mesma ordem — só somem duas cópias da foto. Marcado com
+`// nucleo-da-foto:`; quem chama é o `raw-codec`.

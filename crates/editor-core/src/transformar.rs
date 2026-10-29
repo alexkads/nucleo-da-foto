@@ -685,14 +685,14 @@ pub fn desenhar_na_referencia(
                     let fim = xe.min((x.div_euclid(LADO) + 1) * LADO);
                     let k = ((sy * caixa.largura as i64 + du + x) * 4) as usize;
                     let origem = &conteudo.rgba[k..k + ((fim - x) * 4) as usize];
-                    if origem.chunks_exact(4).any(|p| p[3] != 0) {
+                    if origem.as_chunks::<4>().0.iter().any(|p| p[3] != 0) {
                         let tile = tiles[(x.div_euclid(LADO) - tx0) as usize]
                             .get_or_insert_with(|| vec![0; crate::tiles::BYTES_DO_TILE]);
                         let i = indice(x.rem_euclid(LADO) as u32, y.rem_euclid(LADO) as u32);
                         let destino = &mut tile[i..i + origem.len()];
                         destino.copy_from_slice(origem);
                         // O transparente fica como nada, como a amostra o devolve.
-                        for p in destino.chunks_exact_mut(4) {
+                        for p in destino.as_chunks_mut::<4>().0 {
                             if p[3] == 0 {
                                 p.fill(0);
                             }

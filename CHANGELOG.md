@@ -58,7 +58,62 @@ Na bancada (`make bancada`, contra a v0.1.2), foto de 12 MP, 4 núcleos:
   ou mais, a conta dos pixels se divide em faixas de linhas entre os núcleos, e a fonte é lida
   por todas as threads, cada tile composto uma vez.
 
+**Abrir, exportar e o fotolivro** (28/out/2026). Medido com fotos de câmera de verdade, o `main`
+de antes contra a pasta, alternados, no M2 Pro (10 núcleos); cada caminho conferido byte a byte:
+
+| Caminho | Antes | Agora |
+|---|---:|---:|
+| Exportar: JPEG q90 de 24 MP (RGB) | 272 ms | 40 ms |
+| Exportar: JPEG q90 de 24 MP da revelada da GPU (RGBA) | 269 ms | 43 ms |
+| Exportar: JPEG q100 de 24 MP | 353 ms | 60 ms |
+| Prévia: JPEG q90 de 2560 px | 48 ms | 7 ms |
+| JPEG q90 de 24 MP dos pixels do navegador (`codificar_rgba`) | 275 ms | 45 ms |
+| Abrir de pé: JPEG de 24 MP em Adobe RGB (D7200) | 253 ms | 168 ms |
+| Abrir de pé: JPEG de 14 MP em Adobe RGB e em retrato (D3100) | 164 ms | 97 ms |
+| Fotolivro: 24 fotos de 14 MP (12 levadas, 12 protegidas), até o PDF | 2 289 ms | 454 ms |
+| RAW: Sony A7R II (42 MP) | 435 ms | 387 ms |
+| RAW: Fuji X-E2S (16 MP, X-Trans) | 205 ms | 177 ms |
+| RAW: Canon 40D (10 MP) | 189 ms | 166 ms |
+| RAW: DNG com perdas do Lightroom (4 MP) | 93 ms | 82 ms |
+
+- `foto-codec`, **o JPEG**: um codificador nosso (`codificador.rs`) que escreve **o mesmo
+  arquivo que o `JpegEncoder` do `image` 0.25, byte a byte** — a mesma cor em ponto fixo, a mesma
+  DCT inteira do libjpeg, a mesma quantização e as mesmas tabelas —, mas com a DCT andando as
+  oito linhas de um bloco juntas (o compilador vetoriza), os bits escritos por palavra e a foto
+  dividida em faixas de linhas de blocos entre os núcleos, juntadas no fim bit a bit (o JPEG sem
+  marca de reinício é um fluxo só). Vale para `codificar`, `codificar_rgba` e
+  `revelacao_core::jpeg::codificar`, em RGB8 e RGBA8; o resto continua no `image`. Conferido
+  contra o `image` em todo resto de bloco de 1 a 17 px, nas cem qualidades e nos dois tipos de
+  pixel, e nas fotos reais acima.
+- `foto-codec`, **Adobe RGB e Display P3 → sRGB**: onde a matriz tem zero, o canal de saída não
+  depende daquela entrada — e o que depende de um ou dois canais de 8 bits vira uma tabela (256 ou
+  65 536 valores). Na Adobe RGB a conversão é três consultas por pixel; conferida contra a conta
+  nos 16 777 216 pixels. A foto grande vai em faixas entre os núcleos. Numa foto de 24 MP, 390 →
+  11 ms.
+- `foto-codec`, **de pé** (`orientacao::aplicar`, novo): as oito orientações do EXIF por conta
+  afim da posição, em blocos de 64 × 64 que cabem no cache e em faixas entre os núcleos, em RGB8 e
+  RGBA8 (o resto vai ao `image`). O giro de 90° de uma foto de 24 MP, 355 → 94 ms. É o que
+  `decodificar_de_pe` e `abrir_de_pe` usam.
+- `raw-codec`: a revelada desce de `f32` a 8 bits numa passada só, com a conta das duas
+  conversões de antes (`× 65 535` para `u16`, depois `(v + 128) / 257`), sem a foto de `f32`
+  achatada nem a de 16 bits no meio (290 + 145 MB a 24 MP), em faixas entre os núcleos. E o
+  `vendor/rawler` ganhou o `develop_intermediate_dono`, que toma o `RawImage` em vez de clonar o
+  sensor e copiar os valores em `f32` (`MUDANCAS.md`).
+- `fotolivro`: o JPEG de cada folha sai do `foto_codec::codificar_sem_dpi` (o mesmo arquivo do
+  `image` sem densidade, em faixas), e as fotos são preparadas (reduzidas, protegidas) em paralelo
+  antes de entrar na montagem — o orçamento de cada uma continua na ordem do livro. O livro tem
+  os mesmos JPEGs, na mesma ordem e com o mesmo gasto.
+
+### Correção
+- Cinco `chunks_exact(4)` que o clippy do Rust 1.99 reprova (`editor-core/transformar.rs`,
+  `revelacao-core/guia.rs` e `transformacao.rs`) viraram `as_chunks::<4>()`; o `make clippy`
+  do `main` estava vermelho.
+
 ### Novo
+- `foto_codec::codificar_sem_dpi`: o JPEG de `codificar` sem os 300 DPI no JFIF (o do
+  fotolivro); `foto_codec::orientacao::aplicar`: a orientação do EXIF aplicada a uma
+  `DynamicImage`, mais rápido que `apply_orientation`.
+- `cargo bench -p foto-codec`: a conversão de cor a 12 MP e o giro de 90°.
 - A bancada compara com a **v0.1.2** e ganhou os casos "Endireitar 3° na tela do Enquadrar", a
   guia, o começo do Mover com seleção, a composição com a camada a 60 % e máscara difusa, e por
   evento o ⌘T girando, o Deformar, o Mover com seleção, o contorno e o Transformar seleção; o

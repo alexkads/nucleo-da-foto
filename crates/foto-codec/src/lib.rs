@@ -41,12 +41,15 @@
 
 #![deny(missing_docs)]
 
+mod codificador;
 pub mod espaco_de_cor;
 pub mod orientacao;
 
 use image::codecs::jpeg::{JpegEncoder, PixelDensity};
 use image::error::{ParameterError, ParameterErrorKind};
-use image::{DynamicImage, ImageBuffer, ImageError, Pixel, PixelWithColorType, Rgba};
+use image::{
+    DynamicImage, ExtendedColorType, ImageBuffer, ImageError, Pixel, PixelWithColorType, Rgba,
+};
 
 /// A densidade gravada no cabeçalho JFIF de tudo o que sai daqui.
 ///
@@ -100,9 +103,9 @@ pub fn codificar(imagem: &DynamicImage, qualidade: u8) -> Result<Vec<u8>, ImageE
     // arquivo sai byte a byte igual, sem a cópia da foto inteira (72 MB a 24 MP)
     // só para jogar o quarto canal fora.
     match imagem {
-        DynamicImage::ImageRgb8(rgb) => codificar_buffer(rgb, qualidade),
-        DynamicImage::ImageRgba8(rgba) => codificar_buffer(rgba, qualidade),
-        outra => codificar_buffer(&outra.to_rgb8(), qualidade),
+        DynamicImage::ImageRgb8(rgb) => codificar_buffer(rgb, qualidade, COM_DPI),
+        DynamicImage::ImageRgba8(rgba) => codificar_buffer(rgba, qualidade, COM_DPI),
+        outra => codificar_buffer(&outra.to_rgb8(), qualidade, COM_DPI),
     }
 }
 
@@ -136,18 +139,80 @@ pub fn codificar_rgba(
                 ParameterErrorKind::DimensionMismatch,
             ))
         })?;
-    codificar_buffer(&buffer, qualidade)
+    codificar_buffer(&buffer, qualidade, COM_DPI)
 }
 
-/// O codificador de sempre, com os 300 DPI, sobre qualquer buffer de 8 bits.
-fn codificar_buffer<P, C>(imagem: &ImageBuffer<P, C>, qualidade: u8) -> Result<Vec<u8>, ImageError>
+/// O JPEG de [`codificar`] **sem os 300 DPI**: o JFIF diz só a proporção de
+/// 1:1, que é o que o `JpegEncoder` do `image` grava quando ninguém pede
+/// densidade — e o arquivo é o dele, byte a byte.
+///
+/// É o do fotolivro, que embute a foto no PDF (lá quem diz o tamanho é a
+/// página), e o de quem já gravava pelo `image` sem densidade e não pode ver
+/// o arquivo mudar.
+///
+/// # Erros
+///
+/// Os de [`codificar`].
+pub fn codificar_sem_dpi(imagem: &DynamicImage, qualidade: u8) -> Result<Vec<u8>, ImageError> {
+    let sem_dpi = codificador::Densidade {
+        unidade: 0,
+        x: 1,
+        y: 1,
+    };
+    match imagem {
+        DynamicImage::ImageRgb8(rgb) => codificar_buffer(rgb, qualidade, sem_dpi),
+        DynamicImage::ImageRgba8(rgba) => codificar_buffer(rgba, qualidade, sem_dpi),
+        outra => codificar_buffer(&outra.to_rgb8(), qualidade, sem_dpi),
+    }
+}
+
+/// Os 300 DPI de tudo o que [`codificar`] grava.
+const COM_DPI: codificador::Densidade = codificador::Densidade {
+    unidade: 1,
+    x: DPI,
+    y: DPI,
+};
+
+/// O codificador de sempre sobre qualquer buffer de 8 bits, com a densidade
+/// pedida.
+///
+/// 🔑 **O arquivo é o do `JpegEncoder` do `image`, byte a byte**, saído do
+/// nosso (`codificador`), que divide a foto entre os núcleos: a 24 MP, o do
+/// `image` levava 0,27 s por foto exportada, numa thread só. O lado que o JPEG
+/// não admite (0 ou mais de 65 535 px) vai ao `image`, para o erro ser o dele.
+fn codificar_buffer<P, C>(
+    imagem: &ImageBuffer<P, C>,
+    qualidade: u8,
+    densidade: codificador::Densidade,
+) -> Result<Vec<u8>, ImageError>
 where
     P: Pixel<Subpixel = u8> + PixelWithColorType,
     C: std::ops::Deref<Target = [u8]>,
 {
+    let lados = (
+        u16::try_from(imagem.width()),
+        u16::try_from(imagem.height()),
+    );
+    let canais = match P::COLOR_TYPE {
+        ExtendedColorType::Rgb8 => Some(3),
+        ExtendedColorType::Rgba8 => Some(4),
+        _ => None,
+    };
+    if let ((Ok(largura @ 1..), Ok(altura @ 1..)), Some(canais)) = (lados, canais) {
+        return Ok(codificador::codificar(
+            imagem.as_raw(),
+            canais,
+            largura,
+            altura,
+            qualidade,
+            densidade,
+        ));
+    }
     let mut bytes = Vec::new();
     let mut codificador = JpegEncoder::new_with_quality(&mut bytes, qualidade);
-    codificador.set_pixel_density(PixelDensity::dpi(DPI));
+    if densidade == COM_DPI {
+        codificador.set_pixel_density(PixelDensity::dpi(DPI));
+    }
     codificador.encode_image(imagem)?;
     Ok(bytes)
 }
@@ -233,6 +298,36 @@ mod testes {
             codificar_rgba(&crus, 19, 13, 90).expect("codifica"),
             codificado_pela_copia(&rgba, 90)
         );
+    }
+
+    /// Sem DPI, o arquivo é o do `JpegEncoder` do `image` sem densidade — o
+    /// que o fotolivro gravava antes de passar por aqui.
+    #[test]
+    fn sem_dpi_e_o_jpeg_do_image_sem_densidade() {
+        let mut rgba = image::RgbaImage::new(21, 11);
+        for (x, y, p) in rgba.enumerate_pixels_mut() {
+            *p = Rgba([(x * 11) as u8, (y * 23) as u8, ((x + y) * 5) as u8, 200]);
+        }
+        let rgba = DynamicImage::ImageRgba8(rgba);
+        for imagem in [
+            rgba.clone(),
+            DynamicImage::ImageRgb8(rgba.to_rgb8()),
+            DynamicImage::ImageLuma8(rgba.to_luma8()),
+        ] {
+            for qualidade in [38, 72, 100] {
+                let mut do_image = Vec::new();
+                JpegEncoder::new_with_quality(&mut do_image, qualidade)
+                    .encode_image(&imagem.to_rgb8())
+                    .expect("codifica");
+                assert_eq!(
+                    codificar_sem_dpi(&imagem, qualidade).expect("codifica"),
+                    do_image,
+                    "{:?} q{qualidade}",
+                    imagem.color()
+                );
+            }
+        }
+        assert!(codificar_sem_dpi(&DynamicImage::new_rgb8(70_000, 1), 90).is_err());
     }
 
     #[test]

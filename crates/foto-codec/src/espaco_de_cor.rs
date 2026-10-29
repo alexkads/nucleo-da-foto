@@ -227,21 +227,126 @@ fn tabela_de_volta() -> &'static [u8] {
     })
 }
 
-/// A conversão de um pixel (os três primeiros bytes) para sRGB.
-fn conversor(de: EspacoDeCor) -> impl Fn(&mut [u8]) {
-    let linear: Vec<f32> = (0..=255u8).map(|v| de.linear(v)).collect();
-    let volta = tabela_de_volta();
-    let m = de.para_srgb();
-    move |p: &mut [u8]| {
-        let c = [
-            linear[p[0] as usize],
-            linear[p[1] as usize],
-            linear[p[2] as usize],
-        ];
-        for (saida, linha) in p.iter_mut().zip(m) {
-            let v = linha[0] * c[0] + linha[1] * c[1] + linha[2] * c[2];
-            *saida = volta[(v.clamp(0.0, 1.0) * (PASSOS - 1) as f32).round() as usize];
+/// Um canal de saída com a conta da conversão: a linha da matriz sobre o
+/// pixel em luz linear, de volta ao sRGB de 8 bits pela tabela.
+#[inline(always)]
+fn canal(linha: [f32; 3], c: [f32; 3], volta: &[u8]) -> u8 {
+    let v = linha[0] * c[0] + linha[1] * c[1] + linha[2] * c[2];
+    volta[(v.clamp(0.0, 1.0) * (PASSOS - 1) as f32).round() as usize]
+}
+
+/// De onde sai um canal convertido.
+///
+/// 🔑 **Onde a matriz tem zero, o canal não depende daquela entrada** — e o
+/// que depende de dois canais de 8 bits cabe numa tabela de 65 536 valores. Na
+/// Adobe RGB o verde depende só do verde, o vermelho do vermelho e do verde e
+/// o azul do verde e do azul: a conversão vira três consultas por pixel, no
+/// lugar de nove multiplicações, três arredondamentos e três consultas.
+///
+/// É a mesma conta, byte a byte: cada valor da tabela sai de [`canal`] com o
+/// canal ausente em zero, e `0 × c` é zero para todo `c` da luz linear (finito
+/// e não negativo) — somar zero não muda a soma, e o sinal do zero não muda o
+/// índice. O teste `as_tabelas_dao_a_conta_em_todo_pixel` confere os
+/// 16 777 216 pixels.
+enum Saida {
+    /// Depende de um canal só (a linha tem dois zeros).
+    Um(usize, Box<[u8; 256]>),
+    /// Depende de dois canais (a linha tem um zero): `tabela[a × 256 + b]`.
+    Dois([usize; 2], Box<[u8]>),
+    /// Depende dos três: a conta, pixel a pixel.
+    Conta([f32; 3]),
+}
+
+/// A conversão de um espaço para o sRGB, montada uma vez por processo.
+struct Conversor {
+    linear: [f32; 256],
+    volta: &'static [u8],
+    saidas: [Saida; 3],
+}
+
+impl Conversor {
+    fn de(de: EspacoDeCor) -> &'static Self {
+        static ADOBE: std::sync::OnceLock<Conversor> = std::sync::OnceLock::new();
+        static P3: std::sync::OnceLock<Conversor> = std::sync::OnceLock::new();
+        let lugar = match de {
+            EspacoDeCor::DisplayP3 => &P3,
+            // sRGB não chega aqui: quem chama devolve antes.
+            EspacoDeCor::AdobeRgb | EspacoDeCor::Srgb => &ADOBE,
+        };
+        lugar.get_or_init(|| Self::montar(de))
+    }
+
+    fn montar(de: EspacoDeCor) -> Self {
+        let linear: [f32; 256] = std::array::from_fn(|v| de.linear(v as u8));
+        let volta = tabela_de_volta();
+        let saidas = de.para_srgb().map(|linha| {
+            let usados: Vec<usize> = (0..3).filter(|&k| linha[k] != 0.0).collect();
+            // O pixel com só os canais usados acesos; os outros em 0, cujo
+            // linear é zero em todo espaço daqui.
+            let com = |valores: &[(usize, usize)]| {
+                let mut c = [linear[0]; 3];
+                for &(k, v) in valores {
+                    c[k] = linear[v];
+                }
+                canal(linha, c, volta)
+            };
+            match usados[..] {
+                [a] => Saida::Um(a, Box::new(std::array::from_fn(|v| com(&[(a, v)])))),
+                [a, b] => Saida::Dois(
+                    [a, b],
+                    (0..1 << 16)
+                        .map(|i| com(&[(a, i >> 8), (b, i & 0xFF)]))
+                        .collect(),
+                ),
+                _ => Saida::Conta(linha),
+            }
+        });
+        Conversor {
+            linear,
+            volta,
+            saidas,
         }
+    }
+
+    /// Um pixel (os três primeiros bytes), no lugar.
+    #[inline(always)]
+    fn converter(&self, p: &mut [u8]) {
+        let entrada = [p[0], p[1], p[2]];
+        for (saida, como) in p.iter_mut().zip(&self.saidas) {
+            *saida = match como {
+                Saida::Um(a, tabela) => tabela[usize::from(entrada[*a])],
+                Saida::Dois([a, b], tabela) => {
+                    tabela[(usize::from(entrada[*a]) << 8) | usize::from(entrada[*b])]
+                }
+                Saida::Conta(linha) => {
+                    let c = entrada.map(|v| self.linear[usize::from(v)]);
+                    canal(*linha, c, self.volta)
+                }
+            };
+        }
+    }
+
+    /// Todos os pixels de `N` bytes, divididos entre os núcleos quando a foto
+    /// é grande (no `wasm32`, uma thread só).
+    fn todos<const N: usize>(&self, bytes: &mut [u8]) {
+        let pixels = bytes.as_chunks_mut::<N>().0;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let nucleos = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .min(16);
+            if nucleos > 1 && pixels.len() >= 1 << 18 {
+                let por_faixa = pixels.len().div_ceil(nucleos);
+                std::thread::scope(|escopo| {
+                    for faixa in pixels.chunks_mut(por_faixa) {
+                        escopo.spawn(move || faixa.iter_mut().for_each(|p| self.converter(p)));
+                    }
+                });
+                return;
+            }
+        }
+        pixels.iter_mut().for_each(|p| self.converter(p));
     }
 }
 
@@ -251,11 +356,7 @@ pub fn rgba_para_srgb(rgba: &mut [u8], de: EspacoDeCor) {
     if de == EspacoDeCor::Srgb {
         return;
     }
-    let converter = conversor(de);
-    rgba.as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .for_each(|p| converter(p));
+    Conversor::de(de).todos::<4>(rgba);
 }
 
 /// A foto em sRGB. Em sRGB, devolve como veio, sem tocar num pixel.
@@ -266,20 +367,14 @@ pub fn para_srgb(foto: DynamicImage, de: EspacoDeCor) -> DynamicImage {
     if de == EspacoDeCor::Srgb {
         return foto;
     }
-    let converter = conversor(de);
+    let conversor = Conversor::de(de);
     match foto {
         DynamicImage::ImageRgb8(mut rgb) => {
-            rgb.as_chunks_mut::<3>()
-                .0
-                .iter_mut()
-                .for_each(|p| converter(p));
+            conversor.todos::<3>(&mut rgb);
             DynamicImage::ImageRgb8(rgb)
         }
         DynamicImage::ImageRgba8(mut rgba) => {
-            rgba.as_chunks_mut::<4>()
-                .0
-                .iter_mut()
-                .for_each(|p| converter(p));
+            conversor.todos::<4>(&mut rgba);
             DynamicImage::ImageRgba8(rgba)
         }
         // Cinza não tem primários para trocar; a curva difere pouco e fica.
@@ -421,5 +516,87 @@ pub(crate) mod testes {
             .0;
         assert_eq!(p[3], 77);
         assert_ne!(&p[..3], &[200, 120, 60]);
+    }
+
+    /// A conversão de antes das tabelas (até 2026-10-28): a conta inteira,
+    /// pixel a pixel. É a régua das tabelas.
+    fn pela_conta(de: EspacoDeCor) -> impl Fn([u8; 3]) -> [u8; 3] {
+        let linear: Vec<f32> = (0..=255u8).map(|v| de.linear(v)).collect();
+        let volta = tabela_de_volta();
+        let m = de.para_srgb();
+        move |p| {
+            let c = p.map(|v| linear[v as usize]);
+            m.map(|linha| {
+                let v = linha[0] * c[0] + linha[1] * c[1] + linha[2] * c[2];
+                volta[(v.clamp(0.0, 1.0) * (PASSOS - 1) as f32).round() as usize]
+            })
+        }
+    }
+
+    /// 🚨 **As tabelas dão a conta em todo pixel**: os 16 777 216 de 8 bits,
+    /// nos dois espaços que se convertem.
+    #[test]
+    fn as_tabelas_dao_a_conta_em_todo_pixel() {
+        for de in [EspacoDeCor::AdobeRgb, EspacoDeCor::DisplayP3] {
+            let conta = pela_conta(de);
+            let conversor = Conversor::de(de);
+            for r in 0..=255u8 {
+                for g in 0..=255u8 {
+                    for b in 0..=255u8 {
+                        let mut p = [r, g, b];
+                        conversor.converter(&mut p);
+                        if p != conta([r, g, b]) {
+                            panic!("{de:?} {:?}: {p:?} ≠ {:?}", [r, g, b], conta([r, g, b]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A foto grande vai em faixas, uma por núcleo: sai a mesma da conta, e o
+    /// alfa intacto.
+    #[test]
+    fn a_foto_grande_em_faixas_sai_a_mesma() {
+        let (largura, altura) = (641u32, 433u32);
+        let mut estado = 12345u32;
+        let mut proximo = || {
+            estado = estado.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (estado >> 23) as u8
+        };
+        let rgba: Vec<u8> = (0..largura * altura * 4).map(|_| proximo()).collect();
+        assert!(rgba.len() / 4 >= 1 << 18, "pequena demais para dividir");
+        for de in [EspacoDeCor::AdobeRgb, EspacoDeCor::DisplayP3] {
+            let conta = pela_conta(de);
+            let mut esperado = rgba.clone();
+            for p in esperado.as_chunks_mut::<4>().0 {
+                let [r, g, b] = conta([p[0], p[1], p[2]]);
+                p[..3].copy_from_slice(&[r, g, b]);
+            }
+
+            let mut no_lugar = rgba.clone();
+            rgba_para_srgb(&mut no_lugar, de);
+            assert_eq!(no_lugar, esperado, "{de:?}, RGBA no lugar");
+
+            let foto = image::RgbaImage::from_raw(largura, altura, rgba.clone()).unwrap();
+            let convertida = para_srgb(DynamicImage::ImageRgba8(foto), de);
+            assert_eq!(convertida.as_bytes(), &esperado[..], "{de:?}, RGBA");
+
+            let rgb: Vec<u8> = rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect();
+            let esperado_rgb: Vec<u8> = esperado
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect();
+            let foto = image::RgbImage::from_raw(largura, altura, rgb).unwrap();
+            let convertida = para_srgb(DynamicImage::ImageRgb8(foto), de);
+            assert_eq!(convertida.as_bytes(), &esperado_rgb[..], "{de:?}, RGB");
+        }
     }
 }

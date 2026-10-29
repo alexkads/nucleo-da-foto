@@ -33,7 +33,7 @@ mod tiff;
 use image::metadata::Orientation as Giro;
 use image::{DynamicImage, RgbImage};
 use rawler::decoders::RawDecodeParams;
-use rawler::imgop::develop::RawDevelop;
+use rawler::imgop::develop::{Intermediate, RawDevelop};
 use rawler::rawsource::RawSource;
 use rawler::Orientation;
 
@@ -66,19 +66,70 @@ pub fn decodificar(bytes: &[u8]) -> Result<RgbImage, String> {
     }
 
     let orientacao = raw.orientation;
+    // O `_dono` toma o sensor: sem a cópia dele (e a dos valores em `f32`) que
+    // o `develop_intermediate` faz para quem só empresta.
     let revelada = RawDevelop::default()
-        .develop_intermediate(&raw)
-        .map_err(|e| format!("não foi possível revelar o RAW: {e}"))?
-        .to_dynamic_image()
-        .ok_or("o RAW revelado não virou imagem")?;
+        .develop_intermediate_dono(raw)
+        .map_err(|e| format!("não foi possível revelar o RAW: {e}"))?;
     // 🔑 **Desce a 8 bits antes de girar, e uma vez só.** A revelação sai em
     // 16 bits (e o sensor monocromático em cinza): girar em 16 bits movia o
     // dobro de bytes, e o `to_rgb8` do fim ainda copiava a foto inteira. A
     // conversão é pixel a pixel e o giro só troca pixels de lugar — a ordem
     // não muda nenhum byte do resultado.
-    let mut revelada = DynamicImage::ImageRgb8(revelada.into_rgb8());
+    let mut revelada =
+        DynamicImage::ImageRgb8(em_8_bits(revelada).ok_or("o RAW revelado não virou imagem")?);
     revelada.apply_orientation(giro(orientacao));
     Ok(revelada.into_rgb8())
+}
+
+/// A revelada (luz de 0 a 1 em `f32`) em RGB de 8 bits.
+///
+/// 🔑 **A conta é a das duas conversões de antes, pixel a pixel**: a do
+/// `to_dynamic_image` do rawler, para 16 bits (`(v × 65 535) as u16`), e a
+/// do `into_rgb8` do `image`, de 16 para 8 (`(v + 128) / 257`). Feitas juntas,
+/// sem as duas fotos do meio — a de `f32` achatada e a de 16 bits, 290 MB e
+/// 145 MB a 24 MP —, e com as linhas divididas entre os núcleos (no `wasm32`,
+/// uma thread só). O sensor monocromático (e o de quatro cores sem
+/// calibração) segue o caminho de antes.
+fn em_8_bits(revelada: Intermediate) -> Option<RgbImage> {
+    let Intermediate::ThreeColor(cor) = revelada else {
+        return revelada.to_dynamic_image().map(DynamicImage::into_rgb8);
+    };
+    let (largura, altura) = (
+        u32::try_from(cor.width).ok()?,
+        u32::try_from(cor.height).ok()?,
+    );
+    let pixels = cor.data.get(..cor.width.checked_mul(cor.height)?)?;
+    let mut saida = vec![0u8; pixels.len() * 3];
+    let converter = |origem: &[[f32; 3]], destino: &mut [u8]| {
+        for (p, d) in origem.iter().zip(destino.as_chunks_mut::<3>().0) {
+            *d = p.map(|v| {
+                let v16 = (v * f32::from(u16::MAX)) as u16;
+                ((u32::from(v16) + 128) / 257) as u8
+            });
+        }
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let nucleos = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(16);
+        if nucleos > 1 && pixels.len() >= 1 << 18 {
+            let por_faixa = pixels.len().div_ceil(nucleos);
+            std::thread::scope(|escopo| {
+                for (origem, destino) in pixels
+                    .chunks(por_faixa)
+                    .zip(saida.chunks_mut(por_faixa * 3))
+                {
+                    escopo.spawn(move || converter(origem, destino));
+                }
+            });
+            return RgbImage::from_raw(largura, altura, saida);
+        }
+    }
+    converter(pixels, &mut saida);
+    RgbImage::from_raw(largura, altura, saida)
 }
 
 /// A etiqueta de orientação do rawler na do `image` — os dois seguem o EXIF.
@@ -491,5 +542,65 @@ mod testes {
     #[test]
     fn arquivo_que_nao_e_raw_da_erro_e_nao_panico() {
         assert!(decodificar(b"isto nao e um raw").is_err());
+    }
+
+    /// A revelada de antes de 2026-10-28: a de 16 bits do rawler, depois o
+    /// `into_rgb8` do `image`.
+    fn pelas_duas_conversoes(revelada: Intermediate) -> RgbImage {
+        revelada.to_dynamic_image().unwrap().into_rgb8()
+    }
+
+    fn revelada(largura: usize, altura: usize) -> Intermediate {
+        use rawler::pixarray::Color2D;
+        // Os valores de borda (fora de 0–1, NaN, os degraus de 16 bits em
+        // volta de cada degrau de 8) e uma rampa no resto.
+        let mut especiais = vec![
+            -1.0,
+            -0.0,
+            0.0,
+            1.0,
+            1.5,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for k in 0..=255u32 {
+            for d in [-1i32, 0, 1] {
+                let v16 = (k * 257) as i32 + d - 128;
+                especiais.push(v16 as f32 / 65535.0);
+            }
+        }
+        let n = largura * altura;
+        let dados = (0..n)
+            .map(|i| {
+                let v = |j: usize| {
+                    especiais
+                        .get((i * 3 + j) % (especiais.len() * 2))
+                        .copied()
+                        .unwrap_or(((i * 7 + j * 13) % 10_007) as f32 / 10_006.0)
+                };
+                [v(0), v(1), v(2)]
+            })
+            .collect();
+        Intermediate::ThreeColor(Color2D::new_with(dados, largura, altura))
+    }
+
+    /// 🚨 **A descida a 8 bits numa passada só sai igual às duas de antes**,
+    /// byte a byte — pequena (uma thread) e grande (em faixas).
+    #[test]
+    fn os_8_bits_de_uma_vez_sao_os_das_duas_conversoes() {
+        for (largura, altura) in [(1, 1), (37, 23), (701, 409)] {
+            let nova = em_8_bits(revelada(largura, altura)).unwrap();
+            let antiga = pelas_duas_conversoes(revelada(largura, altura));
+            assert_eq!(nova.dimensions(), antiga.dimensions());
+            assert!(nova.as_raw() == antiga.as_raw(), "{largura}×{altura}");
+        }
+        let cinza =
+            || Intermediate::Monochrome(rawler::pixarray::PixF32::new_with(vec![0.5; 6], 3, 2));
+        assert_eq!(
+            em_8_bits(cinza()).unwrap(),
+            pelas_duas_conversoes(cinza()),
+            "cinza"
+        );
     }
 }

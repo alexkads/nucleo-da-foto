@@ -80,8 +80,122 @@ fn de_pe<R: BufRead + Seek>(leitor: ImageReader<R>) -> ImageResult<DynamicImage>
     let exif = decodificador.exif_metadata().ok().flatten();
     let espaco = EspacoDeCor::declarado(icc.as_deref(), exif.as_deref());
     let mut foto = espaco_de_cor::para_srgb(DynamicImage::from_decoder(decodificador)?, espaco);
-    foto.apply_orientation(orientacao);
+    aplicar(&mut foto, orientacao);
     Ok(foto)
+}
+
+/// A orientação do EXIF aplicada aos pixels — o mesmo que
+/// [`DynamicImage::apply_orientation`], pixel a pixel, mais rápido.
+///
+/// 🔑 O `image` gira chamando `get_pixel` e `put_pixel` em cada pixel, com
+/// conferência de limite nos dois; numa foto de 24 MP deitada eram dezenas de
+/// milissegundos a cada abertura. Aqui, em RGB e RGBA de 8 bits, cada pixel
+/// de destino sai de uma conta afim da posição (a orientação só troca pixels
+/// de lugar), em blocos de 64 × 64 que cabem no cache, com as faixas de linhas
+/// divididas entre os núcleos (no `wasm32`, uma thread só). Os outros tipos
+/// vão ao `image`. O espaço de cor que a foto carrega vai junto.
+pub fn aplicar(foto: &mut DynamicImage, orientacao: Orientation) {
+    if orientacao == Orientation::NoTransforms {
+        return;
+    }
+    match foto {
+        DynamicImage::ImageRgb8(rgb) => {
+            if let Some(nova) = reorientada::<image::Rgb<u8>, 3>(rgb, orientacao) {
+                *rgb = nova;
+                return;
+            }
+        }
+        DynamicImage::ImageRgba8(rgba) => {
+            if let Some(nova) = reorientada::<image::Rgba<u8>, 4>(rgba, orientacao) {
+                *rgba = nova;
+                return;
+            }
+        }
+        _ => {}
+    }
+    foto.apply_orientation(orientacao);
+}
+
+/// A foto na orientação pedida, ou `None` se ela não couber na conta.
+fn reorientada<P, const N: usize>(
+    foto: &image::ImageBuffer<P, Vec<u8>>,
+    orientacao: Orientation,
+) -> Option<image::ImageBuffer<P, Vec<u8>>>
+where
+    P: image::Pixel<Subpixel = u8>,
+{
+    let (largura, altura) = (foto.width() as usize, foto.height() as usize);
+    let (w, h) = (largura as isize, altura as isize);
+    // De onde vem o pixel `(x, y)` do destino: `x·dx + y·dy + início`, em
+    // pixels da origem. Do mesmo jeito que o `image` gira (horário) e espelha.
+    let (deitada, inicio, dx, dy) = match orientacao {
+        Orientation::NoTransforms => (false, 0, 1, w),
+        Orientation::FlipHorizontal => (false, w - 1, -1, w),
+        Orientation::FlipVertical => (false, (h - 1) * w, 1, -w),
+        Orientation::Rotate180 => (false, h * w - 1, -1, -w),
+        // Girar 90° no horário: o destino (x, y) vem de (y, h − 1 − x).
+        Orientation::Rotate90 => (true, (h - 1) * w, -w, 1),
+        // 270°: de (w − 1 − y, x).
+        Orientation::Rotate270 => (true, w - 1, w, -1),
+        // 90° e espelho: a transposta, de (y, x).
+        Orientation::Rotate90FlipH => (true, 0, w, 1),
+        // 270° e espelho: de (w − 1 − y, h − 1 − x).
+        Orientation::Rotate270FlipH => (true, h * w - 1, -w, -1),
+    };
+    let (nova_largura, nova_altura) = if deitada {
+        (altura, largura)
+    } else {
+        (largura, altura)
+    };
+    let origem = foto
+        .as_raw()
+        .get(..largura.checked_mul(altura)?.checked_mul(N)?)?;
+    let mut destino = vec![0u8; origem.len()];
+    let pixels = origem.as_chunks::<N>().0;
+
+    // As linhas `y0..` do destino, em blocos de 64 colunas: as 64 linhas da
+    // origem que um bloco lê ficam no cache até ele acabar.
+    let faixa = |y0: usize, linhas: &mut [u8]| {
+        let saida = linhas.as_chunks_mut::<N>().0;
+        let n_linhas = saida.len() / nova_largura.max(1);
+        for x0 in (0..nova_largura).step_by(64) {
+            let x1 = (x0 + 64).min(nova_largura);
+            for j in 0..n_linhas {
+                let y = (y0 + j) as isize;
+                let linha = &mut saida[j * nova_largura..][x0..x1];
+                let mut de = inicio + y * dy + x0 as isize * dx;
+                for p in linha {
+                    *p = pixels[de as usize];
+                    de += dx;
+                }
+            }
+        }
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let bytes_por_linha = nova_largura * N;
+        let nucleos = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(16);
+        if nucleos > 1 && pixels.len() >= 1 << 18 {
+            let por_faixa = nova_altura.div_ceil(nucleos * 2).next_multiple_of(64);
+            std::thread::scope(|escopo| {
+                for (k, linhas) in destino.chunks_mut(por_faixa * bytes_por_linha).enumerate() {
+                    let faixa = &faixa;
+                    escopo.spawn(move || faixa(k * por_faixa, linhas));
+                }
+            });
+        } else {
+            faixa(0, &mut destino);
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    faixa(0, &mut destino);
+
+    let mut nova = image::ImageBuffer::from_raw(nova_largura as u32, nova_altura as u32, destino)?;
+    nova.set_color_space(foto.color_space()).ok()?;
+    Some(nova)
 }
 
 #[cfg(test)]
@@ -182,5 +296,55 @@ mod testes {
     fn sem_etiqueta_segue_como_veio() {
         let foto = decodificar_de_pe(&jpeg_com_orientacao(1)).expect("abre");
         assert_eq!((foto.width(), foto.height()), (4, 2));
+    }
+
+    /// 🚨 **O giro daqui é o do `image`, pixel a pixel**: as oito orientações,
+    /// em RGB e RGBA, em lados que não fecham um bloco e numa foto grande o
+    /// bastante para ir em faixas.
+    #[test]
+    fn as_oito_orientacoes_sao_as_do_image() {
+        use image::{RgbImage, RgbaImage};
+        let todas = [
+            Orientation::NoTransforms,
+            Orientation::Rotate90,
+            Orientation::Rotate180,
+            Orientation::Rotate270,
+            Orientation::FlipHorizontal,
+            Orientation::FlipVertical,
+            Orientation::Rotate90FlipH,
+            Orientation::Rotate270FlipH,
+        ];
+        for (largura, altura) in [(1, 1), (7, 5), (64, 3), (130, 67), (701, 409)] {
+            let rgba = RgbaImage::from_fn(largura, altura, |x, y| {
+                image::Rgba([x as u8, y as u8, (x * 7 + y * 3) as u8, (x ^ y) as u8])
+            });
+            let rgb = RgbImage::from_fn(largura, altura, |x, y| {
+                image::Rgb([(x * 5) as u8, (y * 11) as u8, (x + y) as u8])
+            });
+            for foto in [DynamicImage::ImageRgba8(rgba), DynamicImage::ImageRgb8(rgb)] {
+                for o in todas {
+                    let mut daqui = foto.clone();
+                    aplicar(&mut daqui, o);
+                    let mut do_image = foto.clone();
+                    do_image.apply_orientation(o);
+                    assert_eq!(
+                        daqui,
+                        do_image,
+                        "{largura}×{altura} {:?} {o:?}",
+                        foto.color()
+                    );
+                    assert_eq!(daqui.color_space(), do_image.color_space());
+                }
+            }
+        }
+        // O que não é RGB nem RGBA de 8 bits vai ao `image`.
+        let cinza = DynamicImage::ImageLuma8(image::GrayImage::from_fn(5, 3, |x, y| {
+            image::Luma([(x * 40 + y) as u8])
+        }));
+        let mut daqui = cinza.clone();
+        aplicar(&mut daqui, Orientation::Rotate90);
+        let mut do_image = cinza;
+        do_image.apply_orientation(Orientation::Rotate90);
+        assert_eq!(daqui, do_image);
     }
 }

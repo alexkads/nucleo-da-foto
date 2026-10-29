@@ -60,4 +60,14 @@ fn main() {
     medir("cor: Adobe RGB → sRGB, miniatura 256²", 20, || {
         rgba_para_srgb(black_box(&mut miniatura), EspacoDeCor::AdobeRgb);
     });
+    let mut inteira = crus.clone();
+    medir("cor: Adobe RGB → sRGB, 12 MP", 5, || {
+        rgba_para_srgb(black_box(&mut inteira), EspacoDeCor::AdobeRgb);
+    });
+
+    medir("orientação: girar 90° uma foto de 12 MP RGB", 5, || {
+        let mut deitada = rgb.clone();
+        foto_codec::orientacao::aplicar(&mut deitada, image::metadata::Orientation::Rotate90);
+        black_box(deitada);
+    });
 }

@@ -17,13 +17,13 @@ use crate::{
     sensor::{Demosaic, SensorType, xtrans::bilinear::XTransBilinearDemosaic},
   },
   pixarray::{Color2D, PixF32},
-  rawimage::RawPhotometricInterpretation,
+  rawimage::{RawImageData, RawPhotometricInterpretation},
   rawsource::RawSource,
   tags::{ExifTag, TiffCommonTag},
 };
 
 use super::{
-  Dim2, Rect, convert_from_f32_scaled_u16,
+  Dim2, Rect, convert_from_f32_scaled_u16, convert_to_f32_unscaled,
   raw::{map_3ch_to_rgb, map_4ch_to_rgb},
   sensor::bayer::{bilinear::Bilinear4Channel, ppg::PPGDemosaic},
   xyz::Illuminant,
@@ -165,20 +165,31 @@ impl RawDevelop {
   /// If demosaic is disabled or camera raw is monochrome, the TIFF
   /// has only one color channel.
   pub fn develop_intermediate(&self, rawimage: &RawImage) -> crate::Result<Intermediate> {
-    let mut rawimage = rawimage.clone();
+    // nucleo-da-foto: a cópia do sensor fica só para quem empresta o RawImage.
+    self.develop_intermediate_dono(rawimage.clone())
+  }
+
+  // nucleo-da-foto: o `develop_intermediate` tomando o RawImage — sem a cópia do sensor no
+  // começo e sem a dos valores em f32 (`as_f32().into_owned()`), que saem do RawImage.
+  pub fn develop_intermediate_dono(&self, mut rawimage: RawImage) -> crate::Result<Intermediate> {
     if self.steps.contains(&ProcessingStep::Rescale) {
       rawimage.apply_scaling()?;
     }
 
+    // nucleo-da-foto: os mesmos valores de `as_f32()`, movidos em vez de copiados.
+    let dados = match std::mem::replace(&mut rawimage.data, RawImageData::Integer(Vec::new())) {
+      RawImageData::Float(dados) => dados,
+      RawImageData::Integer(dados) => convert_to_f32_unscaled(&dados),
+    };
     let mut intermediate = match rawimage.cpp {
-      1 => Intermediate::Monochrome(PixF32::new_with(rawimage.data.as_f32().into_owned(), rawimage.width, rawimage.height)),
+      1 => Intermediate::Monochrome(PixF32::new_with(dados, rawimage.width, rawimage.height)),
       3 => Intermediate::ThreeColor(Color2D::<f32, 3>::new_with(
-        rawimage.data.as_f32().chunks_exact(3).map(|x| [x[0], x[1], x[2]]).collect(),
+        dados.chunks_exact(3).map(|x| [x[0], x[1], x[2]]).collect(),
         rawimage.width,
         rawimage.height,
       )),
       4 => Intermediate::FourColor(Color2D::<f32, 4>::new_with(
-        rawimage.data.as_f32().chunks_exact(4).map(|x| [x[0], x[1], x[2], x[3]]).collect(),
+        dados.chunks_exact(4).map(|x| [x[0], x[1], x[2], x[3]]).collect(),
         rawimage.width,
         rawimage.height,
       )),

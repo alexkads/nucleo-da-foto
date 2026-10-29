@@ -805,14 +805,11 @@ pub fn protegida(imagem: &DynamicImage) -> DynamicImage {
         LADO_DA_PROTEGIDA,
         image::imageops::FilterType::Triangle,
     );
-    let mut bytes = Vec::new();
-    let codificou =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, QUALIDADE_DA_PROTEGIDA)
-            .encode_image(&pequena.to_rgb8());
-    match codificou
+    match foto_codec::codificar_sem_dpi(&pequena, QUALIDADE_DA_PROTEGIDA)
         .ok()
-        .and_then(|_| image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).ok())
-    {
+        .and_then(|bytes| {
+            image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).ok()
+        }) {
         Some(degradada) => degradada,
         // Sem o recodificador, ao menos pequena — nunca a de 1400 px.
         None => pequena,
@@ -838,12 +835,10 @@ pub fn preparar(imagem: DynamicImage, levada: bool) -> DynamicImage {
 }
 
 fn jpeg(imagem: &DynamicImage, qualidade: u8) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    // Codificar em memória não falha com RGB8; se falhasse, a folha sairia
-    // vazia em vez de derrubar o livro.
-    let _ = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, qualidade)
-        .encode_image(&imagem.to_rgb8());
-    bytes
+    // Codificar em memória só falha com um lado acima de 65 535 px; se
+    // falhasse, a folha sairia vazia em vez de derrubar o livro. O arquivo é
+    // o do `JpegEncoder` do `image` que estava aqui, sem a cópia para RGB8.
+    foto_codec::codificar_sem_dpi(imagem, qualidade).unwrap_or_default()
 }
 
 /// A levada em JPEG, no primeiro degrau que cabe no orçamento — ou no último.
@@ -1477,10 +1472,49 @@ fn titulo_de(capa: &Capa) -> String {
 /// uma é solta assim que entra.
 pub fn gerar(capa: &Capa, fotos: Vec<FotoDaFolha>) -> Result<Vec<u8>, String> {
     let mut montagem = Montagem::nova(capa.clone(), fotos.len());
-    for foto in fotos {
+    for foto in preparadas(fotos) {
         montagem.adicionar(foto.imagem, foto.nome, foto.levada, foto.link);
     }
     montagem.gerar()
+}
+
+/// As fotos já no tamanho do livro ([`preparar`]), divididas entre os
+/// núcleos.
+///
+/// 🔑 **Preparar uma foto não depende das outras** — só o JPEG de cada uma
+/// depende do orçamento que as anteriores deixaram, e esse continua na ordem,
+/// no [`Montagem::adicionar`]. E preparar o que já está preparado devolve a
+/// mesma foto (a levada já cabe no lado da folha, a protegida no dela), então
+/// o livro sai o mesmo.
+#[cfg(not(target_arch = "wasm32"))]
+fn preparadas(mut fotos: Vec<FotoDaFolha>) -> Vec<FotoDaFolha> {
+    let nucleos = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(16);
+    let quantas = fotos.len();
+    if nucleos > 1 && quantas > 1 {
+        // Quem acaba primeiro pega a próxima: as fotos não têm o mesmo
+        // tamanho, e os núcleos de eficiência são mais lentos.
+        let fila = std::sync::Mutex::new(fotos.iter_mut());
+        std::thread::scope(|escopo| {
+            for _ in 0..nucleos.min(quantas) {
+                escopo.spawn(|| {
+                    while let Some(foto) = fila.lock().ok().and_then(|mut f| f.next()) {
+                        let imagem = std::mem::replace(&mut foto.imagem, imagem_solta());
+                        foto.imagem = preparar(imagem, foto.levada);
+                    }
+                });
+            }
+        });
+    }
+    fotos
+}
+
+/// No `wasm32` não há threads: cada foto é preparada no [`Montagem::adicionar`].
+#[cfg(target_arch = "wasm32")]
+fn preparadas(fotos: Vec<FotoDaFolha>) -> Vec<FotoDaFolha> {
+    fotos
 }
 
 #[cfg(test)]
@@ -1688,5 +1722,141 @@ mod testes {
     #[test]
     fn sem_foto_nao_gera() {
         assert!(gerar(&Capa::default(), Vec::new()).is_err());
+    }
+
+    /// Uma foto com ruído e bordas, que o JPEG não comprime de graça.
+    fn com_ruido(largura: u32, altura: u32, semente: u32) -> DynamicImage {
+        let mut estado = semente.wrapping_mul(2_654_435_761).wrapping_add(1);
+        DynamicImage::ImageRgb8(image::RgbImage::from_fn(largura, altura, |x, y| {
+            estado = estado.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let ruido = (estado >> 24) as u8;
+            image::Rgb([
+                ruido,
+                (x * 3 + y) as u8,
+                if (x / 9 + y / 9) % 2 == 0 { 30 } else { 220 },
+            ])
+        }))
+    }
+
+    /// O JPEG de antes de 2026-10-28: o `JpegEncoder` do `image`, sem densidade.
+    fn jpeg_do_image(imagem: &DynamicImage, qualidade: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, qualidade)
+            .encode_image(&imagem.to_rgb8())
+            .unwrap();
+        bytes
+    }
+
+    /// 🚨 **O JPEG de cada folha é o de antes**, byte a byte, em toda
+    /// qualidade que o livro usa.
+    #[test]
+    fn o_jpeg_da_folha_e_o_do_image() {
+        for (largura, altura) in [(1200, 801), (560, 373), (37, 21)] {
+            let rgb = com_ruido(largura, altura, largura);
+            let rgba = DynamicImage::ImageRgba8(rgb.to_rgba8());
+            for qualidade in DEGRAUS
+                .map(|(_, q)| q)
+                .into_iter()
+                .chain([QUALIDADE_DA_PROTEGIDA])
+            {
+                assert_eq!(
+                    jpeg(&rgb, qualidade),
+                    jpeg_do_image(&rgb, qualidade),
+                    "{largura}×{altura} q{qualidade}"
+                );
+                assert_eq!(
+                    jpeg(&rgba, qualidade),
+                    jpeg_do_image(&rgba, qualidade),
+                    "RGBA q{qualidade}"
+                );
+            }
+        }
+    }
+
+    /// A protegida de antes: reduzida, recomprimida pelo `image` e aberta de novo.
+    #[test]
+    fn a_protegida_e_a_de_antes() {
+        let grande = com_ruido(900, 640, 3);
+        let pequena = grande.resize(
+            LADO_DA_PROTEGIDA,
+            LADO_DA_PROTEGIDA,
+            image::imageops::FilterType::Triangle,
+        );
+        let antes = image::load_from_memory_with_format(
+            &jpeg_do_image(&pequena, QUALIDADE_DA_PROTEGIDA),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+        assert_eq!(protegida(&grande), antes);
+    }
+
+    /// As fotos de cada lado dos dois limites (a folha e a protegida), levadas
+    /// e não levadas.
+    fn fotos_de_varios_tamanhos() -> Vec<FotoDaFolha> {
+        [
+            (1300, 700),
+            (900, 600),
+            (400, 300),
+            (1201, 1201),
+            (560, 300),
+            (700, 1250),
+        ]
+        .into_iter()
+        .enumerate()
+        .flat_map(|(i, (largura, altura))| {
+            [true, false].map(|levada| FotoDaFolha {
+                imagem: com_ruido(largura, altura, i as u32),
+                nome: format!("IMG_{i}.jpg"),
+                levada,
+                link: None,
+            })
+        })
+        .collect()
+    }
+
+    #[test]
+    fn preparar_o_que_ja_foi_preparado_devolve_o_mesmo() {
+        for foto in fotos_de_varios_tamanhos() {
+            let uma = preparar(foto.imagem, foto.levada);
+            let duas = preparar(uma.clone(), foto.levada);
+            assert_eq!(uma, duas, "{} levada={}", foto.nome, foto.levada);
+        }
+    }
+
+    /// 🚨 **O livro de `gerar`, com o preparo em paralelo, tem as mesmas
+    /// imagens, na mesma ordem e com o mesmo orçamento**, que o de uma foto
+    /// por vez no [`Montagem::adicionar`] (o caminho do site).
+    #[test]
+    fn em_paralelo_o_livro_tem_as_mesmas_imagens() {
+        let imagens = |montagem: &Montagem| -> Vec<(Vec<u8>, (u32, u32))> {
+            montagem
+                .imagens
+                .iter()
+                .map(
+                    |(id, px)| match &montagem.documento.resources.xobjects.map[id] {
+                        printpdf::XObject::External(x) => (x.stream.content.clone(), *px),
+                        _ => panic!("a foto entra como JPEG"),
+                    },
+                )
+                .collect()
+        };
+        let uma_por_vez = {
+            let fotos = fotos_de_varios_tamanhos();
+            let mut m = Montagem::nova(Capa::default(), fotos.len());
+            for f in fotos {
+                m.adicionar(f.imagem, f.nome, f.levada, f.link);
+            }
+            m
+        };
+        let em_paralelo = {
+            let fotos = fotos_de_varios_tamanhos();
+            let mut m = Montagem::nova(Capa::default(), fotos.len());
+            for f in preparadas(fotos) {
+                m.adicionar(f.imagem, f.nome, f.levada, f.link);
+            }
+            m
+        };
+        assert_eq!(uma_por_vez.gasto, em_paralelo.gasto);
+        assert!(imagens(&uma_por_vez) == imagens(&em_paralelo));
     }
 }

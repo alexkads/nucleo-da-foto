@@ -1021,7 +1021,7 @@ fn endireitar_e_recortar(base: &DynamicImage, corte: &Corte) -> DynamicImage {
     let dados = origem.as_raw();
     let mut destino = vec![0u8; saida_w as usize * saida_h as usize * 4];
     por_linhas(&mut destino, saida_w as usize * 4, |j, linha| {
-        for (i, saida) in linha.chunks_exact_mut(4).enumerate() {
+        for (i, saida) in linha.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let fx = corte.x() + ((i as f32 + 0.5) / saida_w as f32) * corte.largura();
             let fy = corte.y() + ((j as f32 + 0.5) / saida_h as f32) * corte.altura();
 
@@ -1243,7 +1243,7 @@ pub fn inclinar_inteira(base: &DynamicImage, angulo: f32) -> DynamicImage {
     let dados = origem.as_raw();
     let mut destino = vec![0u8; largura as usize * altura as usize * 4];
     por_linhas(&mut destino, largura as usize * 4, |j, linha| {
-        for (i, saida) in linha.chunks_exact_mut(4).enumerate() {
+        for (i, saida) in linha.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let px = i as f32 + 0.5 - cx;
             let py = j as f32 + 0.5 - cy;
             let u = cx + px * cos - py * sin - 0.5;
