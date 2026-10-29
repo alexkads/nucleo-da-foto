@@ -42,7 +42,7 @@ exclude = ["vendor/rawler", "ferramentas/bancada"]
 # 🔑 Uma versão para o workspace inteiro, e é ela que vira a tag (`v0.1.0`).
 #    Semver de verdade: mudança que quebra quem consome sobe o menor enquanto o
 #    número for 0.x (0.1 → 0.2), e o patch é só correção e coisa nova compatível.
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["Recordar Fotos Estúdio"]
 license = "MIT"

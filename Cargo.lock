@@ -404,7 +404,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "conversao-web"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "console_error_panic_hook",
  "foto-codec",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "editor-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "image",
  "kurbo",
@@ -826,14 +826,14 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "foto-codec"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "image",
 ]
 
 [[package]]
 name = "fotolivro"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "foto-codec",
  "image",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "fotolivro-web"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "console_error_panic_hook",
  "foto-codec",
@@ -1279,7 +1279,7 @@ dependencies = [
 
 [[package]]
 name = "ia-local"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "directories",
  "ort",
@@ -2411,7 +2411,7 @@ checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "preenchimento"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "ia-local",
  "image",
@@ -2542,7 +2542,7 @@ checksum = "a611d15b50743feb4c76b7d03edcb0e64f399c26961e4efe6975bc398be6aa3d"
 
 [[package]]
 name = "raw-codec"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "image",
  "memchr",
@@ -2551,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "raw-web"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "console_error_panic_hook",
  "raw-codec",
@@ -2635,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "recuperacao-core"
-version = "0.1.2"
+version = "0.1.3"
 
 [[package]]
 name = "redox_syscall"
@@ -2664,7 +2664,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "revelacao-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "bytemuck",
  "foto-codec",
@@ -2681,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "revelacao-web"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "console_error_panic_hook",
  "foto-codec",
@@ -2781,9 +2781,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -3083,7 +3083,7 @@ checksum = "c1bbb9f3c5c463a01705937a24fdabc5047929ac764b2d5b9cf681c1f5041ed5"
 
 [[package]]
 name = "tela-do-cliente-web"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "bytemuck",
  "console_error_panic_hook",
@@ -3487,7 +3487,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visualizador-pdf"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "fotolivro",
  "hayro",
@@ -3578,18 +3578,18 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]

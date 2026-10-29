@@ -1,9 +1,9 @@
 # Changelog
 
-## Próxima (0.1.3) — ainda sem tag
+## v0.1.3 — 29/out/2026
 
 Sem mudança na foto que sai nem na API (`make semver`: nada pede versão nova). Cada caminho novo tem
-o teste que o compara byte a byte com o de antes.
+o teste que o compara byte a byte com o de antes. Troque a tag e compile.
 
 ### Desempenho
 Na bancada (`make bancada`, contra a v0.1.2), foto de 12 MP, 4 núcleos:
@@ -105,6 +105,9 @@ de antes contra a pasta, alternados, no M2 Pro (10 núcleos); cada caminho confe
   os mesmos JPEGs, na mesma ordem e com o mesmo gasto.
 
 ### Correção
+- **Segurança**: `rustls-webpki` 0.103.15 → 0.103.16, `webpki-roots` e `webpki-root-certs` 1.0.9 →
+  1.0.11 (RUSTSEC-2026-0381, -0382 e -0383: a raiz emSign ECC G3 desacreditada ainda era aceita;
+  chegam pelo `ia-local`, que baixa modelos). Só o `Cargo.lock`; nenhuma API muda.
 - Cinco `chunks_exact(4)` que o clippy do Rust 1.99 reprova (`editor-core/transformar.rs`,
   `revelacao-core/guia.rs` e `transformacao.rs`) viraram `as_chunks::<4>()`; o `make clippy`
   do `main` estava vermelho.
