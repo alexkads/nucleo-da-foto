@@ -6,8 +6,8 @@ tag, e que a foto que sai continua a mesma byte a byte.
 ![A bancada depois de rodar a foto de exemplo](janela.png)
 
 ```sh
-make bancada                 # da raiz do repositório: abre a janela
-make bancada-testar          # os testes da bancada (casos e janela, sem tela)
+cargo xtask bancada          # da raiz do repositório: abre a janela
+cargo xtask bancada-testar   # os testes da bancada (casos e janela, sem tela)
 
 # ou, daqui:
 cargo run --release                           # a janela
@@ -33,7 +33,7 @@ sentem igual. Os casos de RAW (revelar, procurar o XMP) só aparecem com um RAW 
 ## Por que ela fica fora do workspace do núcleo
 
 Os quatro apps consomem o núcleo por git com tag. A janela traz o GPUI e mais algumas centenas de
-crates, que não podem entrar no grafo deles, no `Cargo.lock` do núcleo nem no `make verificar`.
+crates, que não podem entrar no grafo deles, no `Cargo.lock` do núcleo nem nas checagens do núcleo (`cargo xtask`).
 Por isso a bancada tem o próprio `[workspace]` e o próprio `Cargo.lock`, e o `Cargo.toml` da raiz
 a lista em `exclude`.
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## Não lançado
+
+Nada muda para quem consome o núcleo: é só o jeito de conferir o repositório.
+
+### As checagens viram `cargo xtask` (#9)
+
+- O `make verificar` e o `Makefile` saem. As checagens são subcomandos do crate `xtask/`, um por
+  finalidade e sem argumentos: `cargo xtask dev` (enquanto se trabalha, só os pacotes alterados),
+  `cargo xtask pr` (o gate do PR: o que a mudança alcança) e `cargo xtask release` (o workspace
+  inteiro, e agora também o Rust mínimo e o semver crate a crate). Rodam igual no Windows.
+- Os testes passam a rodar no `cargo-nextest`, e os doctests pelo `cargo test --doc`.
+- O `scripts/faxina-se-preciso.sh` virou `cargo xtask faxina`, e as checagens o chamam no começo.
+
 ## v0.1.4 — 29/out/2026
 
 Sem mudança no arquivo que sai: só um caminho novo, para a tela. Troque a tag e compile.

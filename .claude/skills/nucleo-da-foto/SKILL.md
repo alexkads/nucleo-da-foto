@@ -63,8 +63,8 @@ Regras:
 2. Troque a tag em **todas** as linhas do núcleo no `Cargo.toml` do consumidor.
 3. `cargo update -p foto-codec` (ou de cada crate do núcleo) e compile.
 4. Faça as adaptações que o CHANGELOG pede.
-5. Rode a bateria do consumidor (`make testar` e `make lint` no desktop; `make api-test` e
-   `make api-lint` na plataforma).
+5. Rode a bateria do consumidor: `cargo xtask pr` no desktop e no backend da plataforma (de
+   `backend/`), na macpro. O `[patch]` local deles mora em `.cargo/local.toml`.
 6. Mudou o motor de revelação ou o codificador? Confira uma foto de verdade no app: o que o teste não
    pega, o olho pega.
 7. Se o consumidor tem wasm do núcleo no site, regenere com os scripts da tag nova e commite os
@@ -98,7 +98,7 @@ Compilar só com o `[patch]` ligado esconde que a tag não tem a mudança.
 - Rode a bateria inteira antes de começar, para saber que o vermelho, se vier, é seu:
 
 ```sh
-make verificar   # fmt, clippy nativo e wasm32, testes e doc-tests, doc -D warnings, cargo deny
+cargo xtask dev   # fmt, e clippy e testes dos pacotes alterados (o pr e o release vão na macpro)
 ```
 
 ### O que a casa exige de toda mudança
@@ -108,7 +108,7 @@ make verificar   # fmt, clippy nativo e wasm32, testes e doc-tests, doc -D warni
 - **Teste junto.** Mudança de comportamento vem com o teste que falha sem ela. Leitura de arquivo
   (RAW, JPEG, PDF, cartão) tem teste de arquivo cortado e torto: erro, nunca pânico — no site o
   wasm roda com `panic = "abort"`, e um pânico derruba o módulo inteiro.
-- **Cobertura com piso.** `make cobertura` falha abaixo de 90 % de linhas (sem o `vendor/`).
+- **Cobertura com piso.** `cargo xtask cobertura` falha abaixo de 90 % de linhas (sem o `vendor/`).
 - **Os `*-web` são cascas.** A lógica deles mora num módulo que compila em nativo (`contrato.rs`,
   ou uma função privada que devolve `Result<_, String>`) e é testada ali; o `#[wasm_bindgen]` só
   converte o erro em `JsValue`. O que exige WebGPU ou canvas fica no módulo `wasm32`.
@@ -146,7 +146,7 @@ Na dúvida entre patch e menor, é menor.
 
 ```sh
 cargo install cargo-semver-checks --locked   # uma vez
-make semver          # cada crate contra a última tag
+cargo xtask release   # entre outras coisas, cada crate contra a última tag
 ```
 
 Ele pega remoção, assinatura e `#[non_exhaustive]`; não pega mudança de comportamento nem a API
@@ -169,7 +169,7 @@ JavaScript dos `*-web`. Essas duas são revisão humana.
 
 ### Lançar uma versão
 
-1. `make verificar`, `make cobertura` e `make semver` verdes.
+1. `cargo xtask release` e `cargo xtask cobertura` verdes.
 2. Suba `version` em `[workspace.package]` do `Cargo.toml` (uma versão para o workspace inteiro).
 3. Escreva a entrada no topo do `CHANGELOG.md`:
 
@@ -211,6 +211,6 @@ JavaScript dos `*-web`. Essas duas são revisão humana.
   existe para evitar.
 - Não deixar `[patch]` local num commit de nenhum consumidor.
 - Não usar `branch` nem `path` versionado para o núcleo.
-- Não lançar sem `make verificar` inteiro, inclusive o `wasm32`.
+- Não lançar sem `cargo xtask release` inteiro, inclusive o `wasm32`.
 - Não mexer em tag publicada.
 - Não trocar a tag do núcleo nos projetos do RecordarFotos sem o dono pedir.

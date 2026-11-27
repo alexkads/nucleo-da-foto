@@ -1,6 +1,7 @@
-# cargo-deny: o que entra no núcleo pela árvore de dependências (`make deny`).
+# cargo-deny: o que entra no núcleo pela árvore de dependências (`cargo deny check`).
 #
-# Três perguntas, conferidas a cada `make verificar`:
+# Três perguntas, conferidas no `cargo xtask release`, e no `cargo xtask pr` quando o
+# `Cargo.lock` ou este arquivo mudam:
 # - **Licenças**: só as permissivas, mais as exceções escritas e explicadas.
 # - **Vulnerabilidades**: o banco do RustSec (`advisories`).
 # - **Fontes**: só o crates.io — nada de git solto.
