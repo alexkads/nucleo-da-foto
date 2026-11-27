@@ -1,0 +1,4 @@
+# `cargo xtask <tarefa>`: as checagens do núcleo, um subcomando por finalidade (#9).
+# `cargo xtask` sem nada lista as tarefas.
+[alias]
+xtask = "run -q -p xtask --"

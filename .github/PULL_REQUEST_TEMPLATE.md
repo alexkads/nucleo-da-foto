@@ -4,7 +4,7 @@ Closes #
 
 ## Como foi testado
 
-- [ ] Comandos de verificação do repositório passam (ver `CLAUDE.md` / `Makefile`)
+- [ ] `cargo xtask pr` passa (o tempo de cada etapa sai na tabela do fim)
 - [ ] Mudança de comportamento tem teste novo
 - [ ] Docs atualizadas onde for o caso
 

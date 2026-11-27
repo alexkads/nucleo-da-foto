@@ -31,10 +31,12 @@ members = [
     "crates/raw-web",
     "crates/revelacao-web",
     "crates/tela-do-cliente-web",
+    # As checagens: `cargo xtask dev`, `pr` e `release` (.cargo/config.toml).
+    "xtask",
 ]
 # O rawler vendorizado (o RAW em Rust puro, com o DNG com perdas) é dependência
 # por caminho do `raw-codec`, não membro: os testes dele pedem dev-dependências
-# que não vieram junto. A bancada (`make bancada`) tem o próprio workspace: a
+# que não vieram junto. A bancada (`cargo xtask bancada`) tem o próprio workspace: a
 # janela dela (GPUI) não pode entrar no grafo de quem consome o núcleo.
 exclude = ["vendor/rawler", "ferramentas/bancada"]
 

@@ -65,8 +65,8 @@ Pronta a mudança, lança-se a tag aqui e o app troca a tag no `Cargo.toml` — 
 
 ## Lançar uma versão
 
-1. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-   `cargo test --workspace` e `cargo check --target wasm32-unknown-unknown -p conversao-web -p fotolivro-web -p raw-web -p revelacao-web -p tela-do-cliente-web`.
+1. `cargo xtask release` verde: o workspace inteiro, com wasm32, `cargo deny`, o Rust mínimo e a API
+   pública de cada crate contra a última tag.
 2. Subir `version` em `[workspace.package]` e escrever a entrada no `CHANGELOG.md`.
 3. Commit, `git tag vX.Y.Z`, `git push origin main vX.Y.Z`.
 
@@ -81,7 +81,8 @@ receber como argumento (`scripts/construir-fotolivro.sh ../photokads-plataforma/
 
 ## Qualidade
 
-`make verificar` é o portão de toda mudança e de todo lançamento:
+As checagens são subcomandos do `cargo xtask` (ver `CONTRIBUTING.md`): `cargo xtask dev` enquanto se
+trabalha, `cargo xtask pr` no PR e `cargo xtask release` antes de lançar. O `release` cobre tudo:
 
 | Etapa | O que garante |
 |---|---|
@@ -93,10 +94,10 @@ receber como argumento (`scripts/construir-fotolivro.sh ../photokads-plataforma/
 
 Além dele:
 
-- `make cobertura` — cobertura por arquivo (`cargo llvm-cov`), com **piso de 90 % de linhas** sem
+- `cargo xtask cobertura` — cobertura por arquivo (`cargo llvm-cov`), com **piso de 90 % de linhas** sem
   o `vendor/` (hoje 94 %);
-- `make semver` — a API pública de cada crate contra a última tag (`cargo semver-checks`);
-- `make msrv` — compila com o Rust mínimo declarado.
+- no `release`, a API pública de cada crate contra a última tag (`cargo semver-checks`) e a compilação
+  com o Rust mínimo declarado.
 
 Regras que o compilador cobra: todo item público documentado (`#![deny(missing_docs)]` em todo
 crate) e nenhum `unsafe`. As que a revisão cobra: mudança vem com o teste que falha sem ela, e
