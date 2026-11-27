@@ -40,11 +40,13 @@ Subir de versão é trocar a tag, compilar e rodar os testes de quem consome.
 
 ## Desenvolver junto com o app
 
-Para mexer no núcleo e ver no app sem lançar tag, um `[patch]` **local e fora do git** no app — um
-`.cargo/config.toml` ao lado do `Cargo.toml` dele, que o `.gitignore` do app ignora:
+Para mexer no núcleo e ver no app sem lançar tag, um `[patch]` **local e fora do git** no app. No
+photokads-desktop e no backend da plataforma ele vai em `.cargo/local.toml`, que o `.gitignore`
+ignora: o `.cargo/config.toml` deles é versionado (o alias do `cargo xtask`) e inclui o `local.toml`.
+No VintageLightbox, é o próprio `.cargo/config.toml`, que o `.gitignore` de lá ignora:
 
 ```toml
-# ~/Projects/PhotoKads/photokads-desktop/.cargo/config.toml
+# ~/Projects/PhotoKads/photokads-desktop/.cargo/local.toml
 [patch."https://github.com/alexkads/nucleo-da-foto"]
 foto-codec     = { path = "../nucleo-da-foto/crates/foto-codec" }
 revelacao-core = { path = "../nucleo-da-foto/crates/revelacao-core" }

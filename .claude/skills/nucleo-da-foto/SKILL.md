@@ -63,8 +63,8 @@ Regras:
 2. Troque a tag em **todas** as linhas do núcleo no `Cargo.toml` do consumidor.
 3. `cargo update -p foto-codec` (ou de cada crate do núcleo) e compile.
 4. Faça as adaptações que o CHANGELOG pede.
-5. Rode a bateria do consumidor (`make testar` e `make lint` no desktop; `make api-test` e
-   `make api-lint` na plataforma).
+5. Rode a bateria do consumidor: `cargo xtask pr` no desktop e no backend da plataforma (de
+   `backend/`), na macpro. O `[patch]` local deles mora em `.cargo/local.toml`.
 6. Mudou o motor de revelação ou o codificador? Confira uma foto de verdade no app: o que o teste não
    pega, o olho pega.
 7. Se o consumidor tem wasm do núcleo no site, regenere com os scripts da tag nova e commite os
